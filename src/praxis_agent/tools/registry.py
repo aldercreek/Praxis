@@ -1,4 +1,5 @@
 from collections.abc import Callable, Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from inspect import signature
 from pathlib import Path
@@ -15,13 +16,114 @@ from praxis_agent.tools.filesystem import (
 ToolHandler = Callable[..., str]
 
 
+# parameters 使用 JSON Schema 约束模型生成的工具参数。
+_READ_FILE_PARAMETERS: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "relative_path": {
+            "type": "string",
+            "description": "Path to read, relative to the workspace root.",
+        }
+    },
+    "required": ["relative_path"],
+    "additionalProperties": False,
+}
+
+_REPLACE_TEXT_PARAMETERS: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "relative_path": {
+            "type": "string",
+            "description": "Path to edit, relative to the workspace root.",
+        },
+        "old_text": {
+            "type": "string",
+            "description": "Exact text that must occur once in the file.",
+        },
+        "new_text": {
+            "type": "string",
+            "description": "Replacement text.",
+        },
+    },
+    "required": ["relative_path", "old_text", "new_text"],
+    "additionalProperties": False,
+}
+
+_CREATE_FILE_PARAMETERS: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "relative_path": {
+            "type": "string",
+            "description": "New file path, relative to the workspace root.",
+        },
+        "content": {
+            "type": "string",
+            "description": "Complete UTF-8 text content for the new file.",
+        },
+    },
+    "required": ["relative_path", "content"],
+    "additionalProperties": False,
+}
+
+_LIST_FILES_PARAMETERS: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "relative_path": {
+            "type": "string",
+            "description": "Directory or file path relative to the workspace root. Use '.' for the whole workspace.",
+        },
+        "max_entries": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Maximum number of file paths to return.",
+        },
+    },
+    "required": ["relative_path", "max_entries"],
+    "additionalProperties": False,
+}
+
+_SEARCH_TEXT_PARAMETERS: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "query": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Case-sensitive fixed text to find.",
+        },
+        "relative_path": {
+            "type": "string",
+            "description": "Directory or file path relative to the workspace root. Use '.' for the whole workspace.",
+        },
+        "max_results": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Maximum number of matching lines to return.",
+        },
+    },
+    "required": ["query", "relative_path", "max_results"],
+    "additionalProperties": False,
+}
+
+
 @dataclass(frozen=True, slots=True)
 class Tool:
     """描述一个可以由 Agent 运行时执行的具名函数。"""
 
     name: str
     description: str
+    parameters: dict[str, object]
     handler: ToolHandler
+
+    def to_definition(self) -> dict[str, object]:
+        """返回可以直接传给模型 API 的工具定义。"""
+        return {
+            "type": "function",
+            "name": self.name,
+            "description": self.description,
+            # 返回副本，避免调用方修改注册表内部保存的 Schema。
+            "parameters": deepcopy(self.parameters),
+            "strict": True,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +154,10 @@ class ToolRegistry:
     def tools(self) -> tuple[Tool, ...]:
         """按照注册顺序返回工具元数据。"""
         return tuple(self._tools.values())
+
+    def definitions(self) -> list[dict[str, object]]:
+        """按照注册顺序返回全部模型工具定义。"""
+        return [tool.to_definition() for tool in self._tools.values()]
 
     def register(self, tool: Tool) -> None:
         """注册一个工具，并拒绝重复的工具名称。"""
@@ -86,21 +192,44 @@ class ToolRegistry:
 def create_default_registry(workspace: Path) -> ToolRegistry:
     """创建包含全部内置文件系统工具的注册表。"""
     registry = ToolRegistry(workspace)
-    registry.register(Tool("read_file", "Read a UTF-8 workspace file.", read_file))
     registry.register(
         Tool(
-            "replace_text",
-            "Replace one exact text match in an existing workspace file.",
-            replace_text,
+            name="read_file",
+            description="Read a UTF-8 workspace file.",
+            parameters=_READ_FILE_PARAMETERS,
+            handler=read_file,
         )
     )
     registry.register(
-        Tool("create_file", "Create a new UTF-8 workspace file.", create_file)
+        Tool(
+            name="replace_text",
+            description="Replace one exact text match in an existing workspace file.",
+            parameters=_REPLACE_TEXT_PARAMETERS,
+            handler=replace_text,
+        )
     )
     registry.register(
-        Tool("list_files", "List files under a workspace path.", list_files)
+        Tool(
+            name="create_file",
+            description="Create a new UTF-8 workspace file.",
+            parameters=_CREATE_FILE_PARAMETERS,
+            handler=create_file,
+        )
     )
     registry.register(
-        Tool("search_text", "Search workspace text files.", search_text)
+        Tool(
+            name="list_files",
+            description="List files under a workspace path.",
+            parameters=_LIST_FILES_PARAMETERS,
+            handler=list_files,
+        )
+    )
+    registry.register(
+        Tool(
+            name="search_text",
+            description="Search workspace text files.",
+            parameters=_SEARCH_TEXT_PARAMETERS,
+            handler=search_text,
+        )
     )
     return registry
