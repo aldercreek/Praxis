@@ -1,7 +1,9 @@
 import argparse
 from collections.abc import Sequence
+from pathlib import Path
 
-from praxis_agent.agent import Agent
+from praxis_agent.agent import AgentError, create_default_agent
+from praxis_agent.model import ModelClientError
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -21,10 +23,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         task = input("praxis> ").strip()
 
     try:
-        print(Agent().run(task))
-    except ValueError as error:
+        agent = create_default_agent(Path.cwd())
+        print(agent.run(task))
+    except (AgentError, ModelClientError, ValueError) as error:
         print(f"error: {error}")
         return 1
 
     return 0
-

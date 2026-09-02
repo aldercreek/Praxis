@@ -1,9 +1,18 @@
 from praxis_agent.cli import main
 
 
-def test_cli_runs_a_task(capsys) -> None:
+class FakeAgent:
+    def run(self, task: str) -> str:
+        return f"completed: {task}"
+
+
+def test_cli_runs_a_task(capsys, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "praxis_agent.cli.create_default_agent",
+        lambda workspace: FakeAgent(),
+    )
+
     exit_code = main(["inspect", "repository"])
 
     assert exit_code == 0
-    assert capsys.readouterr().out == "Praxis received: inspect repository\n"
-
+    assert capsys.readouterr().out == "completed: inspect repository\n"
