@@ -16,6 +16,44 @@ def test_default_registry_contains_all_filesystem_tools(tmp_path: Path) -> None:
     assert registry.tools[0].description == "Read a UTF-8 workspace file."
 
 
+def test_registry_returns_model_tool_definitions(tmp_path: Path) -> None:
+    registry = create_default_registry(tmp_path)
+
+    definitions = registry.definitions()
+
+    assert [definition["name"] for definition in definitions] == list(
+        registry.names
+    )
+    assert definitions[0] == {
+        "type": "function",
+        "name": "read_file",
+        "description": "Read a UTF-8 workspace file.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "relative_path": {
+                    "type": "string",
+                    "description": "Path to read, relative to the workspace root.",
+                }
+            },
+            "required": ["relative_path"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    }
+
+
+def test_registry_returns_new_parameter_schema_copies(tmp_path: Path) -> None:
+    registry = create_default_registry(tmp_path)
+
+    first_definitions = registry.definitions()
+    first_definitions[0]["parameters"]["required"].clear()
+
+    second_definitions = registry.definitions()
+
+    assert second_definitions[0]["parameters"]["required"] == ["relative_path"]
+
+
 def test_registry_executes_a_tool_with_its_workspace(tmp_path: Path) -> None:
     source_file = tmp_path / "notes.txt"
     source_file.write_text("hello\n", encoding="utf-8")
