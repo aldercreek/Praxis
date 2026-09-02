@@ -3,8 +3,6 @@ from dataclasses import dataclass
 
 @dataclass(slots=True)
 class Agent:
-    """Minimal agent shell that will later coordinate a model and tools."""
-
     name: str = "Praxis"
 
     def run(self, task: str) -> str:
