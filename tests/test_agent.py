@@ -55,6 +55,50 @@ def test_agent_returns_the_models_final_text(tmp_path: Path) -> None:
     assert len(model_client.tools[0]) == 6
 
 
+def test_agent_keeps_history_between_tasks(tmp_path: Path) -> None:
+    first_output_item = {
+        "type": "message",
+        "role": "assistant",
+        "content": "First response",
+    }
+    agent, model_client = _agent(
+        tmp_path,
+        [
+            ModelResponse((first_output_item,), "First response", ()),
+            ModelResponse((), "Second response", ()),
+        ],
+    )
+
+    agent.run("first task")
+    result = agent.run("follow-up task")
+
+    assert result == "Second response"
+    assert model_client.inputs[1] == [
+        {"role": "user", "content": "first task"},
+        first_output_item,
+        {"role": "user", "content": "follow-up task"},
+    ]
+
+
+def test_agent_can_clear_history(tmp_path: Path) -> None:
+    agent, model_client = _agent(
+        tmp_path,
+        [
+            ModelResponse((), "First response", ()),
+            ModelResponse((), "Fresh response", ()),
+        ],
+    )
+
+    agent.run("first task")
+    agent.clear_history()
+    result = agent.run("fresh task")
+
+    assert result == "Fresh response"
+    assert model_client.inputs[1] == [
+        {"role": "user", "content": "fresh task"}
+    ]
+
+
 def test_agent_rejects_an_empty_task(tmp_path: Path) -> None:
     agent, _ = _agent(tmp_path, [])
 
