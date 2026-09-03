@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from inspect import signature
 from pathlib import Path
 
+from praxis_agent.tools.command import run_command
 from praxis_agent.tools.filesystem import (
     create_file,
     list_files,
@@ -104,6 +105,36 @@ _SEARCH_TEXT_PARAMETERS: dict[str, object] = {
     "additionalProperties": False,
 }
 
+_RUN_COMMAND_PARAMETERS: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "argv": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "minItems": 1,
+            "description": (
+                "Command and arguments as separate strings. "
+                "Do not use shell syntax such as pipes or redirects."
+            ),
+        },
+        "relative_path": {
+            "type": "string",
+            "description": (
+                "Working directory relative to the workspace root. "
+                "Use '.' for the workspace root."
+            ),
+        },
+        "timeout_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 120,
+            "description": "Maximum number of seconds to wait.",
+        },
+    },
+    "required": ["argv", "relative_path", "timeout_seconds"],
+    "additionalProperties": False,
+}
+
 
 @dataclass(frozen=True, slots=True)
 class Tool:
@@ -113,6 +144,7 @@ class Tool:
     description: str
     parameters: dict[str, object]
     handler: ToolHandler
+    requires_approval: bool = False
 
     def to_definition(self) -> dict[str, object]:
         """返回可以直接传给模型 API 的工具定义。"""
@@ -164,6 +196,11 @@ class ToolRegistry:
         if tool.name in self._tools:
             raise ValueError(f"tool is already registered: {tool.name}")
         self._tools[tool.name] = tool
+
+    def requires_approval(self, name: str) -> bool:
+        """返回指定工具是否必须获得用户确认。"""
+        tool = self._tools.get(name)
+        return tool.requires_approval if tool is not None else False
 
     def execute(
         self,
@@ -230,6 +267,18 @@ def create_default_registry(workspace: Path) -> ToolRegistry:
             description="Search workspace text files.",
             parameters=_SEARCH_TEXT_PARAMETERS,
             handler=search_text,
+        )
+    )
+    registry.register(
+        Tool(
+            name="run_command",
+            description=(
+                "Run a non-interactive command inside the workspace and "
+                "return its exit code, stdout, and stderr."
+            ),
+            parameters=_RUN_COMMAND_PARAMETERS,
+            handler=run_command,
+            requires_approval=True,
         )
     )
     return registry

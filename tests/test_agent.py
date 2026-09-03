@@ -52,7 +52,7 @@ def test_agent_returns_the_models_final_text(tmp_path: Path) -> None:
     assert model_client.inputs == [
         [{"role": "user", "content": "inspect repository"}]
     ]
-    assert len(model_client.tools[0]) == 5
+    assert len(model_client.tools[0]) == 6
 
 
 def test_agent_rejects_an_empty_task(tmp_path: Path) -> None:
@@ -158,6 +158,54 @@ def test_agent_returns_invalid_arguments_to_the_model(tmp_path: Path) -> None:
     decoded_output = json.loads(tool_output["output"])
     assert decoded_output["success"] is False
     assert decoded_output["output"].startswith("invalid JSON arguments:")
+
+
+def test_agent_asks_for_approval_and_respects_a_decline(
+    tmp_path: Path,
+) -> None:
+    tool_calls: list[str] = []
+    tool_results: list[tuple[str, bool]] = []
+    approval_requests: list[str] = []
+
+    def decline_command(name: str, arguments: object) -> bool:
+        del arguments
+        approval_requests.append(name)
+        return False
+
+    agent, model_client = _agent(
+        tmp_path,
+        [
+            ModelResponse(
+                output_items=(),
+                output_text="",
+                function_calls=(
+                    FunctionCall(
+                        "call-1",
+                        "run_command",
+                        '{"argv":["not-a-real-command"],'
+                        '"relative_path":".","timeout_seconds":10}',
+                    ),
+                ),
+            ),
+            ModelResponse((), "Command was not run.", ()),
+        ],
+    )
+    agent.on_tool_call = lambda name, arguments: tool_calls.append(name)
+    agent.on_tool_result = lambda name, result: tool_results.append(
+        (name, result.success)
+    )
+    agent.approve_tool_call = decline_command
+
+    result = agent.run("run a command")
+
+    assert result == "Command was not run."
+    assert tool_calls == ["run_command"]
+    assert approval_requests == ["run_command"]
+    assert tool_results == [("run_command", False)]
+    tool_output = model_client.inputs[1][-1]
+    decoded_output = json.loads(tool_output["output"])
+    assert decoded_output["success"] is False
+    assert "declined by the user" in decoded_output["output"]
 
 
 def test_agent_stops_after_the_maximum_number_of_turns(

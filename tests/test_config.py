@@ -6,9 +6,9 @@ from praxis_agent.config import ModelConfig
 def test_model_config_loads_environment_values() -> None:
     config = ModelConfig.from_env(
         {
-            "OPENAI_API_KEY": "secret-key",
-            "PRAXIS_MODEL": "example-model",
-            "OPENAI_BASE_URL": "https://example.com/v1",
+            "ADA_API_KEY": "secret-key",
+            "ADA_MODEL": "example-model",
+            "ADA_BASE_URL": "https://example.com/v1",
         }
     )
 
@@ -17,28 +17,35 @@ def test_model_config_loads_environment_values() -> None:
     assert config.base_url == "https://example.com/v1"
 
 
-def test_model_config_treats_empty_base_url_as_missing() -> None:
+def test_model_config_uses_ada_defaults() -> None:
+    config = ModelConfig.from_env({"ADA_API_KEY": "secret-key"})
+
+    assert config.model == "gpt-5.6-terra-2026-07-09"
+    assert (
+        config.base_url
+        == "https://ada-cli-go.ctripcorp.com/coding-plan/openai/v1"
+    )
+
+
+def test_model_config_uses_defaults_for_empty_overrides() -> None:
     config = ModelConfig.from_env(
         {
-            "OPENAI_API_KEY": "secret-key",
-            "PRAXIS_MODEL": "example-model",
-            "OPENAI_BASE_URL": "   ",
+            "ADA_API_KEY": "secret-key",
+            "ADA_MODEL": "   ",
+            "ADA_BASE_URL": "   ",
         }
     )
 
-    assert config.base_url is None
+    assert config.model == "gpt-5.6-terra-2026-07-09"
+    assert (
+        config.base_url
+        == "https://ada-cli-go.ctripcorp.com/coding-plan/openai/v1"
+    )
 
 
-@pytest.mark.parametrize("missing_name", ["OPENAI_API_KEY", "PRAXIS_MODEL"])
-def test_model_config_requires_environment_values(missing_name: str) -> None:
-    environ = {
-        "OPENAI_API_KEY": "secret-key",
-        "PRAXIS_MODEL": "example-model",
-    }
-    del environ[missing_name]
-
-    with pytest.raises(ValueError, match=missing_name):
-        ModelConfig.from_env(environ)
+def test_model_config_requires_ada_api_key() -> None:
+    with pytest.raises(ValueError, match="ADA_API_KEY"):
+        ModelConfig.from_env({})
 
 
 def test_model_config_repr_hides_api_key() -> None:
