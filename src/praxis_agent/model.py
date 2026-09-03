@@ -5,16 +5,7 @@ from typing import Protocol
 from openai import OpenAI, OpenAIError
 
 from praxis_agent.config import ModelConfig
-
-
-_DEFAULT_INSTRUCTIONS = """You are Praxis, a coding agent working in a local workspace.
-Use the provided tools to inspect and modify files when needed.
-All tool paths must be relative to the workspace root.
-After modifying code, run relevant checks when they are available.
-Do not retry a command that the user declined.
-Do not claim that you changed or inspected something unless a tool result confirms it.
-When the task is complete, give a concise summary of the result.
-"""
+from praxis_agent.prompts import BASE_INSTRUCTIONS
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,7 +48,7 @@ class OpenAIModelClient:
     def __init__(
         self,
         config: ModelConfig,
-        instructions: str = _DEFAULT_INSTRUCTIONS,
+        instructions: str = BASE_INSTRUCTIONS,
     ) -> None:
         client_options: dict[str, object] = {"api_key": config.api_key}
         if config.base_url is not None:
