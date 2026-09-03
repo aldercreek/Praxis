@@ -9,6 +9,8 @@ from praxis_agent.model import (
     ModelClient,
     OpenAIModelClient,
 )
+from praxis_agent.prompts import build_instructions
+from praxis_agent.runtime import collect_runtime_context
 from praxis_agent.tools import ToolRegistry, ToolResult, create_default_registry
 
 
@@ -145,9 +147,13 @@ def create_default_agent(
 ) -> Agent:
     """使用环境配置和内置文件工具创建默认 Agent。"""
     config = ModelConfig.from_env()
+    runtime_context = collect_runtime_context(workspace)
     return Agent(
-        model_client=OpenAIModelClient(config),
-        tool_registry=create_default_registry(workspace),
+        model_client=OpenAIModelClient(
+            config,
+            instructions=build_instructions(runtime_context),
+        ),
+        tool_registry=create_default_registry(runtime_context.workspace_root),
         on_tool_call=on_tool_call,
         on_tool_result=on_tool_result,
         approve_tool_call=approve_tool_call,

@@ -32,6 +32,10 @@ $env:ADA_MODEL = "gpt-5.6-sol-2026-07-09"
 $env:ADA_BASE_URL = "https://ada-cli-go.ctripcorp.com/coding-plan/openai/v1"
 ```
 
+At startup, Praxis tells the model only the operating system, resolved
+workspace root, and which common shells are available or unavailable. It does
+not send environment-variable values or the full system `PATH`.
+
 ## Run
 
 Pass a task directly. Praxis can inspect and modify files under the current

@@ -36,7 +36,8 @@ def test_openai_model_client_builds_and_parses_a_response(monkeypatch) -> None:
             api_key="secret-key",
             model="example-model",
             base_url="https://example.com/v1",
-        )
+        ),
+        instructions="custom instructions",
     )
 
     response = client.create_response(
@@ -49,6 +50,10 @@ def test_openai_model_client_builds_and_parses_a_response(monkeypatch) -> None:
         "base_url": "https://example.com/v1",
     }
     assert sdk_client.responses.arguments["model"] == "example-model"
+    assert (
+        sdk_client.responses.arguments["instructions"]
+        == "custom instructions"
+    )
     assert response.function_calls[0].name == "read_file"
     assert response.function_calls[0].call_id == "call-1"
 
