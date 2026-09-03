@@ -1,4 +1,5 @@
 import json
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -8,7 +9,12 @@ from praxis_agent.model import (
     ModelClient,
     OpenAIModelClient,
 )
-from praxis_agent.tools import ToolRegistry, create_default_registry
+from praxis_agent.tools import ToolRegistry, ToolResult, create_default_registry
+
+
+ToolCallObserver = Callable[[str, Mapping[str, object]], None]
+ToolResultObserver = Callable[[str, ToolResult], None]
+ToolApprovalHandler = Callable[[str, Mapping[str, object]], bool]
 
 
 class AgentError(RuntimeError):
@@ -21,6 +27,9 @@ class Agent:
     tool_registry: ToolRegistry
     max_turns: int = 30
     name: str = "Praxis"
+    on_tool_call: ToolCallObserver | None = None
+    on_tool_result: ToolResultObserver | None = None
+    approve_tool_call: ToolApprovalHandler | None = None
 
     def __post_init__(self) -> None:
         if self.max_turns < 1:
@@ -80,7 +89,33 @@ class Agent:
                 "tool arguments must be a JSON object",
             )
 
-        result = self.tool_registry.execute(function_call.name, arguments)
+        if self.on_tool_call is not None:
+            self.on_tool_call(function_call.name, arguments)
+
+        if self.tool_registry.requires_approval(function_call.name):
+            if self.approve_tool_call is None:
+                result = ToolResult(
+                    False,
+                    "tool execution requires user approval",
+                )
+            elif not self.approve_tool_call(function_call.name, arguments):
+                result = ToolResult(
+                    False,
+                    "tool execution was declined by the user; do not retry",
+                )
+            else:
+                result = self.tool_registry.execute(
+                    function_call.name,
+                    arguments,
+                )
+        else:
+            result = self.tool_registry.execute(
+                function_call.name,
+                arguments,
+            )
+
+        if self.on_tool_result is not None:
+            self.on_tool_result(function_call.name, result)
         return _encode_tool_result(result.success, result.output)
 
 
@@ -92,10 +127,19 @@ def _encode_tool_result(success: bool, output: str) -> str:
     )
 
 
-def create_default_agent(workspace: Path) -> Agent:
+def create_default_agent(
+    workspace: Path,
+    *,
+    on_tool_call: ToolCallObserver | None = None,
+    on_tool_result: ToolResultObserver | None = None,
+    approve_tool_call: ToolApprovalHandler | None = None,
+) -> Agent:
     """使用环境配置和内置文件工具创建默认 Agent。"""
     config = ModelConfig.from_env()
     return Agent(
         model_client=OpenAIModelClient(config),
         tool_registry=create_default_registry(workspace),
+        on_tool_call=on_tool_call,
+        on_tool_result=on_tool_result,
+        approve_tool_call=approve_tool_call,
     )

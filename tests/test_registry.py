@@ -12,8 +12,10 @@ def test_default_registry_contains_all_filesystem_tools(tmp_path: Path) -> None:
         "create_file",
         "list_files",
         "search_text",
+        "run_command",
     )
     assert registry.tools[0].description == "Read a UTF-8 workspace file."
+    assert registry.tools[-1].requires_approval is True
 
 
 def test_registry_returns_model_tool_definitions(tmp_path: Path) -> None:

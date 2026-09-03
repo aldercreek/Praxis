@@ -9,7 +9,7 @@ class FakeAgent:
 def test_cli_runs_a_task(capsys, monkeypatch) -> None:
     monkeypatch.setattr(
         "praxis_agent.cli.create_default_agent",
-        lambda workspace: FakeAgent(),
+        lambda workspace, **callbacks: FakeAgent(),
     )
 
     exit_code = main(["inspect", "repository"])

@@ -1,5 +1,6 @@
 """Praxis Agent 可用的工具。"""
 
+from praxis_agent.tools.command import run_command
 from praxis_agent.tools.filesystem import (
     create_file,
     list_files,
@@ -24,5 +25,6 @@ __all__ = [
     "list_files",
     "read_file",
     "replace_text",
+    "run_command",
     "search_text",
 ]

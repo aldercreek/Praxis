@@ -16,24 +16,40 @@ Install the project and its development dependencies:
 python -m pip install -e ".[dev]"
 ```
 
-Configure the model client in the current PowerShell session:
+Praxis reads the existing ADA API key directly. If it is already configured in
+Windows, no additional setup is needed. To set it for the current PowerShell
+session:
 
 ```powershell
-$env:OPENAI_API_KEY = "your-api-key"
-$env:PRAXIS_MODEL = "your-model"
+$env:ADA_API_KEY = "your-coding-plan-token"
+```
 
-# Only set this when using an OpenAI-compatible gateway.
-$env:OPENAI_BASE_URL = "https://your-gateway.example.com"
+Praxis uses the ADA gateway and `gpt-5.6-terra-2026-07-09` by default. These
+optional variables can override either value:
+
+```powershell
+$env:ADA_MODEL = "gpt-5.6-sol-2026-07-09"
+$env:ADA_BASE_URL = "https://ada-cli-go.ctripcorp.com/coding-plan/openai/v1"
 ```
 
 ## Run
 
 Pass a task directly. Praxis can inspect and modify files under the current
-directory through its registered tools:
+directory through its registered tools. Tool calls are shown in the terminal.
+Commands require confirmation before they run:
 
 ```powershell
 praxis "inspect this repository"
 ```
+
+For example, Praxis can run tests after changing code:
+
+```powershell
+praxis "run the tests, analyze any failures, and fix them"
+```
+
+When `run_command` is requested, review the displayed argument list and enter
+`y` to allow it. Any other answer declines the command.
 
 Or start it without an argument and enter one task when prompted:
 
