@@ -51,11 +51,25 @@ praxis "run the tests, analyze any failures, and fix them"
 When `run_command` is requested, review the displayed argument list and enter
 `y` to allow it. Any other answer declines the command.
 
-Or start it without an argument and enter one task when prompted:
+Start it without an argument to keep a conversation in the current process:
 
 ```powershell
 praxis
 ```
+
+In interactive mode, each new task includes the earlier conversation and tool
+results. Use `/clear` to start a fresh conversation and `/exit` to leave:
+
+```text
+praxis> inspect config.py
+praxis> explain the previous result in more detail
+praxis> /clear
+Conversation cleared.
+praxis> /exit
+```
+
+Conversation history is currently kept only in memory and disappears when the
+Praxis process exits.
 
 ## Test
 
