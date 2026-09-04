@@ -1,7 +1,7 @@
 import json
 from collections.abc import Mapping
 
-from praxis_agent.tools import ToolResult
+from praxis_agent.events import AgentEvent, ToolCallPrepared, ToolFinished
 
 
 _MAX_ARGUMENT_DISPLAY_CHARS = 500
@@ -20,30 +20,33 @@ def _truncate_for_display(text: str, max_chars: int) -> str:
     )
 
 
-def show_tool_call(
-    name: str,
-    arguments: Mapping[str, object],
-) -> None:
-    """在终端展示模型准备调用的工具和参数。"""
-    encoded_arguments = json.dumps(dict(arguments), ensure_ascii=False)
-    visible_arguments = _truncate_for_display(
-        encoded_arguments,
-        _MAX_ARGUMENT_DISPLAY_CHARS,
-    )
-    print(f"[tool] {name} {visible_arguments}")
+class ConsoleRenderer:
+    """把 Agent 事件转换成当前版本的终端文本。"""
 
-
-def show_tool_result(name: str, result: ToolResult) -> None:
-    """展示工具状态；命令工具还会展示受限长度的运行输出。"""
-    status = "ok" if result.success else "error"
-    print(f"[tool:{status}] {name}")
-    if name == "run_command":
-        print(
-            _truncate_for_display(
-                result.output,
-                _MAX_RESULT_DISPLAY_CHARS,
+    def emit(self, event: AgentEvent) -> None:
+        """只展示工具事件，其他事件先作为扩展点保留。"""
+        if isinstance(event, ToolCallPrepared):
+            encoded_arguments = json.dumps(
+                dict(event.arguments),
+                ensure_ascii=False,
             )
-        )
+            visible_arguments = _truncate_for_display(
+                encoded_arguments,
+                _MAX_ARGUMENT_DISPLAY_CHARS,
+            )
+            print(f"[tool] {event.tool_name} {visible_arguments}")
+            return
+
+        if isinstance(event, ToolFinished):
+            status = "ok" if event.result.success else "error"
+            print(f"[tool:{status}] {event.tool_name}")
+            if event.tool_name == "run_command":
+                print(
+                    _truncate_for_display(
+                        event.result.output,
+                        _MAX_RESULT_DISPLAY_CHARS,
+                    )
+                )
 
 
 def approve_tool_call(

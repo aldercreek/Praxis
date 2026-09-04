@@ -1,9 +1,17 @@
 import json
-from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from uuid import uuid4
 
 from praxis_agent.config import ModelConfig
+from praxis_agent.events import (
+    AgentEvent,
+    AssistantTextCompleted,
+    EventSink,
+    TurnCompleted,
+    TurnFailed,
+    TurnStarted,
+)
 from praxis_agent.model import (
     FunctionCall,
     ModelClient,
@@ -11,12 +19,11 @@ from praxis_agent.model import (
 )
 from praxis_agent.prompts import build_instructions
 from praxis_agent.runtime import collect_runtime_context
+from praxis_agent.tool_execution import (
+    ToolApprovalHandler,
+    ToolCallExecutor,
+)
 from praxis_agent.tools import ToolRegistry, ToolResult, create_default_registry
-
-
-ToolCallObserver = Callable[[str, Mapping[str, object]], None]
-ToolResultObserver = Callable[[str, ToolResult], None]
-ToolApprovalHandler = Callable[[str, Mapping[str, object]], bool]
 
 
 class AgentError(RuntimeError):
@@ -29,8 +36,7 @@ class Agent:
     tool_registry: ToolRegistry
     max_turns: int = 30
     name: str = "Praxis"
-    on_tool_call: ToolCallObserver | None = None
-    on_tool_result: ToolResultObserver | None = None
+    event_sink: EventSink | None = None
     approve_tool_call: ToolApprovalHandler | None = None
     _input_items: list[object] = field(
         default_factory=list,
@@ -48,10 +54,44 @@ class Agent:
         if not normalized_task:
             raise ValueError("task must not be empty")
 
-        self._input_items.append(
-            {"role": "user", "content": normalized_task}
-        )
+        turn_id = uuid4().hex
+        self._emit(TurnStarted(turn_id, normalized_task))
+
+        try:
+            output_text = self._run_model_loop(
+                turn_id,
+                normalized_task,
+            )
+            self._emit(AssistantTextCompleted(turn_id, output_text))
+            self._emit(TurnCompleted(turn_id))
+            return output_text
+        except Exception as error:
+            self._emit(
+                TurnFailed(
+                    turn_id,
+                    type(error).__name__,
+                    str(error),
+                )
+            )
+            raise
+
+    def clear_history(self) -> None:
+        """清空当前进程内保存的对话历史。"""
+        self._input_items.clear()
+
+    def _run_model_loop(
+        self,
+        turn_id: str,
+        task: str,
+    ) -> str:
+        """持续请求模型并执行工具，直到模型生成最终文本。"""
+        self._input_items.append({"role": "user", "content": task})
         tool_definitions = self.tool_registry.definitions()
+        tool_executor = ToolCallExecutor(
+            tool_registry=self.tool_registry,
+            publish_event=self._emit,
+            approve_tool_call=self.approve_tool_call,
+        )
 
         for _ in range(self.max_turns):
             response = self.model_client.create_response(
@@ -64,85 +104,49 @@ class Agent:
             if not response.function_calls:
                 if response.output_text:
                     return response.output_text
-                raise AgentError("model returned no text and no function calls")
+                raise AgentError(
+                    "model returned no text and no function calls"
+                )
 
             # 一次响应可能包含多个工具调用，需要逐个执行并回传结果。
             for function_call in response.function_calls:
+                result = tool_executor.execute(turn_id, function_call)
                 self._input_items.append(
-                    {
-                        "type": "function_call_output",
-                        "call_id": function_call.call_id,
-                        "output": self._execute_function_call(function_call),
-                    }
+                    _build_function_call_output(function_call, result)
                 )
 
         raise AgentError(
             f"agent exceeded the maximum of {self.max_turns} model turns"
         )
 
-    def clear_history(self) -> None:
-        """清空当前进程内保存的对话历史。"""
-        self._input_items.clear()
-
-    def _execute_function_call(self, function_call: FunctionCall) -> str:
-        """解析模型参数、运行工具，并返回 JSON 格式结果。"""
-        try:
-            arguments = json.loads(function_call.arguments)
-        except json.JSONDecodeError as error:
-            return _encode_tool_result(
-                False,
-                f"invalid JSON arguments: {error.msg}",
-            )
-
-        if not isinstance(arguments, dict):
-            return _encode_tool_result(
-                False,
-                "tool arguments must be a JSON object",
-            )
-
-        if self.on_tool_call is not None:
-            self.on_tool_call(function_call.name, arguments)
-
-        if self.tool_registry.requires_approval(function_call.name):
-            if self.approve_tool_call is None:
-                result = ToolResult(
-                    False,
-                    "tool execution requires user approval",
-                )
-            elif not self.approve_tool_call(function_call.name, arguments):
-                result = ToolResult(
-                    False,
-                    "tool execution was declined by the user; do not retry",
-                )
-            else:
-                result = self.tool_registry.execute(
-                    function_call.name,
-                    arguments,
-                )
-        else:
-            result = self.tool_registry.execute(
-                function_call.name,
-                arguments,
-            )
-
-        if self.on_tool_result is not None:
-            self.on_tool_result(function_call.name, result)
-        return _encode_tool_result(result.success, result.output)
+    def _emit(self, event: AgentEvent) -> None:
+        """把事件发送给外部消费者；未配置消费者时保持静默。"""
+        if self.event_sink is not None:
+            self.event_sink.emit(event)
 
 
-def _encode_tool_result(success: bool, output: str) -> str:
-    """把统一工具结果编码成模型能够读取的 JSON 字符串。"""
-    return json.dumps(
-        {"success": success, "output": output},
-        ensure_ascii=False,
-    )
+def _build_function_call_output(
+    function_call: FunctionCall,
+    result: ToolResult,
+) -> dict[str, object]:
+    """把工具结果转换成模型接口要求的输入项。"""
+    return {
+        "type": "function_call_output",
+        "call_id": function_call.call_id,
+        "output": json.dumps(
+            {
+                "success": result.success,
+                "output": result.output,
+            },
+            ensure_ascii=False,
+        ),
+    }
 
 
 def create_default_agent(
     workspace: Path,
     *,
-    on_tool_call: ToolCallObserver | None = None,
-    on_tool_result: ToolResultObserver | None = None,
+    event_sink: EventSink | None = None,
     approve_tool_call: ToolApprovalHandler | None = None,
 ) -> Agent:
     """使用环境配置和内置文件工具创建默认 Agent。"""
@@ -154,7 +158,6 @@ def create_default_agent(
             instructions=build_instructions(runtime_context),
         ),
         tool_registry=create_default_registry(runtime_context.workspace_root),
-        on_tool_call=on_tool_call,
-        on_tool_result=on_tool_result,
+        event_sink=event_sink,
         approve_tool_call=approve_tool_call,
     )
