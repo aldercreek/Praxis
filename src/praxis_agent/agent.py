@@ -6,8 +6,11 @@ from uuid import uuid4
 from praxis_agent.config import ModelConfig
 from praxis_agent.events import (
     AgentEvent,
+    AssistantTextDelta,
     AssistantTextCompleted,
     EventSink,
+    ModelRequestCompleted,
+    ModelRequestStarted,
     TurnCompleted,
     TurnFailed,
     TurnStarted,
@@ -93,11 +96,20 @@ class Agent:
             approve_tool_call=self.approve_tool_call,
         )
 
-        for _ in range(self.max_turns):
+        for request_number in range(1, self.max_turns + 1):
+            self._emit(ModelRequestStarted(turn_id, request_number))
             response = self.model_client.create_response(
                 self._input_items,
                 tool_definitions,
+                on_text_delta=lambda text: self._emit(
+                    AssistantTextDelta(
+                        turn_id,
+                        request_number,
+                        text,
+                    )
+                ),
             )
+            self._emit(ModelRequestCompleted(turn_id, request_number))
             # 官方协议要求把模型本轮输出原样加入下一轮输入。
             self._input_items.extend(response.output_items)
 

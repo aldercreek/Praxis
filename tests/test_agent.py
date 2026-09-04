@@ -9,8 +9,11 @@ from praxis_agent.events import (
     AgentEvent,
     ApprovalRequested,
     ApprovalResolved,
+    AssistantTextDelta,
     AssistantTextCompleted,
     EventSink,
+    ModelRequestCompleted,
+    ModelRequestStarted,
     ToolCallPrepared,
     ToolFinished,
     ToolStarted,
@@ -18,7 +21,7 @@ from praxis_agent.events import (
     TurnFailed,
     TurnStarted,
 )
-from praxis_agent.model import FunctionCall, ModelResponse
+from praxis_agent.model import FunctionCall, ModelResponse, TextDeltaHandler
 from praxis_agent.tools import create_default_registry
 
 
@@ -32,10 +35,15 @@ class FakeModelClient:
         self,
         input_items: Sequence[object],
         tools: Sequence[dict[str, object]],
+        *,
+        on_text_delta: TextDeltaHandler | None = None,
     ) -> ModelResponse:
         self.inputs.append(list(input_items))
         self.tools.append(list(tools))
-        return next(self._responses)
+        response = next(self._responses)
+        if response.output_text and on_text_delta is not None:
+            on_text_delta(response.output_text)
+        return response
 
 
 class RecordingEventSink(EventSink):
@@ -82,12 +90,17 @@ def test_agent_returns_the_models_final_text(tmp_path: Path) -> None:
     assert len(model_client.tools[0]) == 6
     assert [type(event) for event in event_sink.events] == [
         TurnStarted,
+        ModelRequestStarted,
+        AssistantTextDelta,
+        ModelRequestCompleted,
         AssistantTextCompleted,
         TurnCompleted,
     ]
     assert len({event.turn_id for event in event_sink.events}) == 1
     assert event_sink.events[0].task == "inspect repository"
-    assert event_sink.events[1].text == "Repository inspected."
+    assert event_sink.events[1].request_number == 1
+    assert event_sink.events[2].text == "Repository inspected."
+    assert event_sink.events[4].text == "Repository inspected."
 
 
 def test_agent_keeps_history_between_tasks(tmp_path: Path) -> None:
@@ -185,13 +198,18 @@ def test_agent_executes_a_tool_and_returns_its_result_to_model(
     }
     assert [type(event) for event in event_sink.events] == [
         TurnStarted,
+        ModelRequestStarted,
+        ModelRequestCompleted,
         ToolCallPrepared,
         ToolStarted,
         ToolFinished,
+        ModelRequestStarted,
+        AssistantTextDelta,
+        ModelRequestCompleted,
         AssistantTextCompleted,
         TurnCompleted,
     ]
-    prepared = event_sink.events[1]
+    prepared = event_sink.events[3]
     assert prepared.call_id == "call-1"
     assert prepared.tool_name == "read_file"
     assert prepared.arguments == {"relative_path": "notes.txt"}
@@ -292,16 +310,21 @@ def test_agent_asks_for_approval_and_respects_a_decline(
     assert approval_requests == ["run_command"]
     assert [type(event) for event in event_sink.events] == [
         TurnStarted,
+        ModelRequestStarted,
+        ModelRequestCompleted,
         ToolCallPrepared,
         ApprovalRequested,
         ApprovalResolved,
         ToolFinished,
+        ModelRequestStarted,
+        AssistantTextDelta,
+        ModelRequestCompleted,
         AssistantTextCompleted,
         TurnCompleted,
     ]
-    approval = event_sink.events[3]
+    approval = event_sink.events[5]
     assert approval.approved is False
-    tool_finished = event_sink.events[4]
+    tool_finished = event_sink.events[6]
     assert tool_finished.result.success is False
     tool_output = model_client.inputs[1][-1]
     decoded_output = json.loads(tool_output["output"])

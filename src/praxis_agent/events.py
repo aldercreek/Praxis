@@ -23,6 +23,28 @@ class TurnStarted(AgentEvent):
 
 
 @dataclass(frozen=True, slots=True)
+class ModelRequestStarted(AgentEvent):
+    """表示一次模型请求已经开始。"""
+
+    request_number: int
+
+
+@dataclass(frozen=True, slots=True)
+class AssistantTextDelta(AgentEvent):
+    """表示模型流式返回的一段助手文本。"""
+
+    request_number: int
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class ModelRequestCompleted(AgentEvent):
+    """表示一次模型响应已经完整接收并解析。"""
+
+    request_number: int
+
+
+@dataclass(frozen=True, slots=True)
 class ToolCallPrepared(AgentEvent):
     """表示模型的工具调用已经解析完成，正在等待审批或执行。"""
 
@@ -98,8 +120,11 @@ __all__ = [
     "AgentEvent",
     "ApprovalRequested",
     "ApprovalResolved",
+    "AssistantTextDelta",
     "AssistantTextCompleted",
     "EventSink",
+    "ModelRequestCompleted",
+    "ModelRequestStarted",
     "ToolCallPrepared",
     "ToolFinished",
     "ToolStarted",
