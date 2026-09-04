@@ -5,9 +5,8 @@ from pathlib import Path
 from praxis_agent.agent import Agent, AgentError, create_default_agent
 from praxis_agent.model import ModelClientError
 from praxis_agent.terminal import (
+    ConsoleRenderer,
     approve_tool_call,
-    show_tool_call,
-    show_tool_result,
 )
 
 
@@ -61,10 +60,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     task = " ".join(args.task).strip()
 
     try:
+        renderer = ConsoleRenderer()
         agent = create_default_agent(
             Path.cwd(),
-            on_tool_call=show_tool_call,
-            on_tool_result=show_tool_result,
+            event_sink=renderer,
             approve_tool_call=approve_tool_call,
         )
     except ValueError as error:

@@ -5,6 +5,19 @@ from pathlib import Path
 import pytest
 
 from praxis_agent.agent import Agent, AgentError
+from praxis_agent.events import (
+    AgentEvent,
+    ApprovalRequested,
+    ApprovalResolved,
+    AssistantTextCompleted,
+    EventSink,
+    ToolCallPrepared,
+    ToolFinished,
+    ToolStarted,
+    TurnCompleted,
+    TurnFailed,
+    TurnStarted,
+)
 from praxis_agent.model import FunctionCall, ModelResponse
 from praxis_agent.tools import create_default_registry
 
@@ -25,25 +38,39 @@ class FakeModelClient:
         return next(self._responses)
 
 
+class RecordingEventSink(EventSink):
+    """记录 Agent 发布的事件，供断言事件顺序使用。"""
+
+    def __init__(self) -> None:
+        self.events: list[AgentEvent] = []
+
+    def emit(self, event: AgentEvent) -> None:
+        self.events.append(event)
+
+
 def _agent(
     tmp_path: Path,
     responses: list[ModelResponse],
     *,
     max_turns: int = 10,
+    event_sink: EventSink | None = None,
 ) -> tuple[Agent, FakeModelClient]:
     model_client = FakeModelClient(responses)
     agent = Agent(
         model_client=model_client,
         tool_registry=create_default_registry(tmp_path),
         max_turns=max_turns,
+        event_sink=event_sink,
     )
     return agent, model_client
 
 
 def test_agent_returns_the_models_final_text(tmp_path: Path) -> None:
+    event_sink = RecordingEventSink()
     agent, model_client = _agent(
         tmp_path,
         [ModelResponse((), "Repository inspected.", ())],
+        event_sink=event_sink,
     )
 
     result = agent.run("inspect repository")
@@ -53,6 +80,14 @@ def test_agent_returns_the_models_final_text(tmp_path: Path) -> None:
         [{"role": "user", "content": "inspect repository"}]
     ]
     assert len(model_client.tools[0]) == 6
+    assert [type(event) for event in event_sink.events] == [
+        TurnStarted,
+        AssistantTextCompleted,
+        TurnCompleted,
+    ]
+    assert len({event.turn_id for event in event_sink.events}) == 1
+    assert event_sink.events[0].task == "inspect repository"
+    assert event_sink.events[1].text == "Repository inspected."
 
 
 def test_agent_keeps_history_between_tasks(tmp_path: Path) -> None:
@@ -109,6 +144,7 @@ def test_agent_rejects_an_empty_task(tmp_path: Path) -> None:
 def test_agent_executes_a_tool_and_returns_its_result_to_model(
     tmp_path: Path,
 ) -> None:
+    event_sink = RecordingEventSink()
     (tmp_path / "notes.txt").write_text("hello\n", encoding="utf-8")
     function_call_item = {
         "type": "function_call",
@@ -132,6 +168,7 @@ def test_agent_executes_a_tool_and_returns_its_result_to_model(
             ),
             ModelResponse((), "The file contains hello.", ()),
         ],
+        event_sink=event_sink,
     )
 
     result = agent.run("read notes.txt")
@@ -146,6 +183,19 @@ def test_agent_executes_a_tool_and_returns_its_result_to_model(
         "success": True,
         "output": "hello\n",
     }
+    assert [type(event) for event in event_sink.events] == [
+        TurnStarted,
+        ToolCallPrepared,
+        ToolStarted,
+        ToolFinished,
+        AssistantTextCompleted,
+        TurnCompleted,
+    ]
+    prepared = event_sink.events[1]
+    assert prepared.call_id == "call-1"
+    assert prepared.tool_name == "read_file"
+    assert prepared.arguments == {"relative_path": "notes.txt"}
+    assert prepared.requires_approval is False
 
 
 def test_agent_can_execute_a_write_tool(tmp_path: Path) -> None:
@@ -207,8 +257,7 @@ def test_agent_returns_invalid_arguments_to_the_model(tmp_path: Path) -> None:
 def test_agent_asks_for_approval_and_respects_a_decline(
     tmp_path: Path,
 ) -> None:
-    tool_calls: list[str] = []
-    tool_results: list[tuple[str, bool]] = []
+    event_sink = RecordingEventSink()
     approval_requests: list[str] = []
 
     def decline_command(name: str, arguments: object) -> bool:
@@ -233,19 +282,27 @@ def test_agent_asks_for_approval_and_respects_a_decline(
             ),
             ModelResponse((), "Command was not run.", ()),
         ],
-    )
-    agent.on_tool_call = lambda name, arguments: tool_calls.append(name)
-    agent.on_tool_result = lambda name, result: tool_results.append(
-        (name, result.success)
+        event_sink=event_sink,
     )
     agent.approve_tool_call = decline_command
 
     result = agent.run("run a command")
 
     assert result == "Command was not run."
-    assert tool_calls == ["run_command"]
     assert approval_requests == ["run_command"]
-    assert tool_results == [("run_command", False)]
+    assert [type(event) for event in event_sink.events] == [
+        TurnStarted,
+        ToolCallPrepared,
+        ApprovalRequested,
+        ApprovalResolved,
+        ToolFinished,
+        AssistantTextCompleted,
+        TurnCompleted,
+    ]
+    approval = event_sink.events[3]
+    assert approval.approved is False
+    tool_finished = event_sink.events[4]
+    assert tool_finished.result.success is False
     tool_output = model_client.inputs[1][-1]
     decoded_output = json.loads(tool_output["output"])
     assert decoded_output["success"] is False
@@ -255,12 +312,21 @@ def test_agent_asks_for_approval_and_respects_a_decline(
 def test_agent_stops_after_the_maximum_number_of_turns(
     tmp_path: Path,
 ) -> None:
+    event_sink = RecordingEventSink()
     repeated_call = ModelResponse(
         output_items=(),
         output_text="",
         function_calls=(FunctionCall("call-1", "missing", "{}"),),
     )
-    agent, _ = _agent(tmp_path, [repeated_call], max_turns=1)
+    agent, _ = _agent(
+        tmp_path,
+        [repeated_call],
+        max_turns=1,
+        event_sink=event_sink,
+    )
 
     with pytest.raises(AgentError, match="maximum of 1 model turns"):
         agent.run("keep calling tools")
+
+    assert isinstance(event_sink.events[-1], TurnFailed)
+    assert event_sink.events[-1].error_type == "AgentError"
