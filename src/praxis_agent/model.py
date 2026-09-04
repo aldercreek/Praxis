@@ -1,11 +1,23 @@
-from collections.abc import Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
 from openai import OpenAI, OpenAIError
+from openai.types.responses import (
+    Response,
+    ResponseCompletedEvent,
+    ResponseErrorEvent,
+    ResponseFailedEvent,
+    ResponseFunctionToolCall,
+    ResponseStreamEvent,
+    ResponseTextDeltaEvent,
+)
 
 from praxis_agent.config import ModelConfig
 from praxis_agent.prompts import BASE_INSTRUCTIONS
+
+
+TextDeltaHandler = Callable[[str], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +45,8 @@ class ModelClient(Protocol):
         self,
         input_items: Sequence[object],
         tools: Sequence[dict[str, object]],
+        *,
+        on_text_delta: TextDeltaHandler | None = None,
     ) -> ModelResponse:
         """根据对话输入和工具定义生成下一次模型响应。"""
         ...
@@ -62,30 +76,76 @@ class OpenAIModelClient:
         self,
         input_items: Sequence[object],
         tools: Sequence[dict[str, object]],
+        *,
+        on_text_delta: TextDeltaHandler | None = None,
     ) -> ModelResponse:
-        """调用模型，并提取文本与全部函数调用。"""
+        """流式调用模型，并提取最终文本与全部函数调用。"""
         try:
-            response = self._client.responses.create(
+            stream = self._client.responses.create(
                 model=self._model,
                 instructions=self._instructions,
                 input=list(input_items),
                 tools=list(tools),
+                stream=True,
             )
+            response = _consume_stream(stream, on_text_delta)
         except OpenAIError as error:
             raise ModelClientError(f"model request failed: {error}") from error
 
-        output_items = tuple(response.output)
-        function_calls = tuple(
-            FunctionCall(
-                call_id=item.call_id,
-                name=item.name,
-                arguments=item.arguments,
-            )
-            for item in output_items
-            if getattr(item, "type", None) == "function_call"
+        return _build_model_response(response)
+
+
+def _consume_stream(
+    stream: Iterable[ResponseStreamEvent],
+    on_text_delta: TextDeltaHandler | None,
+) -> Response:
+    """消费 SDK 事件流，并返回完成事件携带的完整响应。"""
+    completed_response: Response | None = None
+
+    for event in stream:
+        if isinstance(event, ResponseTextDeltaEvent):
+            if event.delta and on_text_delta is not None:
+                on_text_delta(event.delta)
+        elif isinstance(event, ResponseCompletedEvent):
+            completed_response = event.response
+        elif isinstance(event, (ResponseErrorEvent, ResponseFailedEvent)):
+            message = _stream_error_message(event)
+            raise ModelClientError(f"model request failed: {message}")
+
+    if completed_response is None:
+        raise ModelClientError(
+            "model stream ended without a completed response"
         )
-        return ModelResponse(
-            output_items=output_items,
-            output_text=(response.output_text or "").strip(),
-            function_calls=function_calls,
+    return completed_response
+
+
+def _stream_error_message(
+    event: ResponseErrorEvent | ResponseFailedEvent,
+) -> str:
+    """从普通错误事件或失败响应事件中提取错误信息。"""
+    if isinstance(event, ResponseErrorEvent):
+        return event.message
+
+    if event.response.error is None:
+        return "unknown streaming error"
+    return event.response.error.message
+
+
+def _build_model_response(response: Response) -> ModelResponse:
+    """把 SDK 的完整响应转换成 Agent 使用的稳定结构。"""
+    output_items = tuple(response.output)
+    function_calls = tuple(
+        FunctionCall(
+            call_id=item.call_id,
+            name=item.name,
+            arguments=item.arguments,
         )
+        for item in output_items
+        if isinstance(item, ResponseFunctionToolCall)
+    )
+    output_text = response.output_text or ""
+    return ModelResponse(
+        output_items=output_items,
+        output_text=output_text.strip(),
+        function_calls=function_calls,
+    )

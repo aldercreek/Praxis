@@ -22,7 +22,7 @@ def build_parser() -> argparse.ArgumentParser:
 def _run_task(agent: Agent, task: str) -> int:
     """执行一轮任务，并将预期内的错误转换为终端输出。"""
     try:
-        print(agent.run(task))
+        agent.run(task)
     except (AgentError, ModelClientError, ValueError) as error:
         print(f"error: {error}")
         return 1
