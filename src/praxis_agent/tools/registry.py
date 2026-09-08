@@ -7,6 +7,7 @@ from pathlib import Path
 from praxis_agent.tools.command import run_command
 from praxis_agent.tools.filesystem import (
     create_file,
+    edit_file,
     list_files,
     read_file,
     replace_text,
@@ -47,6 +48,42 @@ _REPLACE_TEXT_PARAMETERS: dict[str, object] = {
         },
     },
     "required": ["relative_path", "old_text", "new_text"],
+    "additionalProperties": False,
+}
+
+_EDIT_FILE_PARAMETERS: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "relative_path": {
+            "type": "string",
+            "description": "Path to edit, relative to the workspace root.",
+        },
+        "edits": {
+            "type": "array",
+            "minItems": 1,
+            "description": (
+                "Exact text replacements applied in array order. "
+                "Each old_text must occur exactly once when its edit runs."
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "old_text": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Exact text that must occur once.",
+                    },
+                    "new_text": {
+                        "type": "string",
+                        "description": "Replacement text.",
+                    },
+                },
+                "required": ["old_text", "new_text"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["relative_path", "edits"],
     "additionalProperties": False,
 }
 
@@ -243,6 +280,17 @@ def create_default_registry(workspace: Path) -> ToolRegistry:
             description="Replace one exact text match in an existing workspace file.",
             parameters=_REPLACE_TEXT_PARAMETERS,
             handler=replace_text,
+        )
+    )
+    registry.register(
+        Tool(
+            name="edit_file",
+            description=(
+                "Apply multiple exact text replacements to one existing "
+                "UTF-8 workspace file in a single all-or-nothing edit."
+            ),
+            parameters=_EDIT_FILE_PARAMETERS,
+            handler=edit_file,
         )
     )
     registry.register(

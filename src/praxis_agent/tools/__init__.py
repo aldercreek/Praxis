@@ -3,6 +3,7 @@
 from praxis_agent.tools.command import run_command
 from praxis_agent.tools.filesystem import (
     create_file,
+    edit_file,
     list_files,
     read_file,
     replace_text,
@@ -22,6 +23,7 @@ __all__ = [
     "ToolResult",
     "create_default_registry",
     "create_file",
+    "edit_file",
     "list_files",
     "read_file",
     "replace_text",
