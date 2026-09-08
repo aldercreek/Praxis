@@ -30,12 +30,24 @@ class FunctionCall:
 
 
 @dataclass(frozen=True, slots=True)
+class TokenUsage:
+    """保存模型响应中由服务端统计的 Token 用量。"""
+
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+
+
+@dataclass(frozen=True, slots=True)
 class ModelResponse:
     """保存 Agent 循环需要使用的一次模型响应。"""
 
     output_items: tuple[object, ...]
     output_text: str
     function_calls: tuple[FunctionCall, ...]
+    response_id: str | None = None
+    model: str | None = None
+    usage: TokenUsage | None = None
 
 
 class ModelClient(Protocol):
@@ -144,8 +156,20 @@ def _build_model_response(response: Response) -> ModelResponse:
         if isinstance(item, ResponseFunctionToolCall)
     )
     output_text = response.output_text or ""
+    usage = response.usage
     return ModelResponse(
         output_items=output_items,
         output_text=output_text.strip(),
         function_calls=function_calls,
+        response_id=response.id,
+        model=response.model,
+        usage=(
+            None
+            if usage is None
+            else TokenUsage(
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                total_tokens=usage.total_tokens,
+            )
+        ),
     )

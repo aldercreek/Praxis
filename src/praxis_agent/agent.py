@@ -97,7 +97,13 @@ class Agent:
         )
 
         for request_number in range(1, self.max_turns + 1):
-            self._emit(ModelRequestStarted(turn_id, request_number))
+            self._emit(
+                ModelRequestStarted(
+                    turn_id,
+                    request_number,
+                    tuple(self._input_items),
+                )
+            )
             response = self.model_client.create_response(
                 self._input_items,
                 tool_definitions,
@@ -109,7 +115,13 @@ class Agent:
                     )
                 ),
             )
-            self._emit(ModelRequestCompleted(turn_id, request_number))
+            self._emit(
+                ModelRequestCompleted(
+                    turn_id,
+                    request_number,
+                    response,
+                )
+            )
             # 官方协议要求把模型本轮输出原样加入下一轮输入。
             self._input_items.extend(response.output_items)
 

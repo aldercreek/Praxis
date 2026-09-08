@@ -1,13 +1,22 @@
+from __future__ import annotations
+
 import argparse
+import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from praxis_agent.agent import Agent, AgentError, create_default_agent
+from praxis_agent.config import LangfuseConfig
+from praxis_agent.events import CompositeEventSink, EventSink
 from praxis_agent.model import ModelClientError
 from praxis_agent.terminal import (
     ConsoleRenderer,
     approve_tool_call,
 )
+
+if TYPE_CHECKING:
+    from praxis_agent.observability import LangfuseEventSink
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -55,21 +64,49 @@ def _run_interactive(agent: Agent) -> int:
             return 130
 
 
+def _build_event_sink(
+    workspace: Path,
+) -> tuple[EventSink, LangfuseEventSink | None]:
+    """创建终端消费者，并在密钥齐全时附加 Langfuse 消费者。"""
+    renderer = ConsoleRenderer()
+    try:
+        config = LangfuseConfig.from_env()
+        if config is None:
+            return renderer, None
+        # SDK 依赖较重，只在真正启用观测时加载。
+        from praxis_agent.observability import LangfuseEventSink
+
+        langfuse_sink = LangfuseEventSink(config, workspace)
+    except Exception as error:
+        # 可观测性属于辅助能力，配置或初始化失败不能阻止 Agent 工作。
+        print(f"warning: Langfuse is disabled: {error}", file=sys.stderr)
+        return renderer, None
+
+    return CompositeEventSink((renderer, langfuse_sink)), langfuse_sink
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     task = " ".join(args.task).strip()
+    workspace = Path.cwd()
+    event_sink, langfuse_sink = _build_event_sink(workspace)
 
     try:
-        renderer = ConsoleRenderer()
         agent = create_default_agent(
-            Path.cwd(),
-            event_sink=renderer,
+            workspace,
+            event_sink=event_sink,
             approve_tool_call=approve_tool_call,
         )
     except ValueError as error:
         print(f"error: {error}")
+        if langfuse_sink is not None:
+            langfuse_sink.close()
         return 1
 
-    if task:
-        return _run_task(agent, task)
-    return _run_interactive(agent)
+    try:
+        if task:
+            return _run_task(agent, task)
+        return _run_interactive(agent)
+    finally:
+        if langfuse_sink is not None:
+            langfuse_sink.close()

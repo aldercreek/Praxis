@@ -8,6 +8,11 @@ from openai.types.responses import (
     ResponseOutputText,
     ResponseStreamEvent,
     ResponseTextDeltaEvent,
+    ResponseUsage,
+)
+from openai.types.responses.response_usage import (
+    InputTokensDetails,
+    OutputTokensDetails,
 )
 
 from praxis_agent.config import ModelConfig
@@ -51,6 +56,18 @@ class FakeResponses:
             parallel_tool_calls=True,
             tool_choice="auto",
             tools=[],
+            usage=ResponseUsage(
+                input_tokens=12,
+                input_tokens_details=InputTokensDetails(
+                    cached_tokens=0,
+                    cache_write_tokens=0,
+                ),
+                output_tokens=3,
+                output_tokens_details=OutputTokensDetails(
+                    reasoning_tokens=0,
+                ),
+                total_tokens=15,
+            ),
         )
         return iter(
             [
@@ -123,6 +140,12 @@ def test_openai_model_client_builds_and_parses_a_response(monkeypatch) -> None:
     assert response.output_text == "Reading README"
     assert response.function_calls[0].name == "read_file"
     assert response.function_calls[0].call_id == "call-1"
+    assert response.response_id == "response-1"
+    assert response.model == "example-model"
+    assert response.usage is not None
+    assert response.usage.input_tokens == 12
+    assert response.usage.output_tokens == 3
+    assert response.usage.total_tokens == 15
 
 
 def _capture_options(
