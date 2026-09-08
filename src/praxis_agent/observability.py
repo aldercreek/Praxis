@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from collections.abc import Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -94,6 +95,22 @@ class _PreparedToolCall:
     requires_approval: bool
 
 
+def _create_langfuse_client(config: LangfuseConfig) -> Langfuse:
+    """创建 Langfuse 客户端，并在 Windows 上使用系统证书库。"""
+    if sys.platform == "win32":
+        import truststore
+
+        # 公司 CA 已由 Windows 信任，但不一定包含在 certifi 证书库中。
+        truststore.inject_into_ssl()
+
+    return Langfuse(
+        public_key=config.public_key,
+        secret_key=config.secret_key,
+        base_url=config.base_url,
+        environment=config.environment,
+    )
+
+
 class LangfuseEventSink:
     """把 Praxis 事件转换成 Langfuse Trace 和 observation。"""
 
@@ -105,11 +122,10 @@ class LangfuseEventSink:
         client: _LangfuseClient | None = None,
         session_id: str | None = None,
     ) -> None:
-        self._client = client or Langfuse(
-            public_key=config.public_key,
-            secret_key=config.secret_key,
-            base_url=config.base_url,
-            environment=config.environment,
+        self._client = (
+            client
+            if client is not None
+            else _create_langfuse_client(config)
         )
         self._workspace = workspace.resolve()
         self._environment = config.environment

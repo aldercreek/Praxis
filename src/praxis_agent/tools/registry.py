@@ -8,6 +8,7 @@ from praxis_agent.tools.command import run_command
 from praxis_agent.tools.filesystem import (
     create_file,
     edit_file,
+    find_files,
     list_files,
     read_file,
     search_text,
@@ -116,6 +117,34 @@ _LIST_FILES_PARAMETERS: dict[str, object] = {
         },
     },
     "required": ["relative_path", "max_entries", "max_depth"],
+    "additionalProperties": False,
+}
+
+_FIND_FILES_PARAMETERS: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "file_pattern": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Glob pattern for file paths, for example '*.py' or "
+                "'src/*.py'."
+            ),
+        },
+        "relative_path": {
+            "type": "string",
+            "description": (
+                "Directory or file path relative to the workspace root. "
+                "Use '.' for the whole workspace."
+            ),
+        },
+        "max_results": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Maximum number of matching file paths to return.",
+        },
+    },
+    "required": ["file_pattern", "relative_path", "max_results"],
     "additionalProperties": False,
 }
 
@@ -311,6 +340,14 @@ def create_default_registry(workspace: Path) -> ToolRegistry:
             description="List files and directories under a workspace path.",
             parameters=_LIST_FILES_PARAMETERS,
             handler=list_files,
+        )
+    )
+    registry.register(
+        Tool(
+            name="find_files",
+            description="Find workspace files by name or glob pattern.",
+            parameters=_FIND_FILES_PARAMETERS,
+            handler=find_files,
         )
     )
     registry.register(

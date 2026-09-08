@@ -4,6 +4,7 @@ from praxis_agent.tools.command import run_command
 from praxis_agent.tools.filesystem import (
     create_file,
     edit_file,
+    find_files,
     list_files,
     read_file,
     search_text,
@@ -23,6 +24,7 @@ __all__ = [
     "create_default_registry",
     "create_file",
     "edit_file",
+    "find_files",
     "list_files",
     "read_file",
     "run_command",

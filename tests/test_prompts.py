@@ -22,4 +22,6 @@ def test_build_instructions_includes_the_runtime_context() -> None:
     assert "Available shells: cmd, pwsh" in instructions
     assert "Unavailable shells: bash, sh" in instructions
     assert "read only the relevant line ranges" in instructions
+    assert "Use find_files to locate files by name or glob pattern." in instructions
+    assert "multiple tool calls are independent" in instructions
     assert "ADA_API_KEY" not in instructions

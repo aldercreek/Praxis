@@ -3,6 +3,7 @@ import shutil
 import subprocess
 from collections.abc import Iterator, Mapping
 from difflib import unified_diff
+from heapq import nsmallest
 from pathlib import Path, PurePosixPath
 
 
@@ -160,47 +161,32 @@ def _normalize_search_match(match: str) -> str:
     return f"{display_path}:{line_number}:{content}"
 
 
-def _search_with_ripgrep(
+def _ripgrep_glob_arguments(file_pattern: str) -> list[str]:
+    """构造文件模式和忽略目录对应的 ripgrep 参数。"""
+    arguments: list[str] = []
+    if file_pattern != "*":
+        arguments.extend(("--glob", file_pattern))
+    for directory_name in sorted(_IGNORED_DIRECTORY_NAMES):
+        arguments.extend(("--glob", f"!**/{directory_name}/**"))
+    for directory_suffix in _IGNORED_DIRECTORY_SUFFIXES:
+        arguments.extend(("--glob", f"!**/*{directory_suffix}/**"))
+    return arguments
+
+
+def _run_ripgrep(
     workspace_root: Path,
-    target_path: Path,
-    query: str,
-    file_pattern: str,
+    arguments: list[str],
     max_results: int,
+    operation: str,
 ) -> tuple[list[str], bool] | None:
-    """使用 ripgrep 搜索；程序不可用时返回 None。"""
+    """运行 ripgrep 并限制输出行数；程序不可用时返回 None。"""
     executable = shutil.which("rg")
     if executable is None:
         return None
 
-    target_argument = target_path.relative_to(workspace_root).as_posix() or "."
-    command = [
-        executable,
-        "--fixed-strings",
-        "--line-number",
-        "--no-heading",
-        "--with-filename",
-        "--hidden",
-        "--color",
-        "never",
-        "--sort",
-        "path",
-        "--path-separator",
-        "/",
-        "--max-filesize",
-        str(_MAX_SEARCH_FILE_SIZE),
-        "--no-messages",
-    ]
-    if file_pattern != "*":
-        command.extend(("--glob", file_pattern))
-    for directory_name in sorted(_IGNORED_DIRECTORY_NAMES):
-        command.extend(("--glob", f"!**/{directory_name}/**"))
-    for directory_suffix in _IGNORED_DIRECTORY_SUFFIXES:
-        command.extend(("--glob", f"!**/*{directory_suffix}/**"))
-    command.extend(("--", query, target_argument))
-
     try:
         process = subprocess.Popen(
-            command,
+            [executable, *arguments],
             cwd=workspace_root,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -211,17 +197,16 @@ def _search_with_ripgrep(
     except OSError:
         return None
 
-    matches: list[str] = []
+    output_lines: list[str] = []
     truncated = False
     assert process.stdout is not None
 
-    # 只读取 max_results 之外的一个结果，用来判断输出是否真的被截断。
+    # 多读取一行，用来区分“刚好达到上限”和“确实被截断”。
     for output_line in process.stdout:
-        normalized_match = _normalize_search_match(
+        output_lines.append(
             output_line.removesuffix("\n").removesuffix("\r")
         )
-        matches.append(normalized_match)
-        if len(matches) > max_results:
+        if len(output_lines) > max_results:
             truncated = True
             break
 
@@ -238,8 +223,84 @@ def _search_with_ripgrep(
 
     if not truncated and process.returncode not in (0, 1):
         detail = stderr.strip() or f"exit code {process.returncode}"
-        raise RuntimeError(f"ripgrep search failed: {detail}")
-    return matches[:max_results], truncated
+        raise RuntimeError(f"ripgrep {operation} failed: {detail}")
+    return output_lines[:max_results], truncated
+
+
+def _search_with_ripgrep(
+    workspace_root: Path,
+    target_path: Path,
+    query: str,
+    file_pattern: str,
+    max_results: int,
+) -> tuple[list[str], bool] | None:
+    """使用 ripgrep 搜索文件内容。"""
+    target_argument = target_path.relative_to(workspace_root).as_posix() or "."
+    arguments = [
+        "--fixed-strings",
+        "--line-number",
+        "--no-heading",
+        "--with-filename",
+        "--hidden",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--path-separator",
+        "/",
+        "--max-filesize",
+        str(_MAX_SEARCH_FILE_SIZE),
+        "--no-messages",
+    ]
+    arguments.extend(_ripgrep_glob_arguments(file_pattern))
+    arguments.extend(("--", query, target_argument))
+
+    result = _run_ripgrep(
+        workspace_root,
+        arguments,
+        max_results,
+        "search",
+    )
+    if result is None:
+        return None
+    matches, truncated = result
+    return [_normalize_search_match(match) for match in matches], truncated
+
+
+def _find_files_with_ripgrep(
+    workspace_root: Path,
+    target_path: Path,
+    file_pattern: str,
+    max_results: int,
+) -> tuple[list[str], bool] | None:
+    """使用 ripgrep 按 glob 模式查找文件。"""
+    target_argument = target_path.relative_to(workspace_root).as_posix() or "."
+    arguments = [
+        "--files",
+        "--hidden",
+        "--sort",
+        "path",
+        "--path-separator",
+        "/",
+        "--no-messages",
+    ]
+    arguments.extend(_ripgrep_glob_arguments(file_pattern))
+    arguments.extend(("--", target_argument))
+
+    result = _run_ripgrep(
+        workspace_root,
+        arguments,
+        max_results,
+        "file discovery",
+    )
+    if result is None:
+        return None
+    matches, truncated = result
+    normalized_matches = [
+        match.replace("\\", "/").removeprefix("./")
+        for match in matches
+    ]
+    return normalized_matches, truncated
 
 
 def _build_unified_diff(
@@ -419,6 +480,64 @@ def list_files(
         entries.append(f"{display_path}/" if is_directory else display_path)
 
     return "\n".join(entries) if entries else "No entries found."
+
+
+def find_files(
+    workspace: Path,
+    file_pattern: str,
+    relative_path: str = ".",
+    max_results: int = 100,
+) -> str:
+    """按 glob 模式查找工作区内的文件路径。"""
+    if not file_pattern:
+        raise ValueError("file_pattern must not be empty")
+    if max_results < 1:
+        raise ValueError("max_results must be at least 1")
+
+    workspace_root = _resolve_workspace(workspace)
+    target_path = _resolve_workspace_path(workspace_root, relative_path)
+    if not target_path.exists():
+        raise FileNotFoundError(f"path does not exist: {relative_path}")
+    if not target_path.is_file() and not target_path.is_dir():
+        raise ValueError(f"path is not a file or directory: {relative_path}")
+
+    ripgrep_result = _find_files_with_ripgrep(
+        workspace_root,
+        target_path,
+        file_pattern,
+        max_results,
+    )
+    if ripgrep_result is not None:
+        matches, truncated = ripgrep_result
+    else:
+        # nsmallest 只保留需要返回的路径，避免为排序保存整个工作区的文件。
+        matches = [
+            file_path.relative_to(workspace_root).as_posix()
+            for file_path in nsmallest(
+                max_results + 1,
+                (
+                    file_path
+                    for file_path in _iter_workspace_files(
+                        workspace_root,
+                        target_path,
+                    )
+                    if _matches_file_pattern(
+                        file_path,
+                        workspace_root,
+                        file_pattern,
+                    )
+                ),
+                key=lambda path: path.relative_to(workspace_root).as_posix(),
+            )
+        ]
+        truncated = len(matches) > max_results
+        matches = matches[:max_results]
+
+    if not matches:
+        return f"No files found matching {file_pattern!r}."
+    if truncated:
+        matches.append(f"... truncated after {max_results} files")
+    return "\n".join(matches)
 
 
 def search_text(
