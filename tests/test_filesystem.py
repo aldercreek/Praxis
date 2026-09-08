@@ -4,6 +4,7 @@ import pytest
 
 from praxis_agent.tools import (
     create_file,
+    edit_file,
     list_files,
     read_file,
     replace_text,
@@ -78,6 +79,54 @@ def test_replace_text_rejects_a_path_outside_the_workspace(tmp_path: Path) -> No
         replace_text(workspace, "../outside.txt", "mode=old", "mode=new")
 
     assert outside_file.read_text(encoding="utf-8") == "mode=old\n"
+
+
+def test_edit_file_applies_multiple_replacements(tmp_path: Path) -> None:
+    source_file = tmp_path / "config.txt"
+    source_file.write_text(
+        "host=localhost\nport=8080\n",
+        encoding="utf-8",
+    )
+
+    diff = edit_file(
+        tmp_path,
+        "config.txt",
+        [
+            {"old_text": "host=localhost", "new_text": "host=example.com"},
+            {"old_text": "port=8080", "new_text": "port=443"},
+        ],
+    )
+
+    assert source_file.read_text(encoding="utf-8") == (
+        "host=example.com\nport=443\n"
+    )
+    assert "-host=localhost" in diff
+    assert "+host=example.com" in diff
+    assert "-port=8080" in diff
+    assert "+port=443" in diff
+
+
+def test_edit_file_leaves_file_unchanged_when_a_later_edit_fails(
+    tmp_path: Path,
+) -> None:
+    source_file = tmp_path / "config.txt"
+    original_content = "host=localhost\nport=8080\n"
+    source_file.write_text(original_content, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="edit 2 old_text was not found"):
+        edit_file(
+            tmp_path,
+            "config.txt",
+            [
+                {
+                    "old_text": "host=localhost",
+                    "new_text": "host=example.com",
+                },
+                {"old_text": "port=9999", "new_text": "port=443"},
+            ],
+        )
+
+    assert source_file.read_text(encoding="utf-8") == original_content
 
 
 def test_create_file_creates_parent_directories(tmp_path: Path) -> None:

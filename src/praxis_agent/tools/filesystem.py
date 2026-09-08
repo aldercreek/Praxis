@@ -1,5 +1,5 @@
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from difflib import unified_diff
 from pathlib import Path
 
@@ -142,6 +142,59 @@ def replace_text(
     updated_content = original_content.replace(old_text, new_text, 1)
     diff = _build_unified_diff(relative_path, original_content, updated_content)
 
+    file_path.write_text(updated_content, encoding="utf-8")
+    return diff
+
+
+def edit_file(
+    workspace: Path,
+    relative_path: str,
+    edits: list[Mapping[str, object]],
+) -> str:
+    """按顺序应用多个精确替换，并在全部成功后写入文件。"""
+    if not isinstance(edits, list) or not edits:
+        raise ValueError("edits must be a non-empty list")
+
+    file_path = _require_workspace_file(workspace, relative_path)
+    original_content = file_path.read_text(encoding="utf-8")
+    updated_content = original_content
+
+    # 先在内存中完成全部校验，避免后续替换失败时留下部分修改。
+    for index, edit in enumerate(edits, start=1):
+        if not isinstance(edit, Mapping):
+            raise TypeError(f"edit {index} must be an object")
+        if set(edit) != {"old_text", "new_text"}:
+            raise ValueError(
+                f"edit {index} must contain only old_text and new_text"
+            )
+
+        old_text = edit["old_text"]
+        new_text = edit["new_text"]
+        if not isinstance(old_text, str) or not isinstance(new_text, str):
+            raise TypeError(
+                f"edit {index} old_text and new_text must be strings"
+            )
+        if not old_text:
+            raise ValueError(f"edit {index} old_text must not be empty")
+        if old_text == new_text:
+            raise ValueError(
+                f"edit {index} new_text must differ from old_text"
+            )
+
+        match_count = updated_content.count(old_text)
+        if match_count == 0:
+            raise ValueError(f"edit {index} old_text was not found")
+        if match_count > 1:
+            raise ValueError(
+                f"edit {index} old_text must match exactly once; "
+                f"found {match_count} matches"
+            )
+        updated_content = updated_content.replace(old_text, new_text, 1)
+
+    if updated_content == original_content:
+        raise ValueError("edits must produce a file change")
+
+    diff = _build_unified_diff(relative_path, original_content, updated_content)
     file_path.write_text(updated_content, encoding="utf-8")
     return diff
 

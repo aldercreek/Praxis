@@ -87,7 +87,7 @@ def test_agent_returns_the_models_final_text(tmp_path: Path) -> None:
     assert model_client.inputs == [
         [{"role": "user", "content": "inspect repository"}]
     ]
-    assert len(model_client.tools[0]) == 6
+    assert len(model_client.tools[0]) == 7
     assert [type(event) for event in event_sink.events] == [
         TurnStarted,
         ModelRequestStarted,
