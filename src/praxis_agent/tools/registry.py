@@ -10,7 +10,6 @@ from praxis_agent.tools.filesystem import (
     edit_file,
     list_files,
     read_file,
-    replace_text,
     search_text,
 )
 
@@ -25,29 +24,20 @@ _READ_FILE_PARAMETERS: dict[str, object] = {
         "relative_path": {
             "type": "string",
             "description": "Path to read, relative to the workspace root.",
-        }
-    },
-    "required": ["relative_path"],
-    "additionalProperties": False,
-}
-
-_REPLACE_TEXT_PARAMETERS: dict[str, object] = {
-    "type": "object",
-    "properties": {
-        "relative_path": {
-            "type": "string",
-            "description": "Path to edit, relative to the workspace root.",
         },
-        "old_text": {
-            "type": "string",
-            "description": "Exact text that must occur once in the file.",
+        "start_line": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "First one-based line to return.",
         },
-        "new_text": {
-            "type": "string",
-            "description": "Replacement text.",
+        "max_lines": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 400,
+            "description": "Maximum number of lines to return.",
         },
     },
-    "required": ["relative_path", "old_text", "new_text"],
+    "required": ["relative_path", "start_line", "max_lines"],
     "additionalProperties": False,
 }
 
@@ -113,10 +103,19 @@ _LIST_FILES_PARAMETERS: dict[str, object] = {
         "max_entries": {
             "type": "integer",
             "minimum": 1,
-            "description": "Maximum number of file paths to return.",
+            "description": (
+                "Maximum number of file and directory entries to return."
+            ),
+        },
+        "max_depth": {
+            "type": "integer",
+            "minimum": 1,
+            "description": (
+                "Maximum traversal depth. Direct children have depth 1."
+            ),
         },
     },
-    "required": ["relative_path", "max_entries"],
+    "required": ["relative_path", "max_entries", "max_depth"],
     "additionalProperties": False,
 }
 
@@ -137,8 +136,21 @@ _SEARCH_TEXT_PARAMETERS: dict[str, object] = {
             "minimum": 1,
             "description": "Maximum number of matching lines to return.",
         },
+        "file_pattern": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Glob pattern for files, for example '*.py'. "
+                "Use '*' to search all files."
+            ),
+        },
     },
-    "required": ["query", "relative_path", "max_results"],
+    "required": [
+        "query",
+        "relative_path",
+        "max_results",
+        "file_pattern",
+    ],
     "additionalProperties": False,
 }
 
@@ -269,17 +281,9 @@ def create_default_registry(workspace: Path) -> ToolRegistry:
     registry.register(
         Tool(
             name="read_file",
-            description="Read a UTF-8 workspace file.",
+            description="Read a bounded line range from a UTF-8 workspace file.",
             parameters=_READ_FILE_PARAMETERS,
             handler=read_file,
-        )
-    )
-    registry.register(
-        Tool(
-            name="replace_text",
-            description="Replace one exact text match in an existing workspace file.",
-            parameters=_REPLACE_TEXT_PARAMETERS,
-            handler=replace_text,
         )
     )
     registry.register(
@@ -304,7 +308,7 @@ def create_default_registry(workspace: Path) -> ToolRegistry:
     registry.register(
         Tool(
             name="list_files",
-            description="List files under a workspace path.",
+            description="List files and directories under a workspace path.",
             parameters=_LIST_FILES_PARAMETERS,
             handler=list_files,
         )
@@ -312,7 +316,7 @@ def create_default_registry(workspace: Path) -> ToolRegistry:
     registry.register(
         Tool(
             name="search_text",
-            description="Search workspace text files.",
+            description="Search fixed text in workspace files using a glob pattern.",
             parameters=_SEARCH_TEXT_PARAMETERS,
             handler=search_text,
         )

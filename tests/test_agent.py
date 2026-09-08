@@ -26,6 +26,11 @@ from praxis_agent.tools import create_default_registry
 
 
 class FakeModelClient:
+    """返回预设响应的模型客户端，并记录每次请求的输入和工具定义。
+
+    该替身使测试可以精确断言 Agent 发送给模型的上下文，而无须发起网络请求。
+    """
+
     def __init__(self, responses: list[ModelResponse]) -> None:
         self._responses = iter(responses)
         self.inputs: list[list[object]] = []
@@ -41,6 +46,7 @@ class FakeModelClient:
         self.inputs.append(list(input_items))
         self.tools.append(list(tools))
         response = next(self._responses)
+        # 模拟流式输出：模型有文本时，将完整文本交给 Agent 注册的回调。
         if response.output_text and on_text_delta is not None:
             on_text_delta(response.output_text)
         return response
@@ -63,6 +69,7 @@ def _agent(
     max_turns: int = 10,
     event_sink: EventSink | None = None,
 ) -> tuple[Agent, FakeModelClient]:
+    """构造使用临时工具工作区和预设模型响应的 Agent。"""
     model_client = FakeModelClient(responses)
     agent = Agent(
         model_client=model_client,
@@ -73,6 +80,7 @@ def _agent(
     return agent, model_client
 
 
+# 基础对话与会话历史。
 def test_agent_returns_the_models_final_text(tmp_path: Path) -> None:
     event_sink = RecordingEventSink()
     agent, model_client = _agent(
@@ -87,7 +95,7 @@ def test_agent_returns_the_models_final_text(tmp_path: Path) -> None:
     assert model_client.inputs == [
         [{"role": "user", "content": "inspect repository"}]
     ]
-    assert len(model_client.tools[0]) == 7
+    assert len(model_client.tools[0]) == 6
     assert [type(event) for event in event_sink.events] == [
         TurnStarted,
         ModelRequestStarted,
@@ -161,6 +169,7 @@ def test_agent_rejects_an_empty_task(tmp_path: Path) -> None:
         agent.run("   ")
 
 
+# 工具调用：成功执行、参数错误和用户拒绝审批。
 def test_agent_executes_a_tool_and_returns_its_result_to_model(
     tmp_path: Path,
 ) -> None:
@@ -201,7 +210,7 @@ def test_agent_executes_a_tool_and_returns_its_result_to_model(
     assert tool_output["call_id"] == "call-1"
     assert json.loads(tool_output["output"]) == {
         "success": True,
-        "output": "hello\n",
+        "output": "[lines 1-1 of 1]\nhello\n",
     }
     assert [type(event) for event in event_sink.events] == [
         TurnStarted,
@@ -339,6 +348,7 @@ def test_agent_asks_for_approval_and_respects_a_decline(
     assert "declined by the user" in decoded_output["output"]
 
 
+# 防止模型持续请求工具导致无限循环。
 def test_agent_stops_after_the_maximum_number_of_turns(
     tmp_path: Path,
 ) -> None:

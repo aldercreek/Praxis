@@ -1,7 +1,9 @@
 import os
+import shutil
+import subprocess
 from collections.abc import Iterator, Mapping
 from difflib import unified_diff
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 # 递归扫描时跳过依赖目录、缓存目录和构建产物目录。
@@ -20,7 +22,10 @@ _IGNORED_DIRECTORY_NAMES = frozenset(
         "target",
     }
 )
+_IGNORED_DIRECTORY_SUFFIXES = (".egg-info",)
 _MAX_SEARCH_FILE_SIZE = 1_000_000
+_MAX_READ_LINES = 400
+_MAX_READ_CHARACTERS = 20_000
 
 
 def _resolve_workspace(workspace: Path) -> Path:
@@ -57,6 +62,13 @@ def _require_workspace_file(workspace: Path, relative_path: str) -> Path:
     return file_path
 
 
+def _is_ignored_directory(name: str) -> bool:
+    """判断目录是否属于依赖、缓存或构建产物。"""
+    return name in _IGNORED_DIRECTORY_NAMES or name.endswith(
+        _IGNORED_DIRECTORY_SUFFIXES
+    )
+
+
 def _iter_workspace_files(
     workspace_root: Path,
     target_path: Path,
@@ -71,7 +83,7 @@ def _iter_workspace_files(
         directory_names[:] = sorted(
             name
             for name in directory_names
-            if name not in _IGNORED_DIRECTORY_NAMES
+            if not _is_ignored_directory(name)
         )
         for file_name in sorted(file_names):
             candidate = Path(current_directory) / file_name
@@ -85,6 +97,149 @@ def _iter_workspace_files(
                 and candidate.is_file()
             ):
                 yield candidate
+
+
+def _iter_workspace_entries(
+    workspace_root: Path,
+    target_path: Path,
+    max_depth: int,
+) -> Iterator[tuple[Path, bool]]:
+    """按路径顺序遍历有限深度内的文件和目录。"""
+    if target_path.is_file():
+        yield target_path, False
+        return
+
+    def visit(directory: Path, depth: int) -> Iterator[tuple[Path, bool]]:
+        try:
+            children = sorted(directory.iterdir(), key=lambda path: path.name)
+        except OSError:
+            return
+
+        for child in children:
+            try:
+                resolved_child = child.resolve()
+                is_directory = child.is_dir()
+                is_file = child.is_file()
+            except OSError:
+                continue
+            if not resolved_child.is_relative_to(workspace_root):
+                continue
+            if is_directory and _is_ignored_directory(child.name):
+                continue
+            if not is_directory and not is_file:
+                continue
+
+            yield child, is_directory
+            if (
+                is_directory
+                and depth < max_depth
+                and not child.is_symlink()
+            ):
+                yield from visit(child, depth + 1)
+
+    yield from visit(target_path, 1)
+
+
+def _matches_file_pattern(
+    file_path: Path,
+    workspace_root: Path,
+    pattern: str,
+) -> bool:
+    """判断文件的工作区相对路径是否符合 glob 模式。"""
+    display_path = file_path.relative_to(workspace_root).as_posix()
+    return pattern == "*" or PurePosixPath(display_path).match(pattern)
+
+
+def _normalize_search_match(match: str) -> str:
+    """统一 ripgrep 返回的路径分隔符和相对路径前缀。"""
+    parts = match.split(":", 2)
+    if len(parts) != 3:
+        return match
+    display_path, line_number, content = parts
+    display_path = display_path.replace("\\", "/").removeprefix("./")
+    return f"{display_path}:{line_number}:{content}"
+
+
+def _search_with_ripgrep(
+    workspace_root: Path,
+    target_path: Path,
+    query: str,
+    file_pattern: str,
+    max_results: int,
+) -> tuple[list[str], bool] | None:
+    """使用 ripgrep 搜索；程序不可用时返回 None。"""
+    executable = shutil.which("rg")
+    if executable is None:
+        return None
+
+    target_argument = target_path.relative_to(workspace_root).as_posix() or "."
+    command = [
+        executable,
+        "--fixed-strings",
+        "--line-number",
+        "--no-heading",
+        "--with-filename",
+        "--hidden",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--path-separator",
+        "/",
+        "--max-filesize",
+        str(_MAX_SEARCH_FILE_SIZE),
+        "--no-messages",
+    ]
+    if file_pattern != "*":
+        command.extend(("--glob", file_pattern))
+    for directory_name in sorted(_IGNORED_DIRECTORY_NAMES):
+        command.extend(("--glob", f"!**/{directory_name}/**"))
+    for directory_suffix in _IGNORED_DIRECTORY_SUFFIXES:
+        command.extend(("--glob", f"!**/*{directory_suffix}/**"))
+    command.extend(("--", query, target_argument))
+
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=workspace_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError:
+        return None
+
+    matches: list[str] = []
+    truncated = False
+    assert process.stdout is not None
+
+    # 只读取 max_results 之外的一个结果，用来判断输出是否真的被截断。
+    for output_line in process.stdout:
+        normalized_match = _normalize_search_match(
+            output_line.removesuffix("\n").removesuffix("\r")
+        )
+        matches.append(normalized_match)
+        if len(matches) > max_results:
+            truncated = True
+            break
+
+    if truncated and process.poll() is None:
+        try:
+            process.terminate()
+        except OSError:
+            pass
+    try:
+        _, stderr = process.communicate(timeout=2)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        _, stderr = process.communicate()
+
+    if not truncated and process.returncode not in (0, 1):
+        detail = stderr.strip() or f"exit code {process.returncode}"
+        raise RuntimeError(f"ripgrep search failed: {detail}")
+    return matches[:max_results], truncated
 
 
 def _build_unified_diff(
@@ -109,41 +264,59 @@ def _build_unified_diff(
     return diff or f"--- {before_path}\n+++ b/{display_path}\n"
 
 
-def read_file(workspace: Path, relative_path: str) -> str:
-    """读取工作区内的 UTF-8 文本文件。"""
-    file_path = _require_workspace_file(workspace, relative_path)
-    return file_path.read_text(encoding="utf-8")
-
-
-def replace_text(
+def read_file(
     workspace: Path,
     relative_path: str,
-    old_text: str,
-    new_text: str,
+    start_line: int = 1,
+    max_lines: int = 200,
 ) -> str:
-    """精确替换唯一一处文本，并返回统一差异格式。"""
-    if not old_text:
-        raise ValueError("old_text must not be empty")
-    if old_text == new_text:
-        raise ValueError("new_text must differ from old_text")
+    """按行读取工作区内的 UTF-8 文本文件。"""
+    if start_line < 1:
+        raise ValueError("start_line must be at least 1")
+    if max_lines < 1:
+        raise ValueError("max_lines must be at least 1")
+    if max_lines > _MAX_READ_LINES:
+        raise ValueError(f"max_lines must not exceed {_MAX_READ_LINES}")
 
     file_path = _require_workspace_file(workspace, relative_path)
-    original_content = file_path.read_text(encoding="utf-8")
-    match_count = original_content.count(old_text)
-
-    # 只允许唯一匹配，避免模型生成的修改产生歧义或误改多处。
-    if match_count == 0:
-        raise ValueError("old_text was not found in the file")
-    if match_count > 1:
+    lines = file_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    total_lines = len(lines)
+    if total_lines == 0:
+        return "[lines 0-0 of 0]"
+    if start_line > total_lines:
         raise ValueError(
-            f"old_text must match exactly once; found {match_count} matches"
+            f"start_line {start_line} is past the end of the file "
+            f"({total_lines} lines)"
         )
 
-    updated_content = original_content.replace(old_text, new_text, 1)
-    diff = _build_unified_diff(relative_path, original_content, updated_content)
+    selected_lines = lines[start_line - 1 : start_line - 1 + max_lines]
+    visible_lines: list[str] = []
+    visible_characters = 0
+    last_line_truncated = False
 
-    file_path.write_text(updated_content, encoding="utf-8")
-    return diff
+    # 保证一次工具调用不会把过多文件内容送回模型上下文。
+    for line in selected_lines:
+        remaining_characters = _MAX_READ_CHARACTERS - visible_characters
+        if len(line) <= remaining_characters:
+            visible_lines.append(line)
+            visible_characters += len(line)
+            continue
+        if not visible_lines:
+            visible_lines.append(line[:remaining_characters])
+            last_line_truncated = True
+        break
+
+    end_line = start_line + len(visible_lines) - 1
+    header_parts = [f"lines {start_line}-{end_line} of {total_lines}"]
+    if end_line < total_lines:
+        header_parts.append(f"next_start_line={end_line + 1}")
+    if last_line_truncated:
+        header_parts.append(
+            f"line {end_line} truncated at {_MAX_READ_CHARACTERS} characters"
+        )
+
+    header = f"[{'; '.join(header_parts)}]"
+    return f"{header}\n{''.join(visible_lines)}"
 
 
 def edit_file(
@@ -218,10 +391,13 @@ def list_files(
     workspace: Path,
     relative_path: str = ".",
     max_entries: int = 200,
+    max_depth: int = 2,
 ) -> str:
-    """递归列出工作区文件，并使用相对于工作区的路径。"""
+    """列出工作区内有限深度的文件和目录。"""
     if max_entries < 1:
         raise ValueError("max_entries must be at least 1")
+    if max_depth < 1:
+        raise ValueError("max_depth must be at least 1")
 
     workspace_root = _resolve_workspace(workspace)
     target_path = _resolve_workspace_path(workspace_root, relative_path)
@@ -231,13 +407,18 @@ def list_files(
         raise ValueError(f"path is not a file or directory: {relative_path}")
 
     entries: list[str] = []
-    for file_path in _iter_workspace_files(workspace_root, target_path):
+    for entry_path, is_directory in _iter_workspace_entries(
+        workspace_root,
+        target_path,
+        max_depth,
+    ):
         if len(entries) == max_entries:
-            entries.append(f"... truncated after {max_entries} files")
+            entries.append(f"... truncated after {max_entries} entries")
             break
-        entries.append(file_path.relative_to(workspace_root).as_posix())
+        display_path = entry_path.relative_to(workspace_root).as_posix()
+        entries.append(f"{display_path}/" if is_directory else display_path)
 
-    return "\n".join(entries) if entries else "No files found."
+    return "\n".join(entries) if entries else "No entries found."
 
 
 def search_text(
@@ -245,12 +426,15 @@ def search_text(
     query: str,
     relative_path: str = ".",
     max_results: int = 50,
+    file_pattern: str = "*",
 ) -> str:
-    """在 UTF-8 文本文件中区分大小写地搜索固定字符串。"""
+    """按文件模式区分大小写地搜索固定字符串。"""
     if not query:
         raise ValueError("query must not be empty")
     if max_results < 1:
         raise ValueError("max_results must be at least 1")
+    if not file_pattern:
+        raise ValueError("file_pattern must not be empty")
 
     workspace_root = _resolve_workspace(workspace)
     target_path = _resolve_workspace_path(workspace_root, relative_path)
@@ -259,8 +443,30 @@ def search_text(
     if not target_path.is_file() and not target_path.is_dir():
         raise ValueError(f"path is not a file or directory: {relative_path}")
 
+    ripgrep_result = _search_with_ripgrep(
+        workspace_root,
+        target_path,
+        query,
+        file_pattern,
+        max_results,
+    )
+    if ripgrep_result is not None:
+        matches, truncated = ripgrep_result
+        if not matches:
+            return f"No matches found for {query!r}."
+        if truncated:
+            matches.append(f"... truncated after {max_results} matches")
+        return "\n".join(matches)
+
+    # 没有安装 ripgrep 时，退回到 Python 文件扫描。
     matches: list[str] = []
     for file_path in _iter_workspace_files(workspace_root, target_path):
+        if not _matches_file_pattern(
+            file_path,
+            workspace_root,
+            file_pattern,
+        ):
+            continue
         try:
             # 限制单个文件大小，并且只搜索能够按 UTF-8 解码的文本文件。
             if file_path.stat().st_size > _MAX_SEARCH_FILE_SIZE:
@@ -273,7 +479,7 @@ def search_text(
         for line_number, line in enumerate(content.splitlines(), start=1):
             if query not in line:
                 continue
-            matches.append(f"{display_path}:{line_number}:{line.rstrip()}")
+            matches.append(f"{display_path}:{line_number}:{line}")
             # 多读取一个匹配项，确保只有确实被截断时才显示截断提示。
             if len(matches) > max_results:
                 visible_matches = matches[:max_results]

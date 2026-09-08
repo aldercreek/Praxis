@@ -21,4 +21,5 @@ def test_build_instructions_includes_the_runtime_context() -> None:
     assert f"Workspace root: {encoded_workspace}" in instructions
     assert "Available shells: cmd, pwsh" in instructions
     assert "Unavailable shells: bash, sh" in instructions
+    assert "read only the relevant line ranges" in instructions
     assert "ADA_API_KEY" not in instructions

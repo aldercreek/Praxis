@@ -7,7 +7,6 @@ from praxis_agent.tools import (
     edit_file,
     list_files,
     read_file,
-    replace_text,
     search_text,
 )
 
@@ -18,7 +17,42 @@ def test_read_file_returns_utf8_text(tmp_path: Path) -> None:
 
     content = read_file(tmp_path, "notes.txt")
 
-    assert content == "hello, Praxis\n"
+    assert content == "[lines 1-1 of 1]\nhello, Praxis\n"
+
+
+def test_read_file_returns_the_requested_line_range(tmp_path: Path) -> None:
+    source_file = tmp_path / "notes.txt"
+    source_file.write_text(
+        "one\ntwo\nthree\nfour\n",
+        encoding="utf-8",
+    )
+
+    content = read_file(tmp_path, "notes.txt", start_line=2, max_lines=2)
+
+    assert content == (
+        "[lines 2-3 of 4; next_start_line=4]\ntwo\nthree\n"
+    )
+
+
+def test_read_file_limits_the_number_of_requested_lines(tmp_path: Path) -> None:
+    source_file = tmp_path / "notes.txt"
+    source_file.write_text("content\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="max_lines must not exceed 400"):
+        read_file(tmp_path, "notes.txt", max_lines=401)
+
+
+def test_read_file_limits_a_single_long_line(tmp_path: Path) -> None:
+    source_file = tmp_path / "notes.txt"
+    source_file.write_text("x" * 20_001, encoding="utf-8")
+
+    content = read_file(tmp_path, "notes.txt")
+    header, visible_content = content.split("\n", 1)
+
+    assert header == (
+        "[lines 1-1 of 1; line 1 truncated at 20000 characters]"
+    )
+    assert visible_content == "x" * 20_000
 
 
 def test_read_file_reports_a_missing_file(tmp_path: Path) -> None:
@@ -34,51 +68,6 @@ def test_read_file_rejects_a_path_outside_the_workspace(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="path must stay inside the workspace"):
         read_file(workspace, "../outside.txt")
-
-
-def test_replace_text_updates_one_exact_match(tmp_path: Path) -> None:
-    source_file = tmp_path / "config.txt"
-    source_file.write_text("mode=old\n", encoding="utf-8")
-
-    diff = replace_text(tmp_path, "config.txt", "mode=old", "mode=new")
-
-    assert source_file.read_text(encoding="utf-8") == "mode=new\n"
-    assert "--- a/config.txt" in diff
-    assert "+++ b/config.txt" in diff
-    assert "-mode=old" in diff
-    assert "+mode=new" in diff
-
-
-def test_replace_text_rejects_a_missing_match(tmp_path: Path) -> None:
-    source_file = tmp_path / "config.txt"
-    source_file.write_text("mode=current\n", encoding="utf-8")
-
-    with pytest.raises(ValueError, match="old_text was not found"):
-        replace_text(tmp_path, "config.txt", "mode=old", "mode=new")
-
-    assert source_file.read_text(encoding="utf-8") == "mode=current\n"
-
-
-def test_replace_text_rejects_multiple_matches(tmp_path: Path) -> None:
-    source_file = tmp_path / "config.txt"
-    source_file.write_text("mode=old\nmode=old\n", encoding="utf-8")
-
-    with pytest.raises(ValueError, match="found 2 matches"):
-        replace_text(tmp_path, "config.txt", "mode=old", "mode=new")
-
-    assert source_file.read_text(encoding="utf-8") == "mode=old\nmode=old\n"
-
-
-def test_replace_text_rejects_a_path_outside_the_workspace(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    outside_file = tmp_path / "outside.txt"
-    outside_file.write_text("mode=old\n", encoding="utf-8")
-
-    with pytest.raises(ValueError, match="path must stay inside the workspace"):
-        replace_text(workspace, "../outside.txt", "mode=old", "mode=new")
-
-    assert outside_file.read_text(encoding="utf-8") == "mode=old\n"
 
 
 def test_edit_file_applies_multiple_replacements(tmp_path: Path) -> None:
@@ -165,10 +154,28 @@ def test_list_files_returns_sorted_relative_paths(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("a\n", encoding="utf-8")
     (tmp_path / ".venv").mkdir()
     (tmp_path / ".venv" / "ignored.py").write_text("ignored\n", encoding="utf-8")
+    (tmp_path / "package.egg-info").mkdir()
+    (tmp_path / "package.egg-info" / "PKG-INFO").write_text(
+        "ignored\n",
+        encoding="utf-8",
+    )
 
     result = list_files(tmp_path)
 
-    assert result.splitlines() == ["a.py", "nested/b.py"]
+    assert result.splitlines() == ["a.py", "nested/", "nested/b.py"]
+
+
+def test_list_files_respects_max_depth(tmp_path: Path) -> None:
+    (tmp_path / "src" / "package").mkdir(parents=True)
+    (tmp_path / "src" / "main.py").write_text("main\n", encoding="utf-8")
+    (tmp_path / "src" / "package" / "module.py").write_text(
+        "module\n",
+        encoding="utf-8",
+    )
+
+    result = list_files(tmp_path, max_depth=1)
+
+    assert result.splitlines() == ["src/"]
 
 
 def test_search_text_returns_path_line_and_content(tmp_path: Path) -> None:
@@ -181,8 +188,17 @@ def test_search_text_returns_path_line_and_content(tmp_path: Path) -> None:
         "# needle\n",
         encoding="utf-8",
     )
+    (tmp_path / "src" / "ignored.txt").write_text(
+        "needle in text\n",
+        encoding="utf-8",
+    )
 
-    result = search_text(tmp_path, "needle", "src")
+    result = search_text(
+        tmp_path,
+        "needle",
+        "src",
+        file_pattern="*.py",
+    )
 
     assert result.splitlines() == [
         "src/first.py:2:needle = value",
