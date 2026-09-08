@@ -6,7 +6,6 @@ from praxis_agent.tools.filesystem import (
     edit_file,
     list_files,
     read_file,
-    replace_text,
     search_text,
 )
 from praxis_agent.tools.registry import (
@@ -26,7 +25,6 @@ __all__ = [
     "edit_file",
     "list_files",
     "read_file",
-    "replace_text",
     "run_command",
     "search_text",
 ]
