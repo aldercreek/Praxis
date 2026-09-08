@@ -36,6 +36,29 @@ At startup, Praxis tells the model only the operating system, resolved
 workspace root, and which common shells are available or unavailable. It does
 not send environment-variable values or the full system `PATH`.
 
+## Langfuse observability
+
+Praxis enables Langfuse automatically when both project keys are present. The
+default endpoint is Ctrip's production Langfuse instance:
+
+```powershell
+$env:LANGFUSE_PUBLIC_KEY = "your-project-public-key"
+$env:LANGFUSE_SECRET_KEY = "your-project-secret-key"
+```
+
+The endpoint and trace environment can be overridden when needed:
+
+```powershell
+$env:LANGFUSE_BASE_URL = "https://langfuse.flight.ctripcorp.com"
+$env:LANGFUSE_TRACING_ENVIRONMENT = "development"
+```
+
+Each interactive CLI process is recorded as one Langfuse session. Each task is
+one trace containing its model requests and tool calls. Praxis still runs when
+Langfuse is not configured or temporarily unavailable, and flushes pending
+observations before the CLI exits. Inputs and outputs are truncated, and
+common credential fields are redacted before upload.
+
 ## Run
 
 Pass a task directly. Praxis can inspect and modify files under the current

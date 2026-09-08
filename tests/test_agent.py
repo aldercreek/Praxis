@@ -99,7 +99,14 @@ def test_agent_returns_the_models_final_text(tmp_path: Path) -> None:
     assert len({event.turn_id for event in event_sink.events}) == 1
     assert event_sink.events[0].task == "inspect repository"
     assert event_sink.events[1].request_number == 1
+    assert event_sink.events[1].input_items == (
+        {"role": "user", "content": "inspect repository"},
+    )
     assert event_sink.events[2].text == "Repository inspected."
+    assert event_sink.events[3].response is not None
+    assert event_sink.events[3].response.output_text == (
+        "Repository inspected."
+    )
     assert event_sink.events[4].text == "Repository inspected."
 
 

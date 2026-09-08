@@ -7,6 +7,7 @@ _DEFAULT_ADA_BASE_URL = (
     "https://ada-cli-go.ctripcorp.com/coding-plan/openai/v1"
 )
 _DEFAULT_ADA_MODEL = "gpt-5.6-terra-2026-07-09"
+_DEFAULT_LANGFUSE_BASE_URL = "https://langfuse.flight.ctripcorp.com"
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,3 +38,49 @@ class ModelConfig:
             values.get("ADA_BASE_URL", "").strip() or _DEFAULT_ADA_BASE_URL
         )
         return cls(api_key=api_key, model=model, base_url=base_url)
+
+
+@dataclass(frozen=True, slots=True)
+class LangfuseConfig:
+    """保存携程内部 Langfuse 客户端所需的配置。"""
+
+    public_key: str = field(repr=False)
+    secret_key: str = field(repr=False)
+    base_url: str = _DEFAULT_LANGFUSE_BASE_URL
+    environment: str = "development"
+
+    @classmethod
+    def from_env(
+        cls,
+        environ: Mapping[str, str] | None = None,
+    ) -> "LangfuseConfig | None":
+        """读取 Langfuse 配置；没有配置密钥时表示不启用观测。"""
+        values = os.environ if environ is None else environ
+        public_key = values.get("LANGFUSE_PUBLIC_KEY", "").strip()
+        secret_key = values.get("LANGFUSE_SECRET_KEY", "").strip()
+
+        if not public_key and not secret_key:
+            return None
+        if not public_key:
+            raise ValueError(
+                "LANGFUSE_PUBLIC_KEY is required when Langfuse is configured"
+            )
+        if not secret_key:
+            raise ValueError(
+                "LANGFUSE_SECRET_KEY is required when Langfuse is configured"
+            )
+
+        base_url = (
+            values.get("LANGFUSE_BASE_URL", "").strip()
+            or _DEFAULT_LANGFUSE_BASE_URL
+        )
+        environment = (
+            values.get("LANGFUSE_TRACING_ENVIRONMENT", "").strip()
+            or "development"
+        )
+        return cls(
+            public_key=public_key,
+            secret_key=secret_key,
+            base_url=base_url,
+            environment=environment,
+        )

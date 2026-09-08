@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
+    from praxis_agent.model import ModelResponse
     from praxis_agent.tools import ToolResult
 
 
@@ -27,6 +28,7 @@ class ModelRequestStarted(AgentEvent):
     """表示一次模型请求已经开始。"""
 
     request_number: int
+    input_items: tuple[object, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +44,7 @@ class ModelRequestCompleted(AgentEvent):
     """表示一次模型响应已经完整接收并解析。"""
 
     request_number: int
+    response: ModelResponse | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,12 +119,24 @@ class EventSink(Protocol):
         ...
 
 
+@dataclass(frozen=True, slots=True)
+class CompositeEventSink:
+    """把同一个事件依次发送给多个消费者。"""
+
+    sinks: tuple[EventSink, ...]
+
+    def emit(self, event: AgentEvent) -> None:
+        for sink in self.sinks:
+            sink.emit(event)
+
+
 __all__ = [
     "AgentEvent",
     "ApprovalRequested",
     "ApprovalResolved",
     "AssistantTextDelta",
     "AssistantTextCompleted",
+    "CompositeEventSink",
     "EventSink",
     "ModelRequestCompleted",
     "ModelRequestStarted",
