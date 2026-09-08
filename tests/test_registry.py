@@ -11,6 +11,7 @@ def test_default_registry_contains_all_filesystem_tools(tmp_path: Path) -> None:
         "edit_file",
         "create_file",
         "list_files",
+        "find_files",
         "search_text",
         "run_command",
     )

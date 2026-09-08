@@ -56,8 +56,12 @@ $env:LANGFUSE_TRACING_ENVIRONMENT = "development"
 Each interactive CLI process is recorded as one Langfuse session. Each task is
 one trace containing its model requests and tool calls. Praxis still runs when
 Langfuse is not configured or temporarily unavailable, and flushes pending
-observations before the CLI exits. Inputs and outputs are truncated, and
-common credential fields are redacted before upload.
+observations before the CLI exits. Large inputs and outputs are truncated
+before upload.
+
+On Windows, Praxis uses the system certificate store for Langfuse connections
+so that internal certificate authorities trusted by Windows are also trusted by
+the Python client.
 
 ## Run
 

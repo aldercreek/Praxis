@@ -5,6 +5,7 @@ import pytest
 from praxis_agent.tools import (
     create_file,
     edit_file,
+    find_files,
     list_files,
     read_file,
     search_text,
@@ -176,6 +177,60 @@ def test_list_files_respects_max_depth(tmp_path: Path) -> None:
     result = list_files(tmp_path, max_depth=1)
 
     assert result.splitlines() == ["src/"]
+
+
+def test_find_files_returns_sorted_matching_paths(tmp_path: Path) -> None:
+    (tmp_path / "src" / "package").mkdir(parents=True)
+    (tmp_path / "src" / "package" / "second.py").write_text(
+        "second\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "first.py").write_text("first\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("readme\n", encoding="utf-8")
+    (tmp_path / ".venv").mkdir()
+    (tmp_path / ".venv" / "ignored.py").write_text(
+        "ignored\n",
+        encoding="utf-8",
+    )
+
+    result = find_files(tmp_path, "*.py")
+
+    assert result.splitlines() == [
+        "src/first.py",
+        "src/package/second.py",
+    ]
+
+
+def test_find_files_reports_truncated_results(tmp_path: Path) -> None:
+    for file_name in ("c.py", "a.py", "b.py"):
+        (tmp_path / file_name).write_text("content\n", encoding="utf-8")
+
+    result = find_files(tmp_path, "*.py", max_results=2)
+
+    assert result.splitlines() == [
+        "a.py",
+        "b.py",
+        "... truncated after 2 files",
+    ]
+
+
+def test_find_files_falls_back_to_python_without_ripgrep(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "module.py").write_text(
+        "content\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "praxis_agent.tools.filesystem.shutil.which",
+        lambda _: None,
+    )
+
+    result = find_files(tmp_path, "*.py")
+
+    assert result == "src/module.py"
 
 
 def test_search_text_returns_path_line_and_content(tmp_path: Path) -> None:

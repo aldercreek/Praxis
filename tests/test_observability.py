@@ -1,8 +1,12 @@
+import sys
 from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 from types import TracebackType
 from typing import Any
 
+import pytest
+
+import praxis_agent.observability as observability
 from praxis_agent.config import LangfuseConfig
 from praxis_agent.events import (
     AssistantTextCompleted,
@@ -102,6 +106,45 @@ def _sink(
         session_id="session-1",
     )
     return sink, client
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="Windows certificate store integration",
+)
+def test_langfuse_client_uses_the_windows_certificate_store(
+    monkeypatch: Any,
+) -> None:
+    injected: list[bool] = []
+    client = FakeLangfuseClient()
+    constructor_arguments: dict[str, object] = {}
+
+    def create_client(**arguments: object) -> FakeLangfuseClient:
+        constructor_arguments.update(arguments)
+        return client
+
+    monkeypatch.setattr(
+        "truststore.inject_into_ssl",
+        lambda: injected.append(True),
+    )
+    monkeypatch.setattr(observability, "Langfuse", create_client)
+    config = LangfuseConfig(
+        "public-key",
+        "secret-key",
+        base_url="https://langfuse.example.com",
+        environment="test",
+    )
+
+    result = observability._create_langfuse_client(config)
+
+    assert result is client
+    assert injected == [True]
+    assert constructor_arguments == {
+        "public_key": "public-key",
+        "secret_key": "secret-key",
+        "base_url": "https://langfuse.example.com",
+        "environment": "test",
+    }
 
 
 def test_langfuse_sink_builds_agent_generation_and_tool_trace(
