@@ -22,6 +22,7 @@ from praxis_agent.events import (
     TurnStarted,
 )
 from praxis_agent.model import FunctionCall, ModelResponse, TextDeltaHandler
+from praxis_agent.planning import PlanStepStatus, RunStatus
 from praxis_agent.tools import create_default_registry
 
 
@@ -73,7 +74,8 @@ def _agent(
     model_client = FakeModelClient(responses)
     agent = Agent(
         model_client=model_client,
-        tool_registry=create_default_registry(tmp_path),
+        tool_registry=create_default_registry(),
+        workspace=tmp_path,
         max_turns=max_turns,
         event_sink=event_sink,
     )
@@ -95,7 +97,12 @@ def test_agent_returns_the_models_final_text(tmp_path: Path) -> None:
     assert model_client.inputs == [
         [{"role": "user", "content": "inspect repository"}]
     ]
-    assert len(model_client.tools[0]) == 7
+    assert len(model_client.tools[0]) == 8
+    assert model_client.tools[0][-1]["name"] == "update_plan"
+    assert agent.run_state is not None
+    assert agent.run_state.original_task == "inspect repository"
+    assert agent.run_state.status is RunStatus.COMPLETED
+    assert agent.run_state.error is None
     assert [type(event) for event in event_sink.events] == [
         TurnStarted,
         ModelRequestStarted,
@@ -260,6 +267,8 @@ def test_agent_can_execute_a_write_tool(tmp_path: Path) -> None:
     assert (tmp_path / "created.txt").read_text(encoding="utf-8") == (
         "created by Praxis\n"
     )
+    assert agent.run_state is not None
+    assert agent.run_state.changed_files == {"created.txt"}
     tool_output = model_client.inputs[1][-1]
     assert json.loads(tool_output["output"])["success"] is True
 
@@ -370,3 +379,52 @@ def test_agent_stops_after_the_maximum_number_of_turns(
 
     assert isinstance(event_sink.events[-1], TurnFailed)
     assert event_sink.events[-1].error_type == "AgentError"
+    assert agent.run_state is not None
+    assert agent.run_state.status is RunStatus.FAILED
+    assert agent.run_state.error == (
+        "AgentError: agent exceeded the maximum of 1 model turns"
+    )
+
+
+def test_agent_lets_the_model_update_the_task_plan(tmp_path: Path) -> None:
+    plan_arguments = {
+        "plan": [
+            {"step": "Inspect the repository", "status": "completed"},
+            {"step": "Implement the change", "status": "in_progress"},
+            {"step": "Run tests", "status": "pending"},
+        ]
+    }
+    agent, model_client = _agent(
+        tmp_path,
+        [
+            ModelResponse(
+                output_items=(),
+                output_text="",
+                function_calls=(
+                    FunctionCall(
+                        "call-1",
+                        "update_plan",
+                        json.dumps(plan_arguments),
+                    ),
+                ),
+            ),
+            ModelResponse((), "Work continues according to the plan.", ()),
+        ],
+    )
+
+    result = agent.run("complete a non-trivial task")
+
+    assert result == "Work continues according to the plan."
+    assert agent.run_state is not None
+    assert [step.description for step in agent.run_state.plan] == [
+        "Inspect the repository",
+        "Implement the change",
+        "Run tests",
+    ]
+    assert [step.status for step in agent.run_state.plan] == [
+        PlanStepStatus.COMPLETED,
+        PlanStepStatus.IN_PROGRESS,
+        PlanStepStatus.PENDING,
+    ]
+    tool_output = json.loads(model_client.inputs[1][-1]["output"])
+    assert tool_output == {"success": True, "output": "Plan updated."}

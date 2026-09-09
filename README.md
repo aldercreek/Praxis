@@ -102,6 +102,11 @@ praxis> /exit
 Conversation history is currently kept only in memory and disappears when the
 Praxis process exits.
 
+For non-trivial work, Praxis can maintain a short task plan through the
+`update_plan` tool. Each task also exposes its latest in-memory `RunState`,
+including the original request, current plan, files successfully changed by
+file tools, and the final `running`, `completed`, or `failed` status.
+
 ## Test
 
 ```powershell

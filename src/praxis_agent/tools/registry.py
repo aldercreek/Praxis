@@ -1,8 +1,12 @@
+from __future__ import annotations
+
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
+from functools import wraps
 from inspect import signature
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from praxis_agent.tools.command import run_command
 from praxis_agent.tools.filesystem import (
@@ -13,6 +17,9 @@ from praxis_agent.tools.filesystem import (
     read_file,
     search_text,
 )
+
+if TYPE_CHECKING:
+    from praxis_agent.planning.state import RunState
 
 
 ToolHandler = Callable[..., str]
@@ -215,6 +222,14 @@ _RUN_COMMAND_PARAMETERS: dict[str, object] = {
 
 
 @dataclass(frozen=True, slots=True)
+class ToolContext:
+    """保存由 Agent 注入、模型不可见的单次任务运行时依赖。"""
+
+    workspace: Path
+    run_state: RunState
+
+
+@dataclass(frozen=True, slots=True)
 class Tool:
     """描述一个可以由 Agent 运行时执行的具名函数。"""
 
@@ -245,14 +260,9 @@ class ToolResult:
 
 
 class ToolRegistry:
-    """保存绑定到工作区的工具，并通过统一入口执行。"""
+    """保存工具定义，并通过统一入口执行指定工具。"""
 
-    def __init__(self, workspace: Path) -> None:
-        workspace_root = workspace.resolve()
-        if not workspace_root.is_dir():
-            raise NotADirectoryError(f"workspace is not a directory: {workspace}")
-
-        self.workspace = workspace_root
+    def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
 
     @property
@@ -284,8 +294,10 @@ class ToolRegistry:
         self,
         name: str,
         arguments: Mapping[str, object],
+        *,
+        context: ToolContext,
     ) -> ToolResult:
-        """执行一个工具，并将输出或错误转换成统一结果。"""
+        """注入运行时上下文并将工具输出或异常转换成统一结果。"""
         tool = self._tools.get(name)
         if tool is None:
             return ToolResult(False, f"unknown tool: {name}")
@@ -295,8 +307,8 @@ class ToolRegistry:
         keyword_arguments = dict(arguments)
         try:
             # bind 可以在不执行工具的情况下发现缺失或多余的参数。
-            signature(tool.handler).bind(self.workspace, **keyword_arguments)
-            output = tool.handler(self.workspace, **keyword_arguments)
+            signature(tool.handler).bind(context, **keyword_arguments)
+            output = tool.handler(context, **keyword_arguments)
         except Exception as error:
             # 将工具异常转换为结果，保证未来的 Agent 循环可以继续运行。
             return ToolResult(False, f"{type(error).__name__}: {error}")
@@ -304,15 +316,28 @@ class ToolRegistry:
         return ToolResult(True, output)
 
 
-def create_default_registry(workspace: Path) -> ToolRegistry:
-    """创建包含全部内置文件系统工具的注册表。"""
-    registry = ToolRegistry(workspace)
+def _inject_workspace(handler: ToolHandler) -> ToolHandler:
+    """把使用 Path 的底层函数适配为接收 ToolContext 的工具 handler。"""
+
+    @wraps(handler)
+    def execute(context: ToolContext, **arguments: object) -> str:
+        return handler(context.workspace, **arguments)
+
+    return execute
+
+
+def create_default_registry() -> ToolRegistry:
+    """创建包含全部内置工具的注册表。"""
+    # planning.tool 依赖这里的 Tool 类型，因此等 Registry 初始化完成再导入。
+    from praxis_agent.planning.tool import create_update_plan_tool
+
+    registry = ToolRegistry()
     registry.register(
         Tool(
             name="read_file",
             description="Read a bounded line range from a UTF-8 workspace file.",
             parameters=_READ_FILE_PARAMETERS,
-            handler=read_file,
+            handler=_inject_workspace(read_file),
         )
     )
     registry.register(
@@ -323,7 +348,7 @@ def create_default_registry(workspace: Path) -> ToolRegistry:
                 "UTF-8 workspace file in a single all-or-nothing edit."
             ),
             parameters=_EDIT_FILE_PARAMETERS,
-            handler=edit_file,
+            handler=_inject_workspace(edit_file),
         )
     )
     registry.register(
@@ -331,7 +356,7 @@ def create_default_registry(workspace: Path) -> ToolRegistry:
             name="create_file",
             description="Create a new UTF-8 workspace file.",
             parameters=_CREATE_FILE_PARAMETERS,
-            handler=create_file,
+            handler=_inject_workspace(create_file),
         )
     )
     registry.register(
@@ -339,7 +364,7 @@ def create_default_registry(workspace: Path) -> ToolRegistry:
             name="list_files",
             description="List files and directories under a workspace path.",
             parameters=_LIST_FILES_PARAMETERS,
-            handler=list_files,
+            handler=_inject_workspace(list_files),
         )
     )
     registry.register(
@@ -347,7 +372,7 @@ def create_default_registry(workspace: Path) -> ToolRegistry:
             name="find_files",
             description="Find workspace files by name or glob pattern.",
             parameters=_FIND_FILES_PARAMETERS,
-            handler=find_files,
+            handler=_inject_workspace(find_files),
         )
     )
     registry.register(
@@ -355,7 +380,7 @@ def create_default_registry(workspace: Path) -> ToolRegistry:
             name="search_text",
             description="Search fixed text in workspace files using a glob pattern.",
             parameters=_SEARCH_TEXT_PARAMETERS,
-            handler=search_text,
+            handler=_inject_workspace(search_text),
         )
     )
     registry.register(
@@ -366,8 +391,9 @@ def create_default_registry(workspace: Path) -> ToolRegistry:
                 "return its exit code, stdout, and stderr."
             ),
             parameters=_RUN_COMMAND_PARAMETERS,
-            handler=run_command,
+            handler=_inject_workspace(run_command),
             requires_approval=True,
         )
     )
+    registry.register(create_update_plan_tool())
     return registry

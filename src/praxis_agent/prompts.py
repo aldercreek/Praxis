@@ -9,6 +9,9 @@ Prefer file tools over shell commands when inspecting the workspace.
 Use find_files to locate files by name or glob pattern.
 Search first when possible, then read only the relevant line ranges.
 When multiple tool calls are independent, request them together in the same response.
+Use update_plan for non-trivial tasks with at least three distinct steps.
+Keep at most one plan step in_progress and update the plan as work advances.
+Mark a plan step completed only after its work and required verification are done.
 All tool paths must be relative to the workspace root.
 Do not try to use a shell listed as unavailable in the runtime context.
 After modifying code, run relevant checks when they are available.
