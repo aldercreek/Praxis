@@ -20,13 +20,19 @@ from praxis_agent.model import (
     ModelClient,
     OpenAIModelClient,
 )
+from praxis_agent.planning import RunState
 from praxis_agent.prompts import build_instructions
 from praxis_agent.runtime import collect_runtime_context
 from praxis_agent.tool_execution import (
     ToolApprovalHandler,
     ToolCallExecutor,
 )
-from praxis_agent.tools import ToolRegistry, ToolResult, create_default_registry
+from praxis_agent.tools import (
+    ToolContext,
+    ToolRegistry,
+    ToolResult,
+    create_default_registry,
+)
 
 
 class AgentError(RuntimeError):
@@ -37,10 +43,12 @@ class AgentError(RuntimeError):
 class Agent:
     model_client: ModelClient
     tool_registry: ToolRegistry
+    workspace: Path
     max_turns: int = 30
     name: str = "Praxis"
     event_sink: EventSink | None = None
     approve_tool_call: ToolApprovalHandler | None = None
+    run_state: RunState | None = field(default=None, init=False)
     _input_items: list[object] = field(
         default_factory=list,
         init=False,
@@ -51,6 +59,13 @@ class Agent:
         if self.max_turns < 1:
             raise ValueError("max_turns must be at least 1")
 
+        workspace_root = self.workspace.resolve()
+        if not workspace_root.is_dir():
+            raise NotADirectoryError(
+                f"workspace is not a directory: {self.workspace}"
+            )
+        self.workspace = workspace_root
+
     def run(self, task: str) -> str:
         """运行一轮任务，并保留内容供同一会话的后续任务使用。"""
         normalized_task = task.strip()
@@ -58,17 +73,22 @@ class Agent:
             raise ValueError("task must not be empty")
 
         turn_id = uuid4().hex
-        self._emit(TurnStarted(turn_id, normalized_task))
+        run_state = RunState(original_task=normalized_task)
+        self.run_state = run_state
 
         try:
+            self._emit(TurnStarted(turn_id, normalized_task))
             output_text = self._run_model_loop(
                 turn_id,
                 normalized_task,
+                run_state,
             )
+            run_state.complete()
             self._emit(AssistantTextCompleted(turn_id, output_text))
             self._emit(TurnCompleted(turn_id))
             return output_text
         except Exception as error:
+            run_state.fail(error)
             self._emit(
                 TurnFailed(
                     turn_id,
@@ -86,12 +106,14 @@ class Agent:
         self,
         turn_id: str,
         task: str,
+        run_state: RunState,
     ) -> str:
         """持续请求模型并执行工具，直到模型生成最终文本。"""
         self._input_items.append({"role": "user", "content": task})
         tool_definitions = self.tool_registry.definitions()
         tool_executor = ToolCallExecutor(
             tool_registry=self.tool_registry,
+            context=ToolContext(self.workspace, run_state),
             publish_event=self._emit,
             approve_tool_call=self.approve_tool_call,
         )
@@ -135,6 +157,7 @@ class Agent:
             # 一次响应可能包含多个工具调用，需要逐个执行并回传结果。
             for function_call in response.function_calls:
                 result = tool_executor.execute(turn_id, function_call)
+                _record_changed_file(run_state, function_call, result)
                 self._input_items.append(
                     _build_function_call_output(function_call, result)
                 )
@@ -147,6 +170,24 @@ class Agent:
         """把事件发送给外部消费者；未配置消费者时保持静默。"""
         if self.event_sink is not None:
             self.event_sink.emit(event)
+
+
+def _record_changed_file(
+    run_state: RunState,
+    function_call: FunctionCall,
+    result: ToolResult,
+) -> None:
+    """根据成功的写文件工具调用更新任务状态。"""
+    if (
+        not result.success
+        or function_call.name not in {"edit_file", "create_file"}
+    ):
+        return
+
+    arguments = json.loads(function_call.arguments)
+    relative_path = arguments.get("relative_path")
+    if isinstance(relative_path, str):
+        run_state.record_changed_file(relative_path)
 
 
 def _build_function_call_output(
@@ -173,7 +214,7 @@ def create_default_agent(
     event_sink: EventSink | None = None,
     approve_tool_call: ToolApprovalHandler | None = None,
 ) -> Agent:
-    """使用环境配置和内置文件工具创建默认 Agent。"""
+    """使用环境配置和内置工具创建默认 Agent。"""
     config = ModelConfig.from_env()
     runtime_context = collect_runtime_context(workspace)
     return Agent(
@@ -181,7 +222,8 @@ def create_default_agent(
             config,
             instructions=build_instructions(runtime_context),
         ),
-        tool_registry=create_default_registry(runtime_context.workspace_root),
+        tool_registry=create_default_registry(),
+        workspace=runtime_context.workspace_root,
         event_sink=event_sink,
         approve_tool_call=approve_tool_call,
     )

@@ -11,7 +11,7 @@ from praxis_agent.events import (
     ToolStarted,
 )
 from praxis_agent.model import FunctionCall
-from praxis_agent.tools import ToolRegistry, ToolResult
+from praxis_agent.tools import ToolContext, ToolRegistry, ToolResult
 
 
 ToolApprovalHandler = Callable[[str, Mapping[str, object]], bool]
@@ -43,6 +43,7 @@ class ToolCallExecutor:
     """处理一次完整的工具调用，包括审批和工具生命周期事件。"""
 
     tool_registry: ToolRegistry
+    context: ToolContext
     publish_event: EventPublisher
     approve_tool_call: ToolApprovalHandler | None = None
 
@@ -95,6 +96,7 @@ class ToolCallExecutor:
         result = self.tool_registry.execute(
             function_call.name,
             arguments,
+            context=self.context,
         )
         return self._finish(turn_id, function_call, result)
 

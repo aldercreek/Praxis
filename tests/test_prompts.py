@@ -24,4 +24,6 @@ def test_build_instructions_includes_the_runtime_context() -> None:
     assert "read only the relevant line ranges" in instructions
     assert "Use find_files to locate files by name or glob pattern." in instructions
     assert "multiple tool calls are independent" in instructions
+    assert "Use update_plan for non-trivial tasks" in instructions
+    assert "at most one plan step in_progress" in instructions
     assert "ADA_API_KEY" not in instructions

@@ -11,6 +11,7 @@ from praxis_agent.tools.filesystem import (
 )
 from praxis_agent.tools.registry import (
     Tool,
+    ToolContext,
     ToolRegistry,
     ToolResult,
     create_default_registry,
@@ -19,6 +20,7 @@ from praxis_agent.tools.registry import (
 # 明确声明这个包对外支持的公共导入名称。
 __all__ = [
     "Tool",
+    "ToolContext",
     "ToolRegistry",
     "ToolResult",
     "create_default_registry",
