@@ -20,7 +20,7 @@ from praxis_agent.model import (
     ModelClient,
     OpenAIModelClient,
 )
-from praxis_agent.planning import RunState
+from praxis_agent.planning import RunState, build_run_state_context
 from praxis_agent.prompts import build_instructions
 from praxis_agent.runtime import collect_runtime_context
 from praxis_agent.tool_execution import (
@@ -119,15 +119,19 @@ class Agent:
         )
 
         for request_number in range(1, self.max_turns + 1):
+            request_items = [
+                *self._input_items,
+                build_run_state_context(run_state),
+            ]
             self._emit(
                 ModelRequestStarted(
                     turn_id,
                     request_number,
-                    tuple(self._input_items),
+                    tuple(request_items),
                 )
             )
             response = self.model_client.create_response(
-                self._input_items,
+                request_items,
                 tool_definitions,
                 on_text_delta=lambda text: self._emit(
                     AssistantTextDelta(
