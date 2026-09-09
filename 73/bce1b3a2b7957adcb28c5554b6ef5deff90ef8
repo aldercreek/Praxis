@@ -1,0 +1,61 @@
+src/praxis_agent/prompts.py
+  s_05f61ff3cbe74f::t_c1dcea6fb0f75b 12-14
+tests/test_agent.py
+  s_05f61ff3cbe74f::t_c1dcea6fb0f75b 100-105,270-271,382-430
+  s_05f61ff3cbe74f::t_4c1a129d165b2b 25
+  s_05f61ff3cbe74f::t_f415599d8ffd64 77-78
+README.md
+  s_05f61ff3cbe74f::t_c1dcea6fb0f75b 105-109
+src/praxis_agent/planning/__init__.py
+  s_05f61ff3cbe74f::t_4c1a129d165b2b 1-2,4-5,9-19,21
+  s_05f61ff3cbe74f::t_4d45af16c563ff 3,6-8,20
+src/praxis_agent/planning/plan.py
+  s_05f61ff3cbe74f::t_4d45af16c563ff 1-70
+src/praxis_agent/planning/state.py
+  s_05f61ff3cbe74f::t_4d45af16c563ff 5,7
+  s_05f61ff3cbe74f::t_4c1a129d165b2b 1-4,6,8-39
+tests/test_registry.py
+  s_05f61ff3cbe74f::t_800811845be314 11,30,70
+  s_05f61ff3cbe74f::t_f415599d8ffd64 3-4,7-10,12,22,27,31,71,88,90-94,101,103-107,114,116-120,124-151
+src/praxis_agent/agent.py
+  s_05f61ff3cbe74f::t_c1dcea6fb0f75b 51,76-77,80,84,86,91,109,160,175-180,185-190
+  s_05f61ff3cbe74f::t_800811845be314 181-184,217
+  s_05f61ff3cbe74f::t_61dc0274902a59 23,30-35,46,62-67,116,225-226
+src/praxis_agent/tools/registry.py
+  s_05f61ff3cbe74f::t_5d45ee3e683bbc 6,225-231,263,265,297-298,300,310-311,319-330,334,340,351,359,367,375,383,394,398
+  s_05f61ff3cbe74f::t_a0dd6df53a0d5f 1-2,9,21-22,331-333
+src/praxis_agent/tools/__init__.py
+  s_05f61ff3cbe74f::t_61dc0274902a59 14,23
+src/praxis_agent/__init__.py
+  s_05f61ff3cbe74f::t_c1dcea6fb0f75b 4-9,12-18
+  s_05f61ff3cbe74f::t_4c1a129d165b2b 3
+tests/test_run_state.py
+  s_05f61ff3cbe74f::t_c1dcea6fb0f75b 1-2,4-6,8-13,16-32,34-35,38-62
+  s_05f61ff3cbe74f::t_4c1a129d165b2b 3
+  s_05f61ff3cbe74f::t_4d45af16c563ff 7,14-15,33,36-37
+tests/test_prompts.py
+  s_05f61ff3cbe74f::t_c1dcea6fb0f75b 27-28
+src/praxis_agent/planning/tool.py
+  s_05f61ff3cbe74f::t_4d45af16c563ff 3
+  s_05f61ff3cbe74f::t_4c1a129d165b2b 1-2,5-35,37,45-46,49-55,57
+  s_05f61ff3cbe74f::t_a0dd6df53a0d5f 4
+  s_05f61ff3cbe74f::t_5d45ee3e683bbc 36,38-44,47-48,56
+src/praxis_agent/tool_execution.py
+  s_05f61ff3cbe74f::t_61dc0274902a59 14,46,99
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.43-trip",
+  "base_commit_sha": "73bce1b3a2b7957adcb28c5554b6ef5deff90ef8",
+  "prompts": {},
+  "sessions": {
+    "s_05f61ff3cbe74f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08165-7b07-7723-9093-a5397df3abb9",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "wanjl <wanjl@trip.com>"
+    }
+  }
+}
