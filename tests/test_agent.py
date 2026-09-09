@@ -26,6 +26,15 @@ from praxis_agent.planning import PlanStepStatus, RunStatus
 from praxis_agent.tools import create_default_registry
 
 
+EMPTY_RUN_STATE_CONTEXT = {
+    "role": "developer",
+    "content": (
+        "Current Praxis run state:\n"
+        '{"type":"praxis_run_state","plan":[],"changed_files":[]}'
+    ),
+}
+
+
 class FakeModelClient:
     """返回预设响应的模型客户端，并记录每次请求的输入和工具定义。
 
@@ -95,7 +104,10 @@ def test_agent_returns_the_models_final_text(tmp_path: Path) -> None:
 
     assert result == "Repository inspected."
     assert model_client.inputs == [
-        [{"role": "user", "content": "inspect repository"}]
+        [
+            {"role": "user", "content": "inspect repository"},
+            EMPTY_RUN_STATE_CONTEXT,
+        ]
     ]
     assert len(model_client.tools[0]) == 8
     assert model_client.tools[0][-1]["name"] == "update_plan"
@@ -116,6 +128,7 @@ def test_agent_returns_the_models_final_text(tmp_path: Path) -> None:
     assert event_sink.events[1].request_number == 1
     assert event_sink.events[1].input_items == (
         {"role": "user", "content": "inspect repository"},
+        EMPTY_RUN_STATE_CONTEXT,
     )
     assert event_sink.events[2].text == "Repository inspected."
     assert event_sink.events[3].response is not None
@@ -147,6 +160,7 @@ def test_agent_keeps_history_between_tasks(tmp_path: Path) -> None:
         {"role": "user", "content": "first task"},
         first_output_item,
         {"role": "user", "content": "follow-up task"},
+        EMPTY_RUN_STATE_CONTEXT,
     ]
 
 
@@ -165,7 +179,8 @@ def test_agent_can_clear_history(tmp_path: Path) -> None:
 
     assert result == "Fresh response"
     assert model_client.inputs[1] == [
-        {"role": "user", "content": "fresh task"}
+        {"role": "user", "content": "fresh task"},
+        EMPTY_RUN_STATE_CONTEXT,
     ]
 
 
@@ -269,7 +284,7 @@ def test_agent_can_execute_a_write_tool(tmp_path: Path) -> None:
     )
     assert agent.run_state is not None
     assert agent.run_state.changed_files == {"created.txt"}
-    tool_output = model_client.inputs[1][-1]
+    tool_output = model_client.inputs[1][-2]
     assert json.loads(tool_output["output"])["success"] is True
 
 
@@ -291,7 +306,7 @@ def test_agent_returns_invalid_arguments_to_the_model(tmp_path: Path) -> None:
     result = agent.run("read a file")
 
     assert result == "I could not read the file."
-    tool_output = model_client.inputs[1][-1]
+    tool_output = model_client.inputs[1][-2]
     decoded_output = json.loads(tool_output["output"])
     assert decoded_output["success"] is False
     assert decoded_output["output"].startswith("invalid JSON arguments:")
@@ -351,7 +366,7 @@ def test_agent_asks_for_approval_and_respects_a_decline(
     assert approval.approved is False
     tool_finished = event_sink.events[6]
     assert tool_finished.result.success is False
-    tool_output = model_client.inputs[1][-1]
+    tool_output = model_client.inputs[1][-2]
     decoded_output = json.loads(tool_output["output"])
     assert decoded_output["success"] is False
     assert "declined by the user" in decoded_output["output"]
@@ -426,5 +441,5 @@ def test_agent_lets_the_model_update_the_task_plan(tmp_path: Path) -> None:
         PlanStepStatus.IN_PROGRESS,
         PlanStepStatus.PENDING,
     ]
-    tool_output = json.loads(model_client.inputs[1][-1]["output"])
+    tool_output = json.loads(model_client.inputs[1][-2]["output"])
     assert tool_output == {"success": True, "output": "Plan updated."}

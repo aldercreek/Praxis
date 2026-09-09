@@ -5,6 +5,7 @@ from praxis_agent.planning.plan import (
     PlanStepStatus,
     replace_plan,
 )
+from praxis_agent.planning.model_context import build_run_state_context
 from praxis_agent.planning.state import (
     RunState,
     RunStatus,
@@ -16,6 +17,7 @@ __all__ = [
     "PlanStepStatus",
     "RunState",
     "RunStatus",
+    "build_run_state_context",
     "create_update_plan_tool",
     "replace_plan",
 ]

@@ -103,9 +103,12 @@ Conversation history is currently kept only in memory and disappears when the
 Praxis process exits.
 
 For non-trivial work, Praxis can maintain a short task plan through the
-`update_plan` tool. Each task also exposes its latest in-memory `RunState`,
-including the original request, current plan, files successfully changed by
-file tools, and the final `running`, `completed`, or `failed` status.
+`update_plan` tool. Before each model request, Praxis adds a temporary snapshot
+of the current plan and the complete, sorted list of files successfully changed
+by file tools. The snapshot is rebuilt after tool calls and is not saved in the
+conversation history. Each task also exposes its latest in-memory `RunState`,
+including the original request and final `running`, `completed`, or `failed`
+status.
 
 ## Test
 
