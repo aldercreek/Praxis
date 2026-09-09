@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from praxis_agent.model import ModelResponse
+    from praxis_agent.planning.plan import PlanStep
     from praxis_agent.tools import ToolResult
 
 
@@ -92,6 +93,13 @@ class ToolFinished(AgentEvent):
 
 
 @dataclass(frozen=True, slots=True)
+class PlanUpdated(AgentEvent):
+    """表示当前任务计划已经成功更新。"""
+
+    plan: tuple[PlanStep, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class AssistantTextCompleted(AgentEvent):
     """表示模型已经生成本轮最终回答。"""
 
@@ -140,6 +148,7 @@ __all__ = [
     "EventSink",
     "ModelRequestCompleted",
     "ModelRequestStarted",
+    "PlanUpdated",
     "ToolCallPrepared",
     "ToolFinished",
     "ToolStarted",

@@ -11,6 +11,7 @@ from praxis_agent.events import (
     EventSink,
     ModelRequestCompleted,
     ModelRequestStarted,
+    PlanUpdated,
     TurnCompleted,
     TurnFailed,
     TurnStarted,
@@ -162,6 +163,11 @@ class Agent:
             for function_call in response.function_calls:
                 result = tool_executor.execute(turn_id, function_call)
                 _record_changed_file(run_state, function_call, result)
+                if (
+                    result.success
+                    and function_call.name == "update_plan"
+                ):
+                    self._emit(PlanUpdated(turn_id, tuple(run_state.plan)))
                 self._input_items.append(
                     _build_function_call_output(function_call, result)
                 )

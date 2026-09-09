@@ -6,6 +6,7 @@ from praxis_agent.events import (
     AssistantTextCompleted,
     AssistantTextDelta,
     ModelRequestStarted,
+    PlanUpdated,
     ToolCallPrepared,
     ToolFinished,
     TurnFailed,
@@ -14,6 +15,11 @@ from praxis_agent.events import (
 
 _MAX_ARGUMENT_DISPLAY_CHARS = 500
 _MAX_RESULT_DISPLAY_CHARS = 4_000
+_PLAN_STEP_MARKERS = {
+    "completed": "[x]",
+    "in_progress": "[>]",
+    "pending": "[ ]",
+}
 
 
 def _truncate_for_display(text: str, max_chars: int) -> str:
@@ -54,6 +60,8 @@ class ConsoleRenderer:
 
         if isinstance(event, ToolCallPrepared):
             self._finish_open_line()
+            if event.tool_name == "update_plan":
+                return
             encoded_arguments = json.dumps(
                 dict(event.arguments),
                 ensure_ascii=False,
@@ -66,6 +74,8 @@ class ConsoleRenderer:
             return
 
         if isinstance(event, ToolFinished):
+            if event.tool_name == "update_plan" and event.result.success:
+                return
             status = "ok" if event.result.success else "error"
             print(f"[tool:{status}] {event.tool_name}")
             if event.tool_name == "run_command":
@@ -75,6 +85,14 @@ class ConsoleRenderer:
                         _MAX_RESULT_DISPLAY_CHARS,
                     )
                 )
+            return
+
+        if isinstance(event, PlanUpdated):
+            self._finish_open_line()
+            print("[plan]")
+            for step in event.plan:
+                marker = _PLAN_STEP_MARKERS[step.status.value]
+                print(f"  {marker} {step.description}")
             return
 
         if isinstance(event, TurnFailed):
