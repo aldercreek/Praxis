@@ -1,10 +1,9 @@
-import os
 import shutil
 import subprocess
 from collections.abc import Iterator, Mapping
 from difflib import unified_diff
-from heapq import nsmallest
-from pathlib import Path, PurePosixPath
+from pathlib import Path
+from threading import Event, Thread, Timer
 
 
 # 递归扫描时跳过依赖目录、缓存目录和构建产物目录。
@@ -25,6 +24,7 @@ _IGNORED_DIRECTORY_NAMES = frozenset(
 )
 _IGNORED_DIRECTORY_SUFFIXES = (".egg-info",)
 _MAX_SEARCH_FILE_SIZE = 1_000_000
+_SEARCH_TIMEOUT_SECONDS = 30
 _MAX_READ_LINES = 400
 _MAX_READ_CHARACTERS = 20_000
 
@@ -70,36 +70,6 @@ def _is_ignored_directory(name: str) -> bool:
     )
 
 
-def _iter_workspace_files(
-    workspace_root: Path,
-    target_path: Path,
-) -> Iterator[Path]:
-    """遍历工作区文件，同时跳过生成目录。"""
-    if target_path.is_file():
-        yield target_path
-        return
-
-    for current_directory, directory_names, file_names in os.walk(target_path):
-        # os.walk 会使用这个列表决定接下来进入哪些目录，因此需要原地修改。
-        directory_names[:] = sorted(
-            name
-            for name in directory_names
-            if not _is_ignored_directory(name)
-        )
-        for file_name in sorted(file_names):
-            candidate = Path(current_directory) / file_name
-            try:
-                resolved_candidate = candidate.resolve()
-            except OSError:
-                continue
-            # 目录树中的符号链接文件仍可能指向工作区外部。
-            if (
-                resolved_candidate.is_relative_to(workspace_root)
-                and candidate.is_file()
-            ):
-                yield candidate
-
-
 def _iter_workspace_entries(
     workspace_root: Path,
     target_path: Path,
@@ -141,16 +111,6 @@ def _iter_workspace_entries(
     yield from visit(target_path, 1)
 
 
-def _matches_file_pattern(
-    file_path: Path,
-    workspace_root: Path,
-    pattern: str,
-) -> bool:
-    """判断文件的工作区相对路径是否符合 glob 模式。"""
-    display_path = file_path.relative_to(workspace_root).as_posix()
-    return pattern == "*" or PurePosixPath(display_path).match(pattern)
-
-
 def _normalize_search_match(match: str) -> str:
     """统一 ripgrep 返回的路径分隔符和相对路径前缀。"""
     parts = match.split(":", 2)
@@ -178,11 +138,14 @@ def _run_ripgrep(
     arguments: list[str],
     max_results: int,
     operation: str,
-) -> tuple[list[str], bool] | None:
-    """运行 ripgrep 并限制输出行数；程序不可用时返回 None。"""
+) -> tuple[list[str], bool]:
+    """运行必需的 ripgrep，并限制执行时间和输出行数。"""
     executable = shutil.which("rg")
     if executable is None:
-        return None
+        raise RuntimeError(
+            "ripgrep (rg) is required for find_files and search_text; "
+            "install it and ensure rg is available on PATH"
+        )
 
     try:
         process = subprocess.Popen(
@@ -194,34 +157,69 @@ def _run_ripgrep(
             encoding="utf-8",
             errors="replace",
         )
-    except OSError:
-        return None
+    except OSError as error:
+        raise RuntimeError(f"failed to start ripgrep: {error}") from error
 
     output_lines: list[str] = []
     truncated = False
+    timed_out = Event()
+    stderr_parts: list[str] = []
     assert process.stdout is not None
+    assert process.stderr is not None
 
-    # 多读取一行，用来区分“刚好达到上限”和“确实被截断”。
-    for output_line in process.stdout:
-        output_lines.append(
-            output_line.removesuffix("\n").removesuffix("\r")
-        )
-        if len(output_lines) > max_results:
-            truncated = True
-            break
+    def read_stderr() -> None:
+        stderr_parts.append(process.stderr.read())
 
-    if truncated and process.poll() is None:
+    def kill_after_timeout() -> None:
+        if process.poll() is not None:
+            return
+        timed_out.set()
         try:
-            process.terminate()
+            process.kill()
         except OSError:
             pass
+
+    stderr_reader = Thread(target=read_stderr, daemon=True)
+    timeout_timer = Timer(_SEARCH_TIMEOUT_SECONDS, kill_after_timeout)
+    timeout_timer.daemon = True
+    stderr_reader.start()
+    timeout_timer.start()
+
+    # 多读取一行，用来区分“刚好达到上限”和“确实被截断”。
     try:
-        _, stderr = process.communicate(timeout=2)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        _, stderr = process.communicate()
+        for output_line in process.stdout:
+            output_lines.append(
+                output_line.removesuffix("\n").removesuffix("\r")
+            )
+            if len(output_lines) > max_results:
+                truncated = True
+                break
+    finally:
+        timeout_timer.cancel()
+        timeout_timer.join(timeout=1)
+        if truncated and process.poll() is None:
+            try:
+                process.terminate()
+            except OSError:
+                pass
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        stderr_reader.join(timeout=2)
+        process.stdout.close()
+        process.stderr.close()
+
+    if timed_out.is_set():
+        raise TimeoutError(
+            f"ripgrep {operation} timed out after "
+            f"{_SEARCH_TIMEOUT_SECONDS} seconds; narrow relative_path "
+            "or file_pattern"
+        )
 
     if not truncated and process.returncode not in (0, 1):
+        stderr = "".join(stderr_parts)
         detail = stderr.strip() or f"exit code {process.returncode}"
         raise RuntimeError(f"ripgrep {operation} failed: {detail}")
     return output_lines[:max_results], truncated
@@ -233,7 +231,7 @@ def _search_with_ripgrep(
     query: str,
     file_pattern: str,
     max_results: int,
-) -> tuple[list[str], bool] | None:
+) -> tuple[list[str], bool]:
     """使用 ripgrep 搜索文件内容。"""
     target_argument = target_path.relative_to(workspace_root).as_posix() or "."
     arguments = [
@@ -261,8 +259,6 @@ def _search_with_ripgrep(
         max_results,
         "search",
     )
-    if result is None:
-        return None
     matches, truncated = result
     return [_normalize_search_match(match) for match in matches], truncated
 
@@ -272,7 +268,7 @@ def _find_files_with_ripgrep(
     target_path: Path,
     file_pattern: str,
     max_results: int,
-) -> tuple[list[str], bool] | None:
+) -> tuple[list[str], bool]:
     """使用 ripgrep 按 glob 模式查找文件。"""
     target_argument = target_path.relative_to(workspace_root).as_posix() or "."
     arguments = [
@@ -293,13 +289,12 @@ def _find_files_with_ripgrep(
         max_results,
         "file discovery",
     )
-    if result is None:
-        return None
     matches, truncated = result
     normalized_matches = [
         match.replace("\\", "/").removeprefix("./")
         for match in matches
     ]
+    normalized_matches.sort()
     return normalized_matches, truncated
 
 
@@ -501,37 +496,12 @@ def find_files(
     if not target_path.is_file() and not target_path.is_dir():
         raise ValueError(f"path is not a file or directory: {relative_path}")
 
-    ripgrep_result = _find_files_with_ripgrep(
+    matches, truncated = _find_files_with_ripgrep(
         workspace_root,
         target_path,
         file_pattern,
         max_results,
     )
-    if ripgrep_result is not None:
-        matches, truncated = ripgrep_result
-    else:
-        # nsmallest 只保留需要返回的路径，避免为排序保存整个工作区的文件。
-        matches = [
-            file_path.relative_to(workspace_root).as_posix()
-            for file_path in nsmallest(
-                max_results + 1,
-                (
-                    file_path
-                    for file_path in _iter_workspace_files(
-                        workspace_root,
-                        target_path,
-                    )
-                    if _matches_file_pattern(
-                        file_path,
-                        workspace_root,
-                        file_pattern,
-                    )
-                ),
-                key=lambda path: path.relative_to(workspace_root).as_posix(),
-            )
-        ]
-        truncated = len(matches) > max_results
-        matches = matches[:max_results]
 
     if not matches:
         return f"No files found matching {file_pattern!r}."
@@ -562,51 +532,16 @@ def search_text(
     if not target_path.is_file() and not target_path.is_dir():
         raise ValueError(f"path is not a file or directory: {relative_path}")
 
-    ripgrep_result = _search_with_ripgrep(
+    matches, truncated = _search_with_ripgrep(
         workspace_root,
         target_path,
         query,
         file_pattern,
         max_results,
     )
-    if ripgrep_result is not None:
-        matches, truncated = ripgrep_result
-        if not matches:
-            return f"No matches found for {query!r}."
-        if truncated:
-            matches.append(f"... truncated after {max_results} matches")
-        return "\n".join(matches)
-
-    # 没有安装 ripgrep 时，退回到 Python 文件扫描。
-    matches: list[str] = []
-    for file_path in _iter_workspace_files(workspace_root, target_path):
-        if not _matches_file_pattern(
-            file_path,
-            workspace_root,
-            file_pattern,
-        ):
-            continue
-        try:
-            # 限制单个文件大小，并且只搜索能够按 UTF-8 解码的文本文件。
-            if file_path.stat().st_size > _MAX_SEARCH_FILE_SIZE:
-                continue
-            content = file_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
-
-        display_path = file_path.relative_to(workspace_root).as_posix()
-        for line_number, line in enumerate(content.splitlines(), start=1):
-            if query not in line:
-                continue
-            matches.append(f"{display_path}:{line_number}:{line}")
-            # 多读取一个匹配项，确保只有确实被截断时才显示截断提示。
-            if len(matches) > max_results:
-                visible_matches = matches[:max_results]
-                visible_matches.append(
-                    f"... truncated after {max_results} matches"
-                )
-                return "\n".join(visible_matches)
 
     if not matches:
         return f"No matches found for {query!r}."
+    if truncated:
+        matches.append(f"... truncated after {max_results} matches")
     return "\n".join(matches)

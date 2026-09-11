@@ -214,23 +214,17 @@ def test_find_files_reports_truncated_results(tmp_path: Path) -> None:
     ]
 
 
-def test_find_files_falls_back_to_python_without_ripgrep(
+def test_find_files_requires_ripgrep(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "module.py").write_text(
-        "content\n",
-        encoding="utf-8",
-    )
     monkeypatch.setattr(
         "praxis_agent.tools.filesystem.shutil.which",
         lambda _: None,
     )
 
-    result = find_files(tmp_path, "*.py")
-
-    assert result == "src/module.py"
+    with pytest.raises(RuntimeError, match="ripgrep .* is required"):
+        find_files(tmp_path, "*.py")
 
 
 def test_search_text_returns_path_line_and_content(tmp_path: Path) -> None:
