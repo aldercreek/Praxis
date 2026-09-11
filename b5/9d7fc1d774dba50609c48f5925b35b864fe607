@@ -1,0 +1,26 @@
+pyproject.toml
+  s_05f61ff3cbe74f::t_769dbd4e6fa9ce 14
+src/praxis_agent/terminal/cells.py
+  s_05f61ff3cbe74f::t_47727e8a9c804a 184-187
+  s_05f61ff3cbe74f::t_769dbd4e6fa9ce 1-183,188-235
+src/praxis_agent/terminal/__init__.py
+  s_05f61ff3cbe74f::t_769dbd4e6fa9ce 1-7
+src/praxis_agent/terminal/renderer.py
+  s_05f61ff3cbe74f::t_769dbd4e6fa9ce 1-5,7-10,14-15,18,23-24,26-38,42-44,47-50,54,56-63,68-72,74-75,77-78,82-86,90,94-96,99-112,116,120-123,127-130,132-146,150-182,184-352,354,362-367,369,373-444
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.44-trip",
+  "base_commit_sha": "b59d7fc1d774dba50609c48f5925b35b864fe607",
+  "prompts": {},
+  "sessions": {
+    "s_05f61ff3cbe74f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08165-7b07-7723-9093-a5397df3abb9",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "wanjl <wanjl@trip.com>"
+    }
+  }
+}
