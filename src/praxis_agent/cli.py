@@ -10,6 +10,7 @@ from praxis_agent.agent import Agent, AgentError, create_default_agent
 from praxis_agent.config import LangfuseConfig
 from praxis_agent.events import CompositeEventSink, EventSink
 from praxis_agent.model import ModelClientError
+from praxis_agent.sessions import SessionStoreError
 from praxis_agent.terminal import (
     ConsoleRenderer,
     approve_tool_call,
@@ -24,6 +25,19 @@ def build_parser() -> argparse.ArgumentParser:
         prog="praxis",
         description="Run the Praxis coding agent.",
     )
+    resume_group = parser.add_mutually_exclusive_group()
+    resume_group.add_argument(
+        "-c",
+        "--continue",
+        dest="resume_latest",
+        action="store_true",
+        help="Continue the latest session for the current workspace",
+    )
+    resume_group.add_argument(
+        "--resume",
+        metavar="SESSION_ID",
+        help="Resume a specific session",
+    )
     parser.add_argument("task", nargs="*", help="Task for the agent")
     return parser
 
@@ -32,7 +46,12 @@ def _run_task(agent: Agent, task: str) -> int:
     """执行一轮任务，并将预期内的错误转换为终端输出。"""
     try:
         agent.run(task)
-    except (AgentError, ModelClientError, ValueError) as error:
+    except (
+        AgentError,
+        ModelClientError,
+        SessionStoreError,
+        ValueError,
+    ) as error:
         print(f"error: {error}")
         return 1
     return 0
@@ -50,7 +69,11 @@ def _run_interactive(agent: Agent) -> int:
             if command == "/exit":
                 return 0
             if command == "/clear":
-                agent.clear_history()
+                try:
+                    agent.clear_history()
+                except (SessionStoreError, ValueError) as error:
+                    print(f"error: {error}")
+                    continue
                 print("Conversation cleared.")
                 continue
 
@@ -96,8 +119,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             workspace,
             event_sink=event_sink,
             approve_tool_call=approve_tool_call,
+            resume_latest=args.resume_latest,
+            resume_session_id=args.resume,
         )
-    except ValueError as error:
+    except (SessionStoreError, ValueError) as error:
         print(f"error: {error}")
         if langfuse_sink is not None:
             langfuse_sink.close()

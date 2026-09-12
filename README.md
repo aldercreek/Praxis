@@ -88,8 +88,22 @@ Start it without an argument to keep a conversation in the current process:
 praxis
 ```
 
+Praxis persists sessions in `~/.praxis/state.sqlite3`. Start a new process and
+continue the latest session for the current workspace with:
+
+```powershell
+praxis --continue
+```
+
+Resume a known session ID explicitly with:
+
+```powershell
+praxis --resume <session-id>
+```
+
 In interactive mode, each new task includes the earlier conversation and tool
-results. Use `/clear` to start a fresh conversation and `/exit` to leave:
+results. Use `/clear` to preserve the old session and switch to a new one, or
+`/exit` to leave:
 
 ```text
 praxis> inspect config.py
@@ -99,8 +113,10 @@ Conversation cleared.
 praxis> /exit
 ```
 
-Conversation history is currently kept only in memory and disappears when the
-Praxis process exits.
+Sessions contain individual task runs and their ordered model conversation
+items. If a process stops during a run, resuming marks that run failed and adds
+an interrupted result for any tool call whose completion was not recorded.
+Praxis never reruns an interrupted tool automatically.
 
 For non-trivial work, Praxis can maintain a short task plan through the
 `update_plan` tool. Before each model request, Praxis adds a temporary snapshot
@@ -121,6 +137,7 @@ python -m pytest
 
 ```text
 src/praxis_agent/  Application package
+  sessions/        SQLite session persistence and recovery
 tests/             Automated tests
 pyproject.toml     Project metadata, dependencies, and CLI entry point
 ```
