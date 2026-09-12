@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from praxis_agent.config import ModelConfig
@@ -35,6 +38,11 @@ from praxis_agent.tools import (
     create_default_registry,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from praxis_agent.sessions import SQLiteSessionStore
+
 
 class AgentError(RuntimeError):
     """表示 Agent 无法正常完成当前任务。"""
@@ -49,6 +57,9 @@ class Agent:
     name: str = "Praxis"
     event_sink: EventSink | None = None
     approve_tool_call: ToolApprovalHandler | None = None
+    session_store: SQLiteSessionStore | None = None
+    session_id: str | None = None
+    session_model: str | None = None
     run_state: RunState | None = field(default=None, init=False)
     _input_items: list[object] = field(
         default_factory=list,
@@ -67,6 +78,16 @@ class Agent:
             )
         self.workspace = workspace_root
 
+        persistence_fields = (self.session_id, self.session_model)
+        if self.session_store is None and any(persistence_fields):
+            raise ValueError(
+                "session_store is required with persisted session metadata"
+            )
+        if self.session_store is not None and not all(persistence_fields):
+            raise ValueError(
+                "session_id and session_model are required with session_store"
+            )
+
     def run(self, task: str) -> str:
         """运行一轮任务，并保留内容供同一会话的后续任务使用。"""
         normalized_task = task.strip()
@@ -76,20 +97,39 @@ class Agent:
         turn_id = uuid4().hex
         run_state = RunState(original_task=normalized_task)
         self.run_state = run_state
+        user_item = {"role": "user", "content": normalized_task}
+        run_persisted = False
 
         try:
+            if self.session_store is not None:
+                self.session_store.start_run(
+                    self._session_id(),
+                    turn_id,
+                    run_state,
+                    user_item,
+                )
+                run_persisted = True
+            self._input_items.append(user_item)
             self._emit(TurnStarted(turn_id, normalized_task))
             output_text = self._run_model_loop(
                 turn_id,
-                normalized_task,
                 run_state,
             )
             run_state.complete()
+            self._finish_persisted_run(turn_id, run_state)
             self._emit(AssistantTextCompleted(turn_id, output_text))
             self._emit(TurnCompleted(turn_id))
             return output_text
         except Exception as error:
             run_state.fail(error)
+            if run_persisted:
+                try:
+                    self._finish_persisted_run(turn_id, run_state)
+                except Exception as persistence_error:
+                    error.add_note(
+                        "Additionally failed to persist the failed Run: "
+                        f"{persistence_error}"
+                    )
             self._emit(
                 TurnFailed(
                     turn_id,
@@ -100,17 +140,28 @@ class Agent:
             raise
 
     def clear_history(self) -> None:
-        """清空当前进程内保存的对话历史。"""
+        """保留旧会话，并切换到一段新的空会话。"""
+        if self.session_store is not None:
+            session = self.session_store.create_session(
+                self.workspace,
+                self._session_model(),
+            )
+            self.session_id = session.id
         self._input_items.clear()
+        self.run_state = None
+
+    def restore_history(self, items: Sequence[object]) -> None:
+        """把持久化上下文装载到尚未开始工作的 Agent。"""
+        if self._input_items:
+            raise RuntimeError("conversation history is already initialized")
+        self._input_items.extend(items)
 
     def _run_model_loop(
         self,
         turn_id: str,
-        task: str,
         run_state: RunState,
     ) -> str:
         """持续请求模型并执行工具，直到模型生成最终文本。"""
-        self._input_items.append({"role": "user", "content": task})
         tool_definitions = self.tool_registry.definitions()
         tool_executor = ToolCallExecutor(
             tool_registry=self.tool_registry,
@@ -142,6 +193,14 @@ class Agent:
                     )
                 ),
             )
+            if self.session_store is not None:
+                self.session_store.append_response_items(
+                    self._session_id(),
+                    turn_id,
+                    response.output_items,
+                )
+            # 官方协议要求把模型本轮输出原样加入下一轮输入。
+            self._input_items.extend(response.output_items)
             self._emit(
                 ModelRequestCompleted(
                     turn_id,
@@ -149,8 +208,6 @@ class Agent:
                     response,
                 )
             )
-            # 官方协议要求把模型本轮输出原样加入下一轮输入。
-            self._input_items.extend(response.output_items)
 
             if not response.function_calls:
                 if response.output_text:
@@ -163,18 +220,49 @@ class Agent:
             for function_call in response.function_calls:
                 result = tool_executor.execute(turn_id, function_call)
                 _record_changed_file(run_state, function_call, result)
+                output_item = _build_function_call_output(
+                    function_call,
+                    result,
+                )
+                if self.session_store is not None:
+                    self.session_store.append_tool_result(
+                        self._session_id(),
+                        turn_id,
+                        output_item,
+                        run_state,
+                    )
+                self._input_items.append(output_item)
                 if (
                     result.success
                     and function_call.name == "update_plan"
                 ):
                     self._emit(PlanUpdated(turn_id, tuple(run_state.plan)))
-                self._input_items.append(
-                    _build_function_call_output(function_call, result)
-                )
 
         raise AgentError(
             f"agent exceeded the maximum of {self.max_turns} model turns"
         )
+
+    def _finish_persisted_run(
+        self,
+        turn_id: str,
+        run_state: RunState,
+    ) -> None:
+        if self.session_store is not None:
+            self.session_store.finish_run(
+                self._session_id(),
+                turn_id,
+                run_state,
+            )
+
+    def _session_id(self) -> str:
+        if self.session_id is None:
+            raise RuntimeError("persisted Agent has no session_id")
+        return self.session_id
+
+    def _session_model(self) -> str:
+        if self.session_model is None:
+            raise RuntimeError("persisted Agent has no session_model")
+        return self.session_model
 
     def _emit(self, event: AgentEvent) -> None:
         """把事件发送给外部消费者；未配置消费者时保持静默。"""
@@ -223,11 +311,49 @@ def create_default_agent(
     *,
     event_sink: EventSink | None = None,
     approve_tool_call: ToolApprovalHandler | None = None,
+    resume_latest: bool = False,
+    resume_session_id: str | None = None,
+    session_database_path: Path | None = None,
 ) -> Agent:
     """使用环境配置和内置工具创建默认 Agent。"""
+    if resume_latest and resume_session_id is not None:
+        raise ValueError(
+            "resume_latest and resume_session_id are mutually exclusive"
+        )
+
+    from praxis_agent.sessions import (
+        SQLiteSessionStore,
+        SessionNotFoundError,
+    )
+
     config = ModelConfig.from_env()
     runtime_context = collect_runtime_context(workspace)
-    return Agent(
+    session_store = SQLiteSessionStore(session_database_path)
+    history: list[object] = []
+
+    if resume_session_id is not None:
+        session = session_store.get_session(
+            resume_session_id,
+            workspace=runtime_context.workspace_root,
+        )
+    elif resume_latest:
+        session = session_store.latest_session(runtime_context.workspace_root)
+        if session is None:
+            raise SessionNotFoundError(
+                "no session found for the current workspace"
+            )
+    else:
+        session = session_store.create_session(
+            runtime_context.workspace_root,
+            config.model,
+        )
+
+    if resume_latest or resume_session_id is not None:
+        session_store.recover_interrupted_runs(session.id)
+        history = session_store.load_conversation_items(session.id)
+        config = replace(config, model=session.model)
+
+    agent = Agent(
         model_client=OpenAIModelClient(
             config,
             instructions=build_instructions(runtime_context),
@@ -236,4 +362,9 @@ def create_default_agent(
         workspace=runtime_context.workspace_root,
         event_sink=event_sink,
         approve_tool_call=approve_tool_call,
+        session_store=session_store,
+        session_id=session.id,
+        session_model=session.model,
     )
+    agent.restore_history(history)
+    return agent
