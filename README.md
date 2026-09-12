@@ -95,10 +95,18 @@ continue the latest session for the current workspace with:
 praxis --continue
 ```
 
-Resume a known session ID explicitly with:
+List the 20 most recently updated sessions for the current workspace without
+requiring model credentials:
 
 ```powershell
-praxis --resume <session-id>
+praxis --sessions
+```
+
+Resume a known session explicitly with its full ID or the unique prefix shown
+by `--sessions`:
+
+```powershell
+praxis --resume a3f21c8d
 ```
 
 In interactive mode, each new task includes the earlier conversation and tool

@@ -12,9 +12,11 @@ from uuid import uuid4
 
 from praxis_agent.planning.state import RunState, RunStatus
 from praxis_agent.sessions.models import (
+    AmbiguousSessionIdError,
     SessionNotFoundError,
     SessionRecord,
     SessionStoreError,
+    SessionSummary,
     SessionWorkspaceMismatchError,
 )
 
@@ -167,6 +169,49 @@ class SQLiteSessionStore:
             )
         return session
 
+    def resolve_session(
+        self,
+        reference: str,
+        *,
+        workspace: Path,
+    ) -> SessionRecord:
+        """使用完整 ID 或唯一 ID 前缀解析当前会话。"""
+        normalized_reference = reference.strip()
+        if not normalized_reference:
+            raise ValueError("session ID must not be empty")
+
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM sessions
+                WHERE substr(id, 1, length(?)) = ? COLLATE NOCASE
+                ORDER BY updated_at DESC, created_at DESC, id DESC
+                LIMIT 2
+                """,
+                (normalized_reference, normalized_reference),
+            ).fetchall()
+
+        if not rows:
+            raise SessionNotFoundError(
+                f"session not found: {normalized_reference}"
+            )
+        if len(rows) > 1:
+            raise AmbiguousSessionIdError(
+                "session ID prefix is ambiguous: "
+                f"{normalized_reference}"
+            )
+
+        session = _session_from_row(rows[0])
+        if _normalize_workspace(workspace) != _normalize_workspace(
+            session.workspace
+        ):
+            raise SessionWorkspaceMismatchError(
+                "session workspace does not match the current workspace: "
+                f"{session.workspace}"
+            )
+        return session
+
     def latest_session(self, workspace: Path) -> SessionRecord | None:
         """返回工作区最后更新的会话；不存在时返回 None。"""
         workspace_key = _normalize_workspace(workspace)
@@ -182,6 +227,43 @@ class SQLiteSessionStore:
                 (workspace_key,),
             ).fetchone()
         return None if row is None else _session_from_row(row)
+
+    def list_sessions(
+        self,
+        workspace: Path,
+        *,
+        limit: int = 20,
+    ) -> list[SessionSummary]:
+        """按照最近更新时间列出工作区的会话摘要。"""
+        if limit < 1:
+            raise ValueError("session list limit must be at least 1")
+
+        workspace_key = _normalize_workspace(workspace)
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    sessions.id,
+                    sessions.title,
+                    sessions.updated_at,
+                    (
+                        SELECT runs.status
+                        FROM runs
+                        WHERE runs.session_id = sessions.id
+                        ORDER BY runs.started_at DESC, runs.id DESC
+                        LIMIT 1
+                    ) AS latest_run_status
+                FROM sessions
+                WHERE sessions.workspace = ?
+                ORDER BY
+                    sessions.updated_at DESC,
+                    sessions.created_at DESC,
+                    sessions.id DESC
+                LIMIT ?
+                """,
+                (workspace_key, limit),
+            ).fetchall()
+        return [_session_summary_from_row(row) for row in rows]
 
     def start_run(
         self,
@@ -586,6 +668,18 @@ def _session_from_row(row: Row) -> SessionRecord:
         title=str(row["title"]),
         created_at=_parse_time(row["created_at"]),
         updated_at=_parse_time(row["updated_at"]),
+    )
+
+
+def _session_summary_from_row(row: Row) -> SessionSummary:
+    encoded_status = row["latest_run_status"]
+    return SessionSummary(
+        id=str(row["id"]),
+        title=str(row["title"]),
+        updated_at=_parse_time(row["updated_at"]),
+        latest_run_status=(
+            None if encoded_status is None else RunStatus(encoded_status)
+        ),
     )
 
 
