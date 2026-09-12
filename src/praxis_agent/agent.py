@@ -150,6 +150,11 @@ class Agent:
         self._input_items.clear()
         self.run_state = None
 
+    @property
+    def history_item_count(self) -> int:
+        """返回当前将参与后续模型请求的持久化上下文条数。"""
+        return len(self._input_items)
+
     def restore_history(self, items: Sequence[object]) -> None:
         """把持久化上下文装载到尚未开始工作的 Agent。"""
         if self._input_items:
@@ -332,7 +337,7 @@ def create_default_agent(
     history: list[object] = []
 
     if resume_session_id is not None:
-        session = session_store.get_session(
+        session = session_store.resolve_session(
             resume_session_id,
             workspace=runtime_context.workspace_root,
         )

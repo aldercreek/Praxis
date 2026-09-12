@@ -10,10 +10,12 @@ from praxis_agent.agent import Agent, AgentError, create_default_agent
 from praxis_agent.config import LangfuseConfig
 from praxis_agent.events import CompositeEventSink, EventSink
 from praxis_agent.model import ModelClientError
-from praxis_agent.sessions import SessionStoreError
+from praxis_agent.sessions import SQLiteSessionStore, SessionStoreError
 from praxis_agent.terminal import (
     ConsoleRenderer,
     approve_tool_call,
+    print_session_list,
+    print_session_resumed,
 )
 
 if TYPE_CHECKING:
@@ -25,18 +27,24 @@ def build_parser() -> argparse.ArgumentParser:
         prog="praxis",
         description="Run the Praxis coding agent.",
     )
-    resume_group = parser.add_mutually_exclusive_group()
-    resume_group.add_argument(
+    session_group = parser.add_mutually_exclusive_group()
+    session_group.add_argument(
         "-c",
         "--continue",
         dest="resume_latest",
         action="store_true",
         help="Continue the latest session for the current workspace",
     )
-    resume_group.add_argument(
+    session_group.add_argument(
         "--resume",
         metavar="SESSION_ID",
         help="Resume a specific session",
+    )
+    session_group.add_argument(
+        "--sessions",
+        dest="list_sessions",
+        action="store_true",
+        help="List saved sessions for the current workspace",
     )
     parser.add_argument("task", nargs="*", help="Task for the agent")
     return parser
@@ -87,6 +95,17 @@ def _run_interactive(agent: Agent) -> int:
             return 130
 
 
+def _list_sessions(workspace: Path) -> int:
+    """列出当前工作区会话，不初始化模型或可观测性组件。"""
+    try:
+        sessions = SQLiteSessionStore().list_sessions(workspace)
+    except (SessionStoreError, ValueError) as error:
+        print(f"error: {error}")
+        return 1
+    print_session_list(sessions, workspace.resolve())
+    return 0
+
+
 def _build_event_sink(
     workspace: Path,
 ) -> tuple[EventSink, LangfuseEventSink | None]:
@@ -109,9 +128,16 @@ def _build_event_sink(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.list_sessions and args.task:
+        parser.error("--sessions cannot be used with a task")
+
     task = " ".join(args.task).strip()
     workspace = Path.cwd()
+    if args.list_sessions:
+        return _list_sessions(workspace)
+
     event_sink, langfuse_sink = _build_event_sink(workspace)
 
     try:
@@ -127,6 +153,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         if langfuse_sink is not None:
             langfuse_sink.close()
         return 1
+
+    if args.resume_latest or args.resume is not None:
+        print_session_resumed(
+            agent.session_id or "",
+            agent.history_item_count,
+        )
 
     try:
         if task:
