@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from praxis_agent.config import ModelConfig
+from praxis_agent.context import ContextManager, ConversationHistory
 from praxis_agent.events import (
     AgentEvent,
     AssistantTextDelta,
@@ -60,9 +61,10 @@ class Agent:
     session_store: SQLiteSessionStore | None = None
     session_id: str | None = None
     session_model: str | None = None
+    context_manager: ContextManager = field(default_factory=ContextManager)
     run_state: RunState | None = field(default=None, init=False)
-    _input_items: list[object] = field(
-        default_factory=list,
+    _history: ConversationHistory = field(
+        default_factory=ConversationHistory,
         init=False,
         repr=False,
     )
@@ -109,7 +111,7 @@ class Agent:
                     user_item,
                 )
                 run_persisted = True
-            self._input_items.append(user_item)
+            self._history.append(user_item)
             self._emit(TurnStarted(turn_id, normalized_task))
             output_text = self._run_model_loop(
                 turn_id,
@@ -147,19 +149,19 @@ class Agent:
                 self._session_model(),
             )
             self.session_id = session.id
-        self._input_items.clear()
+        self._history.clear()
         self.run_state = None
 
     @property
     def history_item_count(self) -> int:
-        """返回当前将参与后续模型请求的持久化上下文条数。"""
-        return len(self._input_items)
+        """返回当前会话的完整历史条目数量。"""
+        return len(self._history)
 
     def restore_history(self, items: Sequence[object]) -> None:
         """把持久化上下文装载到尚未开始工作的 Agent。"""
-        if self._input_items:
+        if len(self._history) > 0:
             raise RuntimeError("conversation history is already initialized")
-        self._input_items.extend(items)
+        self._history.extend(items)
 
     def _run_model_loop(
         self,
@@ -176,19 +178,19 @@ class Agent:
         )
 
         for request_number in range(1, self.max_turns + 1):
-            request_items = [
-                *self._input_items,
-                build_run_state_context(run_state),
-            ]
+            context_view = self.context_manager.build_view(
+                self._history,
+                transient_items=(build_run_state_context(run_state),),
+            )
             self._emit(
                 ModelRequestStarted(
                     turn_id,
                     request_number,
-                    tuple(request_items),
+                    context_view.items,
                 )
             )
             response = self.model_client.create_response(
-                request_items,
+                context_view.items,
                 tool_definitions,
                 on_text_delta=lambda text: self._emit(
                     AssistantTextDelta(
@@ -205,7 +207,7 @@ class Agent:
                     response.output_items,
                 )
             # 官方协议要求把模型本轮输出原样加入下一轮输入。
-            self._input_items.extend(response.output_items)
+            self._history.extend(response.output_items)
             self._emit(
                 ModelRequestCompleted(
                     turn_id,
@@ -236,7 +238,7 @@ class Agent:
                         output_item,
                         run_state,
                     )
-                self._input_items.append(output_item)
+                self._history.append(output_item)
                 if (
                     result.success
                     and function_call.name == "update_plan"
