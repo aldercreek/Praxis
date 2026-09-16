@@ -7,7 +7,11 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from praxis_agent.config import ModelConfig
-from praxis_agent.context import ContextManager, ConversationHistory
+from praxis_agent.context import (
+    ContextManager,
+    ContextStatus,
+    ConversationHistory,
+)
 from praxis_agent.events import (
     AgentEvent,
     AssistantTextDelta,
@@ -63,6 +67,7 @@ class Agent:
     session_model: str | None = None
     context_manager: ContextManager = field(default_factory=ContextManager)
     run_state: RunState | None = field(default=None, init=False)
+    context_status: ContextStatus | None = field(default=None, init=False)
     _history: ConversationHistory = field(
         default_factory=ConversationHistory,
         init=False,
@@ -150,7 +155,9 @@ class Agent:
             )
             self.session_id = session.id
         self._history.clear()
+        self.context_manager.reset()
         self.run_state = None
+        self.context_status = None
 
     @property
     def history_item_count(self) -> int:
@@ -181,7 +188,9 @@ class Agent:
             context_view = self.context_manager.build_view(
                 self._history,
                 transient_items=(build_run_state_context(run_state),),
+                tool_definitions=tool_definitions,
             )
+            self.context_status = context_view.context_status
             self._emit(
                 ModelRequestStarted(
                     turn_id,
@@ -199,6 +208,11 @@ class Agent:
                         text,
                     )
                 ),
+            )
+            self.context_manager.record_actual_input_tokens(
+                None
+                if response.usage is None
+                else response.usage.input_tokens
             )
             if self.session_store is not None:
                 self.session_store.append_response_items(
@@ -335,6 +349,7 @@ def create_default_agent(
 
     config = ModelConfig.from_env()
     runtime_context = collect_runtime_context(workspace)
+    instructions = build_instructions(runtime_context)
     session_store = SQLiteSessionStore(session_database_path)
     history: list[object] = []
 
@@ -363,7 +378,7 @@ def create_default_agent(
     agent = Agent(
         model_client=OpenAIModelClient(
             config,
-            instructions=build_instructions(runtime_context),
+            instructions=instructions,
         ),
         tool_registry=create_default_registry(),
         workspace=runtime_context.workspace_root,
@@ -372,6 +387,11 @@ def create_default_agent(
         session_store=session_store,
         session_id=session.id,
         session_model=session.model,
+        context_manager=ContextManager(
+            model_limits=config.model_limits,
+            policy=config.context_policy,
+            instructions=instructions,
+        ),
     )
     agent.restore_history(history)
     return agent

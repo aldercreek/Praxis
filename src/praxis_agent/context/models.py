@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from praxis_agent.context.capacity import ContextStatus
 
 
 @dataclass(slots=True)
@@ -35,3 +39,4 @@ class ModelContextView:
     """表示某一次模型请求实际可见的不可变输入视图。"""
 
     items: tuple[object, ...]
+    context_status: ContextStatus | None = None
