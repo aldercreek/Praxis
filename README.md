@@ -32,6 +32,27 @@ $env:ADA_MODEL = "gpt-5.6-sol-2026-07-09"
 $env:ADA_BASE_URL = "https://ada-cli-go.ctripcorp.com/coding-plan/openai/v1"
 ```
 
+Praxis estimates the complete model request before sending it. Model limits
+are resolved from explicit environment overrides first, then the bundled
+catalog, and finally a conservative 128,000-token fallback. The catalog covers
+current coding-oriented OpenAI, Claude, Gemini, DeepSeek, and Qwen models,
+including their dated snapshot names. Unset override fields still inherit from
+the catalog or fallback. By default, Praxis uses 95% of the selected window and
+plans 16,000 tokens for output. Override the model limits and context policy
+when needed:
+
+```powershell
+$env:ADA_CONTEXT_WINDOW_TOKENS = "128000"
+$env:ADA_MAX_INPUT_TOKENS = "120000"
+$env:ADA_MAX_OUTPUT_TOKENS = "16000"
+$env:ADA_DESIRED_OUTPUT_TOKENS = "8000"
+$env:ADA_CONTEXT_SAFETY_RATIO = "0.95"
+```
+
+The first model request uses a heuristic token estimate. Later requests use
+the previous response's exact `input_tokens` plus the estimated change in the
+model context, avoiding a full uncalibrated estimate on every request.
+
 At startup, Praxis tells the model only the operating system, resolved
 workspace root, and which common shells are available or unavailable. It does
 not send environment-variable values or the full system `PATH`.
@@ -145,6 +166,7 @@ python -m pytest
 
 ```text
 src/praxis_agent/  Application package
+  context/         Complete history, model views, and capacity awareness
   sessions/        SQLite session persistence and recovery
 tests/             Automated tests
 pyproject.toml     Project metadata, dependencies, and CLI entry point

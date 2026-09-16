@@ -2,6 +2,13 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
+from praxis_agent.context.capacity import ContextPolicy
+from praxis_agent.context.model_catalog import (
+    ModelLimitOverrides,
+    ModelLimits,
+    resolve_model_limits,
+)
+
 
 _DEFAULT_ADA_BASE_URL = (
     "https://ada-cli-go.ctripcorp.com/coding-plan/openai/v1"
@@ -12,12 +19,22 @@ _DEFAULT_LANGFUSE_BASE_URL = "https://langfuse.flight.ctripcorp.com"
 
 @dataclass(frozen=True, slots=True)
 class ModelConfig:
-    """保存创建模型客户端所需的配置。"""
+    """保存模型客户端及其上下文管理策略所需的配置。"""
 
     # repr=False 可以防止调试打印配置对象时泄露密钥。
     api_key: str = field(repr=False)
     model: str
     base_url: str | None = None
+    model_limit_overrides: ModelLimitOverrides = field(
+        default_factory=ModelLimitOverrides,
+        repr=False,
+    )
+    context_policy: ContextPolicy = field(default_factory=ContextPolicy)
+
+    @property
+    def model_limits(self) -> ModelLimits:
+        """解析当前模型最终使用的容量限制。"""
+        return resolve_model_limits(self.model, self.model_limit_overrides)
 
     @classmethod
     def from_env(
@@ -37,7 +54,39 @@ class ModelConfig:
         base_url = (
             values.get("ADA_BASE_URL", "").strip() or _DEFAULT_ADA_BASE_URL
         )
-        return cls(api_key=api_key, model=model, base_url=base_url)
+        model_limit_overrides = ModelLimitOverrides(
+            context_window_tokens=_read_optional_integer(
+                values,
+                "ADA_CONTEXT_WINDOW_TOKENS",
+            ),
+            max_input_tokens=_read_optional_integer(
+                values,
+                "ADA_MAX_INPUT_TOKENS",
+            ),
+            max_output_tokens=_read_optional_integer(
+                values,
+                "ADA_MAX_OUTPUT_TOKENS",
+            ),
+        )
+        context_policy = ContextPolicy(
+            desired_output_tokens=_read_integer(
+                values,
+                "ADA_DESIRED_OUTPUT_TOKENS",
+                16_000,
+            ),
+            safety_ratio=_read_float(
+                values,
+                "ADA_CONTEXT_SAFETY_RATIO",
+                0.95,
+            ),
+        )
+        return cls(
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            model_limit_overrides=model_limit_overrides,
+            context_policy=context_policy,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,3 +133,44 @@ class LangfuseConfig:
             base_url=base_url,
             environment=environment,
         )
+
+
+def _read_integer(
+    values: Mapping[str, str],
+    name: str,
+    default: int,
+) -> int:
+    raw_value = values.get(name, "").strip()
+    if not raw_value:
+        return default
+    try:
+        return int(raw_value)
+    except ValueError as error:
+        raise ValueError(f"{name} must be an integer") from error
+
+
+def _read_optional_integer(
+    values: Mapping[str, str],
+    name: str,
+) -> int | None:
+    raw_value = values.get(name, "").strip()
+    if not raw_value:
+        return None
+    try:
+        return int(raw_value)
+    except ValueError as error:
+        raise ValueError(f"{name} must be an integer") from error
+
+
+def _read_float(
+    values: Mapping[str, str],
+    name: str,
+    default: float,
+) -> float:
+    raw_value = values.get(name, "").strip()
+    if not raw_value:
+        return default
+    try:
+        return float(raw_value)
+    except ValueError as error:
+        raise ValueError(f"{name} must be a number") from error
