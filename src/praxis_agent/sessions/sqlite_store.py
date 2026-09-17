@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
+from praxis_agent.context.operations import ContextOperation
 from praxis_agent.planning.state import RunState, RunStatus
 from praxis_agent.sessions.models import (
     AmbiguousSessionIdError,
@@ -24,7 +25,7 @@ if TYPE_CHECKING:
     from sqlite3 import Connection, Row
 
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 3
 _INTERRUPTED_RUN_ERROR = "Praxis stopped before this run completed."
 _INTERRUPTED_TOOL_OUTPUT = (
     "Tool execution was interrupted. Its completion is unknown.\n"
@@ -78,6 +79,15 @@ CREATE TABLE IF NOT EXISTS conversation_items (
 
 CREATE INDEX IF NOT EXISTS conversation_items_run_idx
     ON conversation_items(run_id);
+
+CREATE TABLE IF NOT EXISTS context_view_operations (
+    session_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(session_id, sequence),
+    FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
 """
 
 
@@ -460,6 +470,8 @@ class SQLiteSessionStore:
 
         items: list[object] = []
         for row in rows:
+            if row["sequence"] != len(items) + 1:
+                raise SessionStoreError("conversation sequence is not contiguous")
             try:
                 payload = json.loads(row["payload_json"])
             except json.JSONDecodeError as error:
@@ -474,6 +486,52 @@ class SQLiteSessionStore:
                 )
             items.append(dict(payload))
         return items
+
+    def append_context_operation(
+        self, session_id: str, operation: ContextOperation,
+    ) -> None:
+        """追加视图操作，绝不覆盖 conversation_items 中的原始正文。"""
+        now = _now_text()
+        with self._transaction() as connection:
+            self._require_session(connection, session_id)
+            self._insert_context_operation(connection, session_id, operation, now)
+            self._touch_session(connection, session_id, now)
+
+    @staticmethod
+    def _insert_context_operation(
+        connection: Connection, session_id: str,
+        operation: ContextOperation, created_at: str,
+    ) -> None:
+        sequence = connection.execute(
+            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM context_view_operations "
+            "WHERE session_id = ?", (session_id,),
+        ).fetchone()[0]
+        if operation.operation_id != f"op{sequence}":
+            raise SessionStoreError("context operations changed; resume the session again")
+        connection.execute(
+            "INSERT INTO context_view_operations "
+            "(session_id, sequence, payload_json, created_at) VALUES (?, ?, ?, ?)",
+            (session_id, sequence, json.dumps(operation.to_dict(), ensure_ascii=False), created_at),
+        )
+
+    def load_context_operations(self, session_id: str) -> list[ContextOperation]:
+        """按追加顺序重放操作，使恢复会话后继续使用相同视图。"""
+        with self._connection() as connection:
+            self._require_session(connection, session_id)
+            rows = connection.execute(
+                "SELECT sequence, payload_json FROM context_view_operations "
+                "WHERE session_id = ? ORDER BY sequence", (session_id,),
+            ).fetchall()
+        operations = []
+        for row in rows:
+            try:
+                operation = ContextOperation.from_dict(json.loads(row["payload_json"]))
+            except (TypeError, ValueError) as error:
+                raise SessionStoreError("invalid context operation JSON") from error
+            if row["sequence"] != len(operations) + 1 or operation.operation_id != f"op{row['sequence']}":
+                raise SessionStoreError("invalid context operation sequence")
+            operations.append(operation)
+        return operations
 
     def _initialize(self) -> None:
         with self._connection() as connection:

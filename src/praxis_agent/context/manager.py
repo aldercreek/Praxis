@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass
+from uuid import uuid4
 
 from praxis_agent.context.capacity import (
     ContextPolicy,
@@ -15,6 +17,13 @@ from praxis_agent.context.models import (
     ConversationHistory,
     ModelContextView,
 )
+from praxis_agent.context.operations import (
+    ContextOperation,
+    ContextOperations,
+    is_editable,
+    render_message,
+)
+from praxis_agent.context.summarizer import ContextSummarizer
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +44,7 @@ class ContextManager:
         policy: ContextPolicy | None = None,
         instructions: str = "",
         token_estimator: TokenEstimator | None = None,
+        summarizer: ContextSummarizer | None = None,
     ) -> None:
         self._model_limits = model_limits
         self._policy = policy or ContextPolicy()
@@ -42,6 +52,10 @@ class ContextManager:
         self._token_estimator = token_estimator or HeuristicTokenEstimator()
         self._input_token_anchor: _InputTokenAnchor | None = None
         self._pending_heuristic_input_tokens: int | None = None
+        self.operations = ContextOperations()
+        self._summarizer = summarizer
+        self._current_messages: list[dict[str, object]] = []
+        self._view_operation_count = 0
 
     def record_actual_input_tokens(
         self,
@@ -60,9 +74,12 @@ class ContextManager:
         )
 
     def reset(self) -> None:
-        """清除不再适用于新会话的输入 Token 校准状态。"""
+        """清除旧视图和输入 Token 校准状态；下一轮重新构建。"""
         self._input_token_anchor = None
         self._pending_heuristic_input_tokens = None
+
+        self._current_messages = []
+        self._view_operation_count = 0
 
     def build_view(
         self,
@@ -72,7 +89,19 @@ class ContextManager:
         tool_definitions: Sequence[dict[str, object]] = (),
     ) -> ModelContextView:
         """构建完整历史、运行时状态和可选容量状态组成的视图。"""
-        base_items = (*history.snapshot(), *transient_items)
+        if self._view_operation_count != len(self.operations.records):
+            self.reset()
+        self._current_messages = self.operations.project(history.snapshot())
+        self._view_operation_count = len(self.operations.records)
+        origins = {
+            op.replacement["message_id"]: op.operation_id
+            for op in self.operations.records if op.replacement is not None
+        }
+        rendered = tuple(
+            render_message(message, origins.get(message["message_id"]))
+            for message in self._current_messages
+        )
+        base_items = (*rendered, *transient_items)
         if self._model_limits is None:
             self._pending_heuristic_input_tokens = None
             return ModelContextView(items=base_items)
@@ -92,11 +121,89 @@ class ContextManager:
 
         # 使用完整请求的结果更新容量消息，不再为这条小消息循环估算。
         items = (*base_items, build_context_status_context(final_status))
+        if final_status.estimated_input_tokens > final_status.effective_input_limit_tokens:
+            raise ValueError("model input exceeds the context budget; shorten the input or start a new session")
         self._pending_heuristic_input_tokens = heuristic_input_tokens
         return ModelContextView(
             items=items,
             context_status=final_status,
         )
+
+    def _select(
+        self, message_ids: list[str],
+    ) -> list[dict[str, object]]:
+        if not isinstance(message_ids, list) or not message_ids or any(
+            not isinstance(mid, str) or not mid for mid in message_ids
+        ):
+            raise ValueError("message_ids must be a non-empty list of strings")
+        targets = set(message_ids)
+        messages = self._current_messages
+        by_id = {message["message_id"]: message for message in messages}
+        # 同一轮内不重新生成视图：已经处理过的目标需要等下一轮再选择。
+        changed_ids = set()
+        for operation in self.operations.records[self._view_operation_count:]:
+            changed_ids.update(operation.message_ids)
+        for mid in message_ids:
+            if mid not in by_id:
+                raise ValueError(f"message is not in the current view: {mid}")
+            if mid in changed_ids:
+                raise ValueError(f"message {mid} was already changed this turn; wait for the next view")
+            if not is_editable(by_id[mid]["payload"]):
+                raise ValueError(
+                    f"message {mid} cannot be processed: select user/assistant text "
+                    "or a text tool result"
+                )
+        return [message for message in messages if message["message_id"] in targets]
+
+    def change_messages(
+        self, action: str, message_ids: list[str], *, instructions: str = "",
+    ) -> str:
+        """读取本轮可见消息，生成替代内容并保存操作；下一轮才应用。"""
+        if action not in {"delete", "compress"}:
+            raise ValueError("unsupported context operation")
+        selected = self._select(message_ids)
+        summary = ""
+        if action == "compress":
+            if not isinstance(instructions, str) or not instructions.strip():
+                raise ValueError("compression instructions must not be empty")
+            if self._summarizer is None:
+                raise ValueError("summary model is not configured")
+            calls = {
+                message["payload"].get("call_id"): message["payload"]
+                for message in self._current_messages
+                if message["payload"].get("type") == "function_call"
+            }
+            sources = []
+            for message in selected:
+                source = {"message_id": message["message_id"], "message": message["payload"]}
+                if message["payload"].get("type") == "function_call_output":
+                    source["tool_call"] = calls.get(message["payload"].get("call_id"))
+                sources.append(source)
+            summary = self._summarizer.summarize(sources, instructions)
+            if not isinstance(summary, str) or not summary.strip():
+                raise ValueError("summary model returned an empty summary")
+            summary = summary.strip()
+
+        operation_id = self.operations.next_id
+        selected_ids = tuple(message["message_id"] for message in selected)
+        content = (
+            f"Messages {', '.join(selected_ids)} summarized:\n{summary}"
+            if action == "compress"
+            else f"Messages {', '.join(selected_ids)} hidden."
+        )
+        replacement = {
+            "message_id": f"m{uuid4().hex}",
+            "payload": {"role": "assistant", "content": content},
+        }
+        operation = ContextOperation(
+            operation_id, action, selected_ids,
+            instructions=instructions, replacement=replacement,
+        )
+        self.operations.record(operation)
+        return json.dumps({
+            "operation_id": operation.operation_id,
+            "message_id": replacement["message_id"],
+        })
 
     def _estimate_status(
         self,
