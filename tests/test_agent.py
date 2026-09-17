@@ -109,7 +109,7 @@ def test_agent_returns_the_models_final_text(tmp_path: Path) -> None:
             EMPTY_RUN_STATE_CONTEXT,
         ]
     ]
-    assert len(model_client.tools[0]) == 10
+    assert len(model_client.tools[0]) == 12
     assert any(tool["name"] == "update_plan" for tool in model_client.tools[0])
     assert agent.run_state is not None
     assert agent.run_state.original_task == "inspect repository"

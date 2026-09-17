@@ -82,8 +82,20 @@ messages at the position of the last target; unselected messages remain.
 Placeholders and summaries use ordinary message IDs saved with the operation
 and reused on recovery. Summaries, placeholders, and context-management tool
 results can be deleted or compressed again as ordinary text messages.
-Original history remains stored, but no history search or retrieval tool is
-available yet.
+Use `search_history(query, max_results)` to find hidden details by literal,
+case-insensitive text matching. It returns up to 20 matches with `message_id`,
+`offset`, and `text`, plus a `truncated` flag. The offset is the start of the
+returned snippet, including up to 80 characters around the match. Search checks
+saved replacement messages first, then original history, newest first within
+each group. The query may contain up to 200 characters.
+
+Use `read_history(message_id, offset, length)` to read more of a message. Offsets
+start at zero and count Python string characters, not bytes or tokens. Reading
+returns `text`, `next_offset`, `total_length`, and `eof`; reuse `next_offset` to
+continue. Each call reads up to 8,000 characters. Search and reading use the same
+text: string bodies are unchanged, and text blocks are concatenated in order.
+Images and protocol-only items are not searched. Retrieval adds ordinary tool
+results to the conversation without modifying existing context operations.
 
 When a tool result is replaced, its matching call is also omitted from the model
 view so no unpaired call remains. Both remain stored in complete history.

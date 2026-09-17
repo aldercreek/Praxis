@@ -190,6 +190,7 @@ class Agent:
             context=ToolContext(
                 self.workspace, run_state,
                 context_manager=self.context_manager,
+                history=self._history,
             ),
             publish_event=self._emit,
             approve_tool_call=self.approve_tool_call,
