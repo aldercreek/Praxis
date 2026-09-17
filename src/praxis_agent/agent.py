@@ -12,6 +12,8 @@ from praxis_agent.context import (
     ContextStatus,
     ConversationHistory,
 )
+from praxis_agent.context.operations import ContextOperation
+from praxis_agent.context.summarizer import ModelContextSummarizer, SUMMARY_INSTRUCTIONS
 from praxis_agent.events import (
     AgentEvent,
     AssistantTextDelta,
@@ -94,6 +96,11 @@ class Agent:
             raise ValueError(
                 "session_id and session_model are required with session_store"
             )
+        if self.session_store is not None:
+            self.context_manager.operations.replay(
+                self.session_store.load_context_operations(self._session_id())
+            )
+            self.context_manager.operations.persist = self._persist_context_operation
 
     def run(self, task: str) -> str:
         """运行一轮任务，并保留内容供同一会话的后续任务使用。"""
@@ -156,6 +163,7 @@ class Agent:
             self.session_id = session.id
         self._history.clear()
         self.context_manager.reset()
+        self.context_manager.operations.clear()
         self.run_state = None
         self.context_status = None
 
@@ -179,7 +187,10 @@ class Agent:
         tool_definitions = self.tool_registry.definitions()
         tool_executor = ToolCallExecutor(
             tool_registry=self.tool_registry,
-            context=ToolContext(self.workspace, run_state),
+            context=ToolContext(
+                self.workspace, run_state,
+                context_manager=self.context_manager,
+            ),
             publish_event=self._emit,
             approve_tool_call=self.approve_tool_call,
         )
@@ -262,6 +273,12 @@ class Agent:
         raise AgentError(
             f"agent exceeded the maximum of {self.max_turns} model turns"
         )
+
+    def _persist_context_operation(self, operation: ContextOperation) -> None:
+        if self.session_store is not None:
+            self.session_store.append_context_operation(
+                self._session_id(), operation,
+            )
 
     def _finish_persisted_run(
         self,
@@ -391,6 +408,9 @@ def create_default_agent(
             model_limits=config.model_limits,
             policy=config.context_policy,
             instructions=instructions,
+            summarizer=ModelContextSummarizer(
+                OpenAIModelClient(config, instructions=SUMMARY_INSTRUCTIONS),
+            ),
         ),
     )
     agent.restore_history(history)

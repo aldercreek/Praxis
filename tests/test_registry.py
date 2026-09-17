@@ -20,11 +20,13 @@ def test_default_registry_contains_all_builtin_tools() -> None:
         "search_text",
         "run_command",
         "update_plan",
+        "delete",
+        "compress",
     )
     assert registry.tools[0].description == (
         "Read a bounded line range from a UTF-8 workspace file."
     )
-    assert registry.tools[-2].requires_approval is True
+    assert registry.requires_approval("run_command") is True
 
 
 def test_registry_returns_model_tool_definitions() -> None:
@@ -130,7 +132,9 @@ def test_update_plan_uses_runtime_context_not_model_arguments(
     first_context = _context(tmp_path, "first task")
     second_context = _context(tmp_path, "second task")
 
-    definition = registry.definitions()[-1]
+    definition = next(
+        item for item in registry.definitions() if item["name"] == "update_plan"
+    )
     assert definition["name"] == "update_plan"
     assert set(definition["parameters"]["properties"]) == {"plan"}
 

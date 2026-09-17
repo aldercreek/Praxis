@@ -53,6 +53,58 @@ The first model request uses a heuristic token estimate. Later requests use
 the previous response's exact `input_tokens` plus the estimated change in the
 model context, avoiding a full uncalibrated estimate on every request.
 
+## Context management
+
+Praxis keeps three separate layers: complete conversation history, persisted
+context operations, and the temporary input view sent to the model. Original
+conversation messages in SQLite are never replaced by hidden-output markers.
+
+User/assistant text and tool outputs carry textual labels such as
+`[message_id=m12]` in the model view. IDs come from the original history order,
+not the current view position, and are not extra API protocol fields.
+
+- `delete(message_ids)` replaces selected messages with one placeholder.
+- `compress(message_ids, instructions)` asks a separate model request, without
+  tools, to summarize the selected content using the model's preservation
+  instructions. The summary is generated once and saved with the operation.
+
+Tools only generate and persist operations. Before each model request,
+`build_view()` rebuilds the view from complete history and applies all operations
+in order. Tools select messages only from
+the last built view; compression never reads hidden original messages. Changes
+become visible on the next request. Selecting the same message again after it
+was changed in the current turn returns a tool error.
+
+Delete and compress each return an ID such as `op1` and one new `message_id`.
+The operation stores the selected `message_ids` and a single `replacement`
+message containing its ID and content. This message replaces all selected
+messages at the position of the last target; unselected messages remain.
+Placeholders and summaries use ordinary message IDs saved with the operation
+and reused on recovery. Summaries, placeholders, and context-management tool
+results can be deleted or compressed again as ordinary text messages.
+Original history remains stored, but no history search or retrieval tool is
+available yet.
+
+When a tool result is replaced, its matching call is also omitted from the model
+view so no unpaired call remains. Both remain stored in complete history.
+Protocol-only items, system/developer
+messages and multimodal messages are protected.
+Invalid targets are checked before persistence.
+Tools do not preview candidate views, compare token savings, or calculate summary
+budgets. Capacity is estimated and checked only when building the model request;
+a summary may be longer and cause the next request to exceed the limit.
+SQLite stores operations separately from original messages and
+replays them on recovery. `/clear` starts a new session with no operations.
+Legacy call-ID operations are not migrated or loaded.
+
+Large user inputs remain ordinary messages: no automatic attachment conversion,
+deletion, or summarization. The model decides when to manage context. A request
+already exceeding the estimated input limit is rejected before calling the model;
+the user must shorten the input or start a new session.
+
+After context changes, token accounting starts with a fresh estimate and
+is calibrated again using the next model response's actual input usage.
+
 At startup, Praxis tells the model only the operating system, resolved
 workspace root, and which common shells are available or unavailable. It does
 not send environment-variable values or the full system `PATH`.

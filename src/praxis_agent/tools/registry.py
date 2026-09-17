@@ -19,6 +19,7 @@ from praxis_agent.tools.filesystem import (
 )
 
 if TYPE_CHECKING:
+    from praxis_agent.context.manager import ContextManager
     from praxis_agent.planning.state import RunState
 
 
@@ -227,6 +228,7 @@ class ToolContext:
 
     workspace: Path
     run_state: RunState
+    context_manager: ContextManager | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -396,4 +398,8 @@ def create_default_registry() -> ToolRegistry:
         )
     )
     registry.register(create_update_plan_tool())
+    from praxis_agent.context.tools import create_context_tools
+
+    for tool in create_context_tools():
+        registry.register(tool)
     return registry
