@@ -22,6 +22,8 @@ def test_default_registry_contains_all_builtin_tools() -> None:
         "update_plan",
         "delete",
         "compress",
+        "search_history",
+        "read_history",
     )
     assert registry.tools[0].description == (
         "Read a bounded line range from a UTF-8 workspace file."

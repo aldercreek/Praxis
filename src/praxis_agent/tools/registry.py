@@ -20,6 +20,7 @@ from praxis_agent.tools.filesystem import (
 
 if TYPE_CHECKING:
     from praxis_agent.context.manager import ContextManager
+    from praxis_agent.context.models import ConversationHistory
     from praxis_agent.planning.state import RunState
 
 
@@ -229,6 +230,7 @@ class ToolContext:
     workspace: Path
     run_state: RunState
     context_manager: ContextManager | None = None
+    history: ConversationHistory | None = None
 
 
 @dataclass(frozen=True, slots=True)
