@@ -1,0 +1,59 @@
+src/praxis_agent/context/model_catalog.py
+  s_05f61ff3cbe74f::t_d130627c1cf5e5 109-111,149
+README.md
+  s_05f61ff3cbe74f::t_810ed5fa795d0f 27
+  s_05f61ff3cbe74f::t_69792d1e8239a8 170-181
+tests/test_agent.py
+  s_05f61ff3cbe74f::t_4743c73ceebdcb 373-374,383,385-386,390-392,394
+tests/test_filesystem.py
+  s_05f61ff3cbe74f::t_8798d290659a66 210-215
+src/praxis_agent/tools/registry.py
+  s_05f61ff3cbe74f::t_c1edbd1d5aa149 7-8,321,327,342,345-347,362-410
+  s_05f61ff3cbe74f::t_6092ecb76fb95d 125-126,129-133,135,162-165,167,459-463,471-476
+  s_05f61ff3cbe74f::t_4743c73ceebdcb 320,322-326,328-329,351-353
+  s_05f61ff3cbe74f::t_6ee2b177c43e0d 188-197,212-213,484-489
+src/praxis_agent/prompts.py
+  s_05f61ff3cbe74f::t_8798d290659a66 11
+  s_05f61ff3cbe74f::t_3c121de77f3e38 25-27
+  s_05f61ff3cbe74f::t_6092ecb76fb95d 9-10,12-13
+src/praxis_agent/tool_execution.py
+  s_05f61ff3cbe74f::t_786d832af876b8 50,67-69
+  s_05f61ff3cbe74f::t_c1edbd1d5aa149 31-32
+  s_05f61ff3cbe74f::t_4743c73ceebdcb 64
+src/praxis_agent/terminal/context.py
+  s_05f61ff3cbe74f::t_86f4e64d2ba4fc 1-126
+src/praxis_agent/config.py
+  s_05f61ff3cbe74f::t_810ed5fa795d0f 16
+tests/test_config.py
+  s_05f61ff3cbe74f::t_810ed5fa795d0f 23,39
+src/praxis_agent/terminal/renderer.py
+  s_05f61ff3cbe74f::t_e1827f1d845616 196,214-215,324-325,365
+  s_05f61ff3cbe74f::t_3c121de77f3e38 6,12,75-82,91-93,125,146-148,153,169-171,184,191,193,195,197-213,216-237,252,278-279,336,409,412-421,424,430,443,470-471,483-485
+  s_05f61ff3cbe74f::t_86f4e64d2ba4fc 10,42-47,74,94,100-101,157-158,165-166,172,290-292,354-356
+src/praxis_agent/agent.py
+  s_05f61ff3cbe74f::t_786d832af876b8 66,194,349,402
+  s_05f61ff3cbe74f::t_4743c73ceebdcb 197-199
+src/praxis_agent/cli.py
+  s_05f61ff3cbe74f::t_786d832af876b8 49-53,153
+src/praxis_agent/terminal/cells.py
+  s_05f61ff3cbe74f::t_3c121de77f3e38 39-44,53,56,68-75,81,97,100-104,178,181,183-184
+src/praxis_agent/tools/filesystem.py
+  s_05f61ff3cbe74f::t_6092ecb76fb95d 1,4,80,85-87,89-90,92,94-95,98-99,113-114,116,310,320-321,490,497-498,513-516,531,551
+  s_05f61ff3cbe74f::t_53bcb21199a604 5,141-160,166-168,193,220-226,229-230,268-269,297-299,302,567-568,570,577-580,595-596,599-600,602-605
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.45-trip",
+  "base_commit_sha": "ff9596103545b7a70ec8c70cddf41dc2f463d379",
+  "prompts": {},
+  "sessions": {
+    "s_05f61ff3cbe74f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08165-7b07-7723-9093-a5397df3abb9",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "wanjl <wanjl@trip.com>"
+    }
+  }
+}
