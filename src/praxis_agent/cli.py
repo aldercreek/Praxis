@@ -46,6 +46,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="List saved sessions for the current workspace",
     )
+    parser.add_argument(
+        "--bypass",
+        action="store_true",
+        help="Run tools without approval prompts for this process",
+    )
     parser.add_argument("task", nargs="*", help="Task for the agent")
     return parser
 
@@ -145,6 +150,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             workspace,
             event_sink=event_sink,
             approve_tool_call=approve_tool_call,
+            bypass_approvals=args.bypass,
             resume_latest=args.resume_latest,
             resume_session_id=args.resume,
         )

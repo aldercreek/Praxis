@@ -3,11 +3,13 @@ from __future__ import annotations
 import os
 import shlex
 import subprocess
+from time import monotonic
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from rich.console import Console, RenderableType
+from rich.console import Console, Group, RenderableType
 from rich.live import Live
+from rich.text import Text
 
 from praxis_agent.events import (
     AgentEvent,
@@ -37,6 +39,12 @@ from praxis_agent.terminal.cells import (
     tool_completed_cell,
     working_cell,
 )
+from praxis_agent.terminal.context import (
+    CONTEXT_TOOLS,
+    capacity_footer,
+    context_activity,
+    context_completed,
+)
 
 
 _EXPLORATION_TOOLS = frozenset(
@@ -63,6 +71,15 @@ class ConsoleRenderer:
         self._assistant_committed = False
         self._request_has_text = False
         self._line_open = False
+        self._capacity: RenderableType | None = None
+        self._turn_started = monotonic()
+        self._phase_started = monotonic()
+        self._phase = "等待模型响应"
+        self._active: RenderableType = ""
+        self._tool_started: dict[str, float] = {}
+        self._plan_seen = False
+        self._streamed_length = 0
+        self._fence: str | None = None
 
     def emit(self, event: AgentEvent) -> None:
         """Update the transcript and active area for one agent event."""
@@ -71,11 +88,17 @@ class ConsoleRenderer:
             return
 
         if isinstance(event, ModelRequestStarted):
+            self._set_phase("等待模型响应")
+            self._streamed_length = 0
+            self._fence = None
+            self._capacity = capacity_footer(event.input_items)
             self._assistant_buffer = ""
             self._assistant_committed = False
             self._request_has_text = False
             if not self._exploration_items:
                 self._show_working()
+            else:
+                self._restore_active_state()
             return
 
         if isinstance(event, AssistantTextDelta):
@@ -99,6 +122,7 @@ class ConsoleRenderer:
             return
 
         if isinstance(event, ApprovalRequested):
+            self._flush_exploration()
             self._stop_live()
             return
 
@@ -119,22 +143,33 @@ class ConsoleRenderer:
         if isinstance(event, PlanUpdated):
             self._finish_plain_line()
             self._flush_exploration()
-            self._commit(plan_cell(event.plan))
+            complete = all(step.status.value == "completed" for step in event.plan)
+            self._commit(plan_cell(event.plan, compact=self._plan_seen and not complete))
+            self._plan_seen = True
             self._show_working()
             return
 
         if isinstance(event, TurnFailed):
+            self._flush_answer()
             self._finish_plain_line()
             self._flush_exploration()
             self._stop_live()
+            if self._capacity is not None:
+                self._commit(self._capacity)
             return
 
         if isinstance(event, TurnCompleted):
             self._finish_plain_line()
             self._flush_exploration()
             self._stop_live()
+            if self._capacity is not None:
+                self._commit(self._capacity)
 
     def _begin_turn(self) -> None:
+        self._turn_started = monotonic()
+        self._plan_seen = False
+        self._tool_started.clear()
+        self._capacity = None
         self._prepared_calls.clear()
         self._exploration_items.clear()
         self._assistant_buffer = ""
@@ -146,16 +181,60 @@ class ConsoleRenderer:
     def _on_text_delta(self, text: str) -> None:
         if not text:
             return
+        first_text = not self._request_has_text
         self._request_has_text = True
         if not self._interactive:
             print(text, end="", file=self._console.file, flush=True)
             self._line_open = not text.endswith(("\n", "\r"))
             return
 
-        if not self._assistant_buffer:
+        if first_text:
             self._flush_exploration()
+            self._set_phase("正在生成回答")
         self._assistant_buffer += text
-        self._set_active(assistant_cell(self._assistant_buffer))
+        # 完成的 Markdown 段落写入历史，Live 只显示有限的未完成尾部。
+        while "\n" in self._assistant_buffer or len(self._assistant_buffer) > 2000:
+            lines = self._assistant_buffer.splitlines(keepends=True)
+            end = 0
+            fence = self._fence
+            boundary = 0
+            for line in lines:
+                if not line.endswith("\n"):
+                    break
+                end += len(line)
+                stripped = line.lstrip()
+                if stripped.startswith(("```", "~~~")):
+                    marker = stripped[:3]
+                    fence = None if fence == marker else marker if fence is None else fence
+                if not line.strip() and fence is None:
+                    boundary = end
+                    break
+            if boundary:
+                chunk = self._assistant_buffer[:boundary]
+                self._commit(Text(chunk.rstrip("\n")) if self._fence else assistant_cell(chunk))
+                self._fence = fence
+                self._assistant_buffer = self._assistant_buffer[boundary:]
+                self._streamed_length += boundary
+            elif len(self._assistant_buffer) > 2000:
+                # 超长代码块或段落按原文分批输出，避免超屏裁剪和反复重排。
+                boundary = self._assistant_buffer.rfind("\n", 0, 2000) + 1 or 2000
+                chunk = self._assistant_buffer[:boundary]
+                for line in chunk.splitlines():
+                    if line.lstrip().startswith(("```", "~~~")):
+                        marker = line.lstrip()[:3]
+                        self._fence = None if self._fence == marker else marker if self._fence is None else self._fence
+                self._commit(Text(chunk.rstrip("\n")))
+                self._assistant_buffer = self._assistant_buffer[boundary:]
+                self._streamed_length += boundary
+            else:
+                break
+        # 原文预览避免不完整表格、代码块的 Markdown 布局不断变化。
+        self._set_active(Text(self._assistant_buffer[-1200:]))
+
+    def _flush_answer(self) -> None:
+        if self._interactive and self._assistant_buffer:
+            self._commit(Text(self._assistant_buffer) if self._fence else assistant_cell(self._assistant_buffer))
+            self._assistant_buffer = ""
 
     def _on_model_request_completed(
         self,
@@ -170,7 +249,7 @@ class ConsoleRenderer:
             else self._assistant_buffer
         )
         if authoritative_text:
-            self._commit(assistant_cell(authoritative_text))
+            self._flush_answer()
             self._assistant_committed = True
 
         has_tool_calls = bool(
@@ -196,6 +275,8 @@ class ConsoleRenderer:
         self._clear_active()
 
     def _on_tool_started(self, event: ToolStarted) -> None:
+        self._tool_started[event.call_id] = monotonic()
+        self._set_phase(f"正在执行 {event.tool_name}")
         call = self._prepared_call(event.call_id, event.tool_name)
         if call.name in _EXPLORATION_TOOLS:
             item = _exploration_item(call.name, call.arguments)
@@ -206,7 +287,9 @@ class ConsoleRenderer:
             return
 
         self._flush_exploration()
-        if call.name == "update_plan":
+        if call.name in CONTEXT_TOOLS:
+            self._set_active(context_activity(call.name, call.arguments))
+        elif call.name == "update_plan":
             self._show_working()
         elif call.name == "run_command":
             self._set_active(
@@ -238,6 +321,8 @@ class ConsoleRenderer:
             _PreparedCall(event.tool_name, {}),
         )
         result = event.result
+        started = self._tool_started.pop(event.call_id, None)
+        elapsed = monotonic() - started if started is not None else None
 
         if call.name in _EXPLORATION_TOOLS:
             if result.success:
@@ -248,7 +333,7 @@ class ConsoleRenderer:
             if self._exploration_items:
                 self._exploration_items.pop()
             self._flush_exploration()
-            self._commit(error_cell("Exploration failed", result.output))
+            self._commit(error_cell(f"{call.name} 失败", result.output))
             self._show_working()
             return
 
@@ -266,7 +351,9 @@ class ConsoleRenderer:
             self._show_working()
             return
 
-        if call.name == "run_command":
+        if call.name in CONTEXT_TOOLS:
+            self._commit(context_completed(call.name, call.arguments, result.output))
+        elif call.name == "run_command":
             exit_code, stdout, stderr = _parse_command_result(result.output)
             self._commit(
                 command_cell(
@@ -275,6 +362,7 @@ class ConsoleRenderer:
                     exit_code=exit_code,
                     stdout=stdout,
                     stderr=stderr,
+                    elapsed=elapsed,
                 )
             )
         elif call.name in {"edit_file", "create_file"}:
@@ -318,16 +406,28 @@ class ConsoleRenderer:
     def _set_active(self, renderable: RenderableType) -> None:
         if not self._interactive:
             return
+        self._active = renderable
         self._ensure_live()
         assert self._live is not None
-        self._live.update(renderable, refresh=True)
+        self._live.update(self._live_content(), refresh=False)
+
+    def _set_phase(self, phase: str) -> None:
+        self._phase = phase
+        self._phase_started = monotonic()
+
+    def _live_content(self) -> RenderableType:
+        now = monotonic()
+        status = Text(f"{self._phase} · 本次 {now - self._phase_started:.0f}s · 总耗时 {now - self._turn_started:.0f}s", style="dim")
+        return Group(self._active, status, *([self._capacity] if self._capacity is not None else []))
 
     def _clear_active(self) -> None:
+        self._active = ""
         if self._live is not None:
             self._live.update("", refresh=True)
 
     def _commit(self, renderable: RenderableType) -> None:
         if self._live is not None:
+            self._active = ""
             self._live.console.print(renderable)
         else:
             self._console.print(renderable)
@@ -340,6 +440,7 @@ class ConsoleRenderer:
             console=self._console,
             refresh_per_second=10,
             transient=True,
+            get_renderable=self._live_content,
         )
         self._live.start(refresh=True)
 
@@ -366,7 +467,8 @@ def approve_tool_call(
         else f"Allow {_display_tool_name(name)}"
     )
     try:
-        answer = input(f"{action}? [y/N] ").strip().lower()
+        print(f"\n执行目录：{arguments.get('relative_path', '.')}\n{action}")
+        answer = input("是否执行？[y/N] ").strip().lower()
     except EOFError:
         return False
     return answer in {"y", "yes"}
@@ -378,7 +480,9 @@ def _exploration_item(
 ) -> ExplorationItem:
     path = _string_argument(arguments, "relative_path") or "."
     if name == "read_file":
-        return ExplorationItem("Read", path)
+        start = arguments.get("start_line", 1)
+        count = arguments.get("max_lines", 400)
+        return ExplorationItem("Read", f"{path} · 起始行 {start}，最多 {count} 行")
     if name == "list_files":
         return ExplorationItem("List", path)
     if name == "find_files":

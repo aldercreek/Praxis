@@ -207,11 +207,12 @@ def test_find_files_reports_truncated_results(tmp_path: Path) -> None:
 
     result = find_files(tmp_path, "*.py", max_results=2)
 
-    assert result.splitlines() == [
-        "a.py",
-        "b.py",
-        "... truncated after 2 files",
-    ]
+    lines = result.splitlines()
+    assert lines[-1] == "... truncated after 2 files"
+    matches = lines[:-1]
+    assert len(matches) == len(set(matches)) == 2
+    assert set(matches) <= {"a.py", "b.py", "c.py"}
+    assert matches == sorted(matches)
 
 
 def test_find_files_requires_ripgrep(

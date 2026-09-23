@@ -36,7 +36,12 @@ def assistant_cell(markdown: str) -> RenderableType:
     return grid
 
 
-def plan_cell(plan: Iterable[PlanStep]) -> RenderableType:
+def plan_cell(plan: Iterable[PlanStep], *, compact: bool = False) -> RenderableType:
+    plan = list(plan)
+    if compact:
+        completed = sum(step.status.value == "completed" for step in plan)
+        current = next((step.description for step in plan if step.status.value == "in_progress"), "等待下一步")
+        return _block(f"计划 · {completed}/{len(plan)} 已完成", [_detail_line(current)])
     lines = [_completed_header("Updated Plan")]
     for index, step in enumerate(plan):
         prefix = "  └ " if index == 0 else "    "
@@ -45,10 +50,10 @@ def plan_cell(plan: Iterable[PlanStep]) -> RenderableType:
             line.append("✔ ", style="dim")
             line.append(step.description, style="dim strike")
         elif step.status.value == "in_progress":
-            line.append("□ ", style="bold cyan")
+            line.append("› ", style="bold cyan")
             line.append(step.description, style="bold cyan")
         else:
-            line.append("□ ", style="dim")
+            line.append("○ ", style="dim")
             line.append(step.description, style="dim")
         lines.append(line)
     return Group(*lines)
@@ -60,12 +65,20 @@ def exploration_cell(
     active: bool,
 ) -> RenderableType:
     details: list[Text] = []
+    items = list(items)
+    paths = [item.detail for item in items if item.action in {"Read", "List"}]
+    prefix = ""
+    if len(paths) == len(items) and len(paths) > 1:
+        import posixpath
+        prefix = posixpath.commonpath([posixpath.dirname(path) for path in paths])
+        if prefix:
+            details.append(_detail_line(f"目录：{prefix}/"))
     for index, item in enumerate(items):
         line = Text("  └ " if index == 0 else "    ", style="dim")
         line.append(item.action, style="cyan")
         if item.detail:
             line.append(" ")
-            line.append(item.detail)
+            line.append(item.detail.removeprefix(prefix + "/") if prefix else item.detail)
         details.append(line)
     return _block(
         "Exploring" if active else "Explored",
@@ -81,9 +94,14 @@ def command_cell(
     exit_code: int | None = None,
     stdout: str = "",
     stderr: str = "",
+    elapsed: float | None = None,
 ) -> RenderableType:
     title = Text("Running " if active else "Ran ", style="bold")
-    title.append(command)
+    title.append(command if len(command) <= 120 else command[:117] + "…")
+    if exit_code is not None:
+        title.append(f" · exit {exit_code}")
+    if elapsed is not None:
+        title.append(f" · {elapsed:.1f}s")
 
     details: list[Text] = []
     if not active:
@@ -157,11 +175,13 @@ def error_cell(title: str, detail: str = "") -> RenderableType:
     details: list[Text] = []
     if detail:
         for index, content in enumerate(
-            _middle_truncate(detail.splitlines(), max_lines=5)
+            _middle_truncate(detail.split("\nCheck the arguments for", 1)[0].splitlines(), max_lines=3)
         ):
             line = Text("  └ " if index == 0 else "    ", style="dim")
-            line.append(content, style="red")
+            line.append(content[:240] + ("…" if len(content) > 240 else ""), style="red")
             details.append(line)
+        if "\nCheck the arguments for" in detail:
+            details.append(_detail_line("参数修正说明已返回模型；需按工具定义修正后重试。"))
     return _block(title, details, marker="✗", marker_style="bold red")
 
 

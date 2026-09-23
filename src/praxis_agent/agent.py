@@ -60,10 +60,10 @@ class Agent:
     model_client: ModelClient
     tool_registry: ToolRegistry
     workspace: Path
-    max_turns: int = 30
     name: str = "Praxis"
     event_sink: EventSink | None = None
     approve_tool_call: ToolApprovalHandler | None = None
+    bypass_approvals: bool = False
     session_store: SQLiteSessionStore | None = None
     session_id: str | None = None
     session_model: str | None = None
@@ -77,9 +77,6 @@ class Agent:
     )
 
     def __post_init__(self) -> None:
-        if self.max_turns < 1:
-            raise ValueError("max_turns must be at least 1")
-
         workspace_root = self.workspace.resolve()
         if not workspace_root.is_dir():
             raise NotADirectoryError(
@@ -194,9 +191,12 @@ class Agent:
             ),
             publish_event=self._emit,
             approve_tool_call=self.approve_tool_call,
+            bypass_approvals=self.bypass_approvals,
         )
 
-        for request_number in range(1, self.max_turns + 1):
+        request_number = 0
+        while True:
+            request_number += 1
             context_view = self.context_manager.build_view(
                 self._history,
                 transient_items=(build_run_state_context(run_state),),
@@ -270,10 +270,6 @@ class Agent:
                     and function_call.name == "update_plan"
                 ):
                     self._emit(PlanUpdated(turn_id, tuple(run_state.plan)))
-
-        raise AgentError(
-            f"agent exceeded the maximum of {self.max_turns} model turns"
-        )
 
     def _persist_context_operation(self, operation: ContextOperation) -> None:
         if self.session_store is not None:
@@ -350,6 +346,7 @@ def create_default_agent(
     *,
     event_sink: EventSink | None = None,
     approve_tool_call: ToolApprovalHandler | None = None,
+    bypass_approvals: bool = False,
     resume_latest: bool = False,
     resume_session_id: str | None = None,
     session_database_path: Path | None = None,
@@ -402,6 +399,7 @@ def create_default_agent(
         workspace=runtime_context.workspace_root,
         event_sink=event_sink,
         approve_tool_call=approve_tool_call,
+        bypass_approvals=bypass_approvals,
         session_store=session_store,
         session_id=session.id,
         session_model=session.model,

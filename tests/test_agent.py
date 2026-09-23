@@ -76,7 +76,6 @@ def _agent(
     tmp_path: Path,
     responses: list[ModelResponse],
     *,
-    max_turns: int = 10,
     event_sink: EventSink | None = None,
 ) -> tuple[Agent, FakeModelClient]:
     """构造使用临时工具工作区和预设模型响应的 Agent。"""
@@ -85,7 +84,6 @@ def _agent(
         model_client=model_client,
         tool_registry=create_default_registry(),
         workspace=tmp_path,
-        max_turns=max_turns,
         event_sink=event_sink,
     )
     return agent, model_client
@@ -372,8 +370,8 @@ def test_agent_asks_for_approval_and_respects_a_decline(
     assert "declined by the user" in decoded_output["output"]
 
 
-# 防止模型持续请求工具导致无限循环。
-def test_agent_stops_after_the_maximum_number_of_turns(
+# 模型可以持续调用工具，直到生成最终回答。
+def test_agent_continues_beyond_thirty_turns_until_final_text(
     tmp_path: Path,
 ) -> None:
     event_sink = RecordingEventSink()
@@ -382,23 +380,18 @@ def test_agent_stops_after_the_maximum_number_of_turns(
         output_text="",
         function_calls=(FunctionCall("call-1", "missing", "{}"),),
     )
-    agent, _ = _agent(
+    agent, model_client = _agent(
         tmp_path,
-        [repeated_call],
-        max_turns=1,
+        [repeated_call] * 31
+        + [ModelResponse(output_items=(), output_text="done", function_calls=())],
         event_sink=event_sink,
     )
 
-    with pytest.raises(AgentError, match="maximum of 1 model turns"):
-        agent.run("keep calling tools")
-
-    assert isinstance(event_sink.events[-1], TurnFailed)
-    assert event_sink.events[-1].error_type == "AgentError"
+    assert agent.run("keep calling tools") == "done"
+    assert len(model_client.inputs) == 32
+    assert isinstance(event_sink.events[-1], TurnCompleted)
     assert agent.run_state is not None
-    assert agent.run_state.status is RunStatus.FAILED
-    assert agent.run_state.error == (
-        "AgentError: agent exceeded the maximum of 1 model turns"
-    )
+    assert agent.run_state.status is RunStatus.COMPLETED
 
 
 def test_agent_lets_the_model_update_the_task_plan(tmp_path: Path) -> None:

@@ -24,7 +24,7 @@ session:
 $env:ADA_API_KEY = "your-coding-plan-token"
 ```
 
-Praxis uses the ADA gateway and `gpt-5.6-terra-2026-07-09` by default. These
+Praxis uses the ADA gateway and `deepseek-v4.1-flash` by default. These
 optional variables can override either value:
 
 ```powershell
@@ -166,6 +166,18 @@ praxis "run the tests, analyze any failures, and fix them"
 
 When `run_command` is requested, review the displayed argument list and enter
 `y` to allow it. Any other answer declines the command.
+
+Use `--bypass` to skip tool approval prompts for the current process:
+
+```powershell
+praxis --bypass
+praxis --bypass "run the tests and fix failures"
+praxis --bypass --continue
+```
+
+This option applies to all tools requiring approval. It is not saved in the
+session; subsequent launches without `--bypass` use normal approval prompts.
+Tool argument validation and workspace path restrictions still apply.
 
 Start it without an argument to keep a conversation in the current process:
 
