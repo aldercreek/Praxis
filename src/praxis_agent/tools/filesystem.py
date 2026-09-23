@@ -1,6 +1,8 @@
+import os
 import shutil
 import subprocess
-from collections.abc import Iterator, Mapping
+from collections import deque
+from collections.abc import Callable, Iterator, Mapping
 from difflib import unified_diff
 from pathlib import Path
 from threading import Event, Thread, Timer
@@ -75,22 +77,26 @@ def _iter_workspace_entries(
     target_path: Path,
     max_depth: int,
 ) -> Iterator[tuple[Path, bool]]:
-    """按路径顺序遍历有限深度内的文件和目录。"""
+    """按层遍历有限深度的目录，优先返回浅层条目，不跟随目录链接。"""
     if target_path.is_file():
         yield target_path, False
         return
 
-    def visit(directory: Path, depth: int) -> Iterator[tuple[Path, bool]]:
+    pending = deque([(target_path, 1)])
+    while pending:
+        directory, depth = pending.popleft()
         try:
-            children = sorted(directory.iterdir(), key=lambda path: path.name)
+            with os.scandir(directory) as scanner:
+                children = sorted(scanner, key=lambda entry: entry.name)
         except OSError:
-            return
+            continue
 
-        for child in children:
+        for entry in children:
+            child = Path(entry.path)
             try:
                 resolved_child = child.resolve()
-                is_directory = child.is_dir()
-                is_file = child.is_file()
+                is_directory = entry.is_dir()
+                is_file = entry.is_file()
             except OSError:
                 continue
             if not resolved_child.is_relative_to(workspace_root):
@@ -104,11 +110,10 @@ def _iter_workspace_entries(
             if (
                 is_directory
                 and depth < max_depth
-                and not child.is_symlink()
+                and not entry.is_symlink()
+                and not child.is_junction()
             ):
-                yield from visit(child, depth + 1)
-
-    yield from visit(target_path, 1)
+                pending.append((child, depth + 1))
 
 
 def _normalize_search_match(match: str) -> str:
@@ -133,11 +138,34 @@ def _ripgrep_glob_arguments(file_pattern: str) -> list[str]:
     return arguments
 
 
+def _search_snippet(match: str, query: str, max_characters: int) -> str:
+    """按调用方指定长度保留首个命中附近的正文，路径和行号不变。"""
+    match = _normalize_search_match(match)
+    parts = match.split(":", 2)
+    if len(parts) != 3:
+        return match[:max_characters]
+    path, line_number, content = parts
+    if len(content) <= max_characters:
+        return match
+    position = max(0, content.find(query))
+    before = min(100, max(0, max_characters - len(query)))
+    start = max(0, position - before)
+    end = min(len(content), start + max_characters)
+    return (
+        f"{path}:{line_number}:"
+        f"{'…' if start else ''}{content[start:end]}{'…' if end < len(content) else ''} "
+        f"[snippet; columns {start + 1}-{end} of {len(content)}; first match]"
+    )
+
+
 def _run_ripgrep(
     workspace_root: Path,
     arguments: list[str],
     max_results: int,
     operation: str,
+    *,
+    format_line: Callable[[str], str] | None = None,
+    max_characters: int | None = None,
 ) -> tuple[list[str], bool]:
     """运行必需的 ripgrep，并限制执行时间和输出行数。"""
     executable = shutil.which("rg")
@@ -162,6 +190,7 @@ def _run_ripgrep(
 
     output_lines: list[str] = []
     truncated = False
+    output_characters = 0
     timed_out = Event()
     stderr_parts: list[str] = []
     assert process.stdout is not None
@@ -188,12 +217,17 @@ def _run_ripgrep(
     # 多读取一行，用来区分“刚好达到上限”和“确实被截断”。
     try:
         for output_line in process.stdout:
-            output_lines.append(
-                output_line.removesuffix("\n").removesuffix("\r")
-            )
-            if len(output_lines) > max_results:
+            line = output_line.removesuffix("\n").removesuffix("\r")
+            if format_line is not None:
+                line = format_line(line)
+            if len(output_lines) >= max_results or (
+                max_characters is not None
+                and output_characters + len(line) + 1 > max_characters
+            ):
                 truncated = True
                 break
+            output_lines.append(line)
+            output_characters += len(line) + 1
     finally:
         timeout_timer.cancel()
         timeout_timer.join(timeout=1)
@@ -231,6 +265,8 @@ def _search_with_ripgrep(
     query: str,
     file_pattern: str,
     max_results: int,
+    max_line_characters: int,
+    max_output_characters: int,
 ) -> tuple[list[str], bool]:
     """使用 ripgrep 搜索文件内容。"""
     target_argument = target_path.relative_to(workspace_root).as_posix() or "."
@@ -258,9 +294,12 @@ def _search_with_ripgrep(
         arguments,
         max_results,
         "search",
+        format_line=lambda line: _search_snippet(line, query, max_line_characters),
+        # 给末尾的截断提示预留空间，保证总返回长度也在预算内。
+        max_characters=max_output_characters - 256,
     )
     matches, truncated = result
-    return [_normalize_search_match(match) for match in matches], truncated
+    return matches, truncated
 
 
 def _find_files_with_ripgrep(
@@ -268,18 +307,18 @@ def _find_files_with_ripgrep(
     target_path: Path,
     file_pattern: str,
     max_results: int,
+    include_hidden: bool,
 ) -> tuple[list[str], bool]:
     """使用 ripgrep 按 glob 模式查找文件。"""
     target_argument = target_path.relative_to(workspace_root).as_posix() or "."
     arguments = [
         "--files",
-        "--hidden",
-        "--sort",
-        "path",
         "--path-separator",
         "/",
         "--no-messages",
     ]
+    if include_hidden:
+        arguments.append("--hidden")
     arguments.extend(_ripgrep_glob_arguments(file_pattern))
     arguments.extend(("--", target_argument))
 
@@ -448,12 +487,15 @@ def list_files(
     relative_path: str = ".",
     max_entries: int = 200,
     max_depth: int = 2,
+    entry_type: str = "all",
 ) -> str:
     """列出工作区内有限深度的文件和目录。"""
     if max_entries < 1:
         raise ValueError("max_entries must be at least 1")
     if max_depth < 1:
         raise ValueError("max_depth must be at least 1")
+    if entry_type not in {"all", "files", "directories"}:
+        raise ValueError("entry_type must be all, files or directories")
 
     workspace_root = _resolve_workspace(workspace)
     target_path = _resolve_workspace_path(workspace_root, relative_path)
@@ -468,6 +510,10 @@ def list_files(
         target_path,
         max_depth,
     ):
+        if entry_type == "directories" and not is_directory:
+            continue
+        if entry_type == "files" and is_directory:
+            continue
         if len(entries) == max_entries:
             entries.append(f"... truncated after {max_entries} entries")
             break
@@ -482,6 +528,7 @@ def find_files(
     file_pattern: str,
     relative_path: str = ".",
     max_results: int = 100,
+    include_hidden: bool = False,
 ) -> str:
     """按 glob 模式查找工作区内的文件路径。"""
     if not file_pattern:
@@ -501,6 +548,7 @@ def find_files(
         target_path,
         file_pattern,
         max_results,
+        include_hidden,
     )
 
     if not matches:
@@ -516,14 +564,20 @@ def search_text(
     relative_path: str = ".",
     max_results: int = 50,
     file_pattern: str = "*",
+    max_line_characters: int = 500,
+    max_output_characters: int = 20_000,
 ) -> str:
-    """按文件模式区分大小写地搜索固定字符串。"""
+    """搜索固定字符串；长度参数按字符计，分别限制命中正文和总输出。"""
     if not query:
         raise ValueError("query must not be empty")
     if max_results < 1:
         raise ValueError("max_results must be at least 1")
     if not file_pattern:
         raise ValueError("file_pattern must not be empty")
+    if max_line_characters < 1:
+        raise ValueError("max_line_characters must be at least 1")
+    if max_output_characters < 512:
+        raise ValueError("max_output_characters must be at least 512")
 
     workspace_root = _resolve_workspace(workspace)
     target_path = _resolve_workspace_path(workspace_root, relative_path)
@@ -538,10 +592,15 @@ def search_text(
         query,
         file_pattern,
         max_results,
+        max_line_characters,
+        max_output_characters,
     )
 
-    if not matches:
-        return f"No matches found for {query!r}."
+    if not matches and not truncated:
+        return f"No matches found for {query!r}."[:max_output_characters]
     if truncated:
-        matches.append(f"... truncated after {max_results} matches")
+        matches.append(
+            f"... truncated after {len(matches)} matches (count or total character limit); "
+            "narrow the search or increase max_output_characters."
+        )
     return "\n".join(matches)

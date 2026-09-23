@@ -106,6 +106,9 @@ _GEMINI_LONG = _catalog_limits(
 )
 
 # DeepSeek: https://api-docs.deepseek.com/quick_start/pricing
+# Verified 2026-09-17: deepseek-flash serves V4.1-Flash (1M context,
+# 384K max output). Legacy Flash names route to the same model.
+# ADA exposes this version as deepseek-v4.1-flash.
 _DEEPSEEK_V4 = _catalog_limits(
     1_000_000,
     max_output_tokens=384_000,
@@ -143,6 +146,7 @@ MODEL_LIMIT_CATALOG: Mapping[str, ModelLimits] = MappingProxyType(
         "gemini-2.5-flash-lite": _GEMINI_LONG,
         # DeepSeek
         "deepseek-flash": _DEEPSEEK_V4,
+        "deepseek-v4.1-flash": _DEEPSEEK_V4,
         "deepseek-v4-flash": _DEEPSEEK_V4,
         "deepseek-v4-flash-vision-exp": _DEEPSEEK_V4,
         "deepseek-v4-pro": _DEEPSEEK_V4,

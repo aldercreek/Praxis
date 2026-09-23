@@ -13,7 +13,7 @@ from praxis_agent.context.model_catalog import (
 _DEFAULT_ADA_BASE_URL = (
     "https://ada-cli-go.ctripcorp.com/coding-plan/openai/v1"
 )
-_DEFAULT_ADA_MODEL = "gpt-5.6-terra-2026-07-09"
+_DEFAULT_ADA_MODEL = "deepseek-v4.1-flash"
 _DEFAULT_LANGFUSE_BASE_URL = "https://langfuse.flight.ctripcorp.com"
 
 

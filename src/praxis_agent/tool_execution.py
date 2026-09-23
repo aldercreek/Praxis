@@ -28,7 +28,8 @@ def _parse_arguments(encoded_arguments: str) -> dict[str, object]:
         arguments = json.loads(encoded_arguments)
     except json.JSONDecodeError as error:
         raise _InvalidToolArgumentsError(
-            f"invalid JSON arguments: {error.msg}"
+            f"invalid JSON arguments: {error.msg} "
+            f"（第 {error.lineno} 行，第 {error.colno} 列，字符位置 {error.pos + 1}）；请修正 JSON 格式。"
         ) from error
 
     if not isinstance(arguments, dict):
@@ -46,6 +47,7 @@ class ToolCallExecutor:
     context: ToolContext
     publish_event: EventPublisher
     approve_tool_call: ToolApprovalHandler | None = None
+    bypass_approvals: bool = False
 
     def execute(
         self,
@@ -59,11 +61,12 @@ class ToolCallExecutor:
             return self._finish(
                 turn_id,
                 function_call,
-                ToolResult(False, str(error)),
+                self.tool_registry.argument_error(function_call.name, str(error)),
             )
 
-        requires_approval = self.tool_registry.requires_approval(
-            function_call.name
+        requires_approval = (
+            not self.bypass_approvals
+            and self.tool_registry.requires_approval(function_call.name)
         )
         self.publish_event(
             ToolCallPrepared(
