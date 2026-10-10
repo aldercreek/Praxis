@@ -11,6 +11,12 @@ requires-python = ">=3.12"
 dependencies = [
     "langfuse>=4,<5",
     "openai>=3.7,<4",
+    "PyYAML>=6,<7",
+    "mcp>=2.3,<3",
+    "jsonschema>=4.26,<5",
+    "httpx2>=2.10,<3",
+    "jieba>=0.42,<1",
+    "pydantic-monty==1.1.0",
     "rich>=13.9,<15",
     "truststore>=0.10,<1; sys_platform == 'win32'",
 ]

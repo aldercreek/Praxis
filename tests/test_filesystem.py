@@ -51,9 +51,9 @@ def test_read_file_limits_a_single_long_line(tmp_path: Path) -> None:
     header, visible_content = content.split("\n", 1)
 
     assert header == (
-        "[lines 1-1 of 1; line 1 truncated at 20000 characters]"
+        "[lines 1-1 of 1; line 1 truncated at 16000 characters]"
     )
-    assert visible_content == "x" * 20_000
+    assert visible_content == "x" * 16_000
 
 
 def test_read_file_reports_a_missing_file(tmp_path: Path) -> None:

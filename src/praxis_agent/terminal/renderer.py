@@ -13,6 +13,10 @@ from rich.text import Text
 
 from praxis_agent.events import (
     AgentEvent,
+    ChildAgentEvent,
+    ChildAgentStatus,
+    ChildAgentMessage,
+    ContextCompaction,
     ApprovalRequested,
     ApprovalResolved,
     AssistantTextCompleted,
@@ -83,8 +87,55 @@ class ConsoleRenderer:
 
     def emit(self, event: AgentEvent) -> None:
         """Update the transcript and active area for one agent event."""
+        if isinstance(event, ChildAgentEvent):
+            # Detailed worker events belong to tracing, never to the root text buffer.
+            return
+        if isinstance(event, (ChildAgentStatus, ChildAgentMessage)):
+            self._finish_plain_line()
+            self._flush_exploration()
+            label = event.agent_id[:14]
+            if isinstance(event, ChildAgentStatus):
+                statuses = {"queued": "排队中", "running": "运行中", "idle": "空闲",
+                            "closing": "正在关闭", "closed": "已关闭"}
+                text = f"[{label}] {statuses.get(event.status, event.status)}"
+            else:
+                preview = event.content[:500]
+                if len(event.content) > 500:
+                    preview += "…"
+                text = f"[{label} → 主 Agent] {preview}"
+            self._commit(Text(text, style="dim"))
+            return
         if isinstance(event, TurnStarted):
             self._begin_turn()
+            return
+
+        if isinstance(event, ContextCompaction):
+            self._finish_plain_line()
+            self._flush_exploration()
+            if event.stage == "started":
+                self._commit(Text(f"· 上下文超出预算，正在整理历史（约 {event.before_tokens:,} tokens）", style="dim"))
+                self._set_phase("正在压缩上下文")
+                self._show_working()
+            elif event.stage == "chunk_started":
+                phase = "摘要" if event.round_number == 1 else f"收短第 {event.round_number - 1} 轮"
+                progress = f"{event.chunk_number}/{event.chunk_count}" if event.chunk_count else f"第 {event.chunk_number} 块"
+                label = f"压缩上下文 · {phase} {progress}"
+                self._set_phase(label)
+                if not self._interactive:
+                    self._commit(Text(label, style="dim"))
+                self._show_working()
+            elif event.stage == "completed":
+                self._commit(Text(
+                    f"✓ 上下文已压缩 · 约 {event.before_tokens:,} → {event.after_tokens:,} tokens"
+                    f" · {event.request_count} 次摘要请求 · {event.elapsed_seconds:.1f}s", style="green",
+                ))
+                self._set_phase("等待模型响应")
+                self._show_working()
+            elif event.stage == "failed":
+                self._commit(Text(
+                    f"× 上下文压缩失败 · {event.elapsed_seconds:.1f}s · {event.error}", style="red",
+                ))
+                self._stop_live()
             return
 
         if isinstance(event, ModelRequestStarted):
@@ -279,11 +330,7 @@ class ConsoleRenderer:
         self._set_phase(f"正在执行 {event.tool_name}")
         call = self._prepared_call(event.call_id, event.tool_name)
         if call.name in _EXPLORATION_TOOLS:
-            item = _exploration_item(call.name, call.arguments)
-            self._exploration_items.append(item)
-            self._set_active(
-                exploration_cell(self._exploration_items, active=True)
-            )
+            self._restore_active_state()
             return
 
         self._flush_exploration()
@@ -326,15 +373,12 @@ class ConsoleRenderer:
 
         if call.name in _EXPLORATION_TOOLS:
             if result.success:
-                self._set_active(
-                    exploration_cell(self._exploration_items, active=False)
-                )
+                self._exploration_items.append(_exploration_item(call.name, call.arguments))
+                self._restore_active_state()
                 return
-            if self._exploration_items:
-                self._exploration_items.pop()
             self._flush_exploration()
             self._commit(error_cell(f"{call.name} 失败", result.output))
-            self._show_working()
+            self._restore_active_state()
             return
 
         self._flush_exploration()
@@ -348,7 +392,7 @@ class ConsoleRenderer:
                 else f"{_display_tool_name(call.name)} failed"
             )
             self._commit(error_cell(title, result.output))
-            self._show_working()
+            self._restore_active_state()
             return
 
         if call.name in CONTEXT_TOOLS:
@@ -380,7 +424,7 @@ class ConsoleRenderer:
                     _tool_detail(call.name, call.arguments),
                 )
             )
-        self._show_working()
+        self._restore_active_state()
 
     def _prepared_call(self, call_id: str, name: str) -> _PreparedCall:
         return self._prepared_calls.get(call_id, _PreparedCall(name, {}))
@@ -392,9 +436,15 @@ class ConsoleRenderer:
         self._exploration_items.clear()
 
     def _restore_active_state(self) -> None:
-        if self._exploration_items:
+        pending = [
+            _exploration_item(call.name, call.arguments)
+            for call_id in self._tool_started
+            if (call := self._prepared_calls.get(call_id)) is not None
+            and call.name in _EXPLORATION_TOOLS
+        ]
+        if self._exploration_items or pending:
             self._set_active(
-                exploration_cell(self._exploration_items, active=False)
+                exploration_cell([*self._exploration_items, *pending], active=bool(pending))
             )
         else:
             self._show_working()

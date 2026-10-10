@@ -26,4 +26,8 @@ def test_build_instructions_includes_the_runtime_context() -> None:
     assert "multiple tool calls are independent" in instructions
     assert "Use update_plan for non-trivial tasks" in instructions
     assert "at most one plan step in_progress" in instructions
+    assert "Manage the working context proactively" in instructions
+    assert "Use delete for material with no continuing value" in instructions
+    assert "Use compress when the full text is no longer needed" in instructions
+    assert "Context operations take effect in the next model request" in instructions
     assert "ADA_API_KEY" not in instructions

@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
-from functools import wraps
+from functools import partial, wraps
 from inspect import Parameter, signature
 from difflib import get_close_matches
 from pathlib import Path
@@ -20,6 +20,7 @@ from praxis_agent.tools.filesystem import (
 )
 
 if TYPE_CHECKING:
+    from praxis_agent.context.capacity import ContextPolicy
     from praxis_agent.context.manager import ContextManager
     from praxis_agent.context.models import ConversationHistory
     from praxis_agent.planning.state import RunState
@@ -34,7 +35,7 @@ _READ_FILE_PARAMETERS: dict[str, object] = {
     "properties": {
         "relative_path": {
             "type": "string",
-            "description": "Path to read, relative to the workspace root.",
+            "description": "Path to read, relative to the workspace root or an absolute file path.",
         },
         "start_line": {
             "type": "integer",
@@ -44,7 +45,6 @@ _READ_FILE_PARAMETERS: dict[str, object] = {
         "max_lines": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 400,
             "description": "Maximum number of lines to return.",
         },
     },
@@ -109,7 +109,7 @@ _LIST_FILES_PARAMETERS: dict[str, object] = {
     "properties": {
         "relative_path": {
             "type": "string",
-            "description": "Directory or file path relative to the workspace root. Use '.' for the whole workspace.",
+            "description": "Directory or file path, relative to the workspace root or absolute. Use '.' for the whole workspace.",
         },
         "max_entries": {
             "type": "integer",
@@ -150,7 +150,7 @@ _FIND_FILES_PARAMETERS: dict[str, object] = {
         "relative_path": {
             "type": "string",
             "description": (
-                "Directory or file path relative to the workspace root. "
+                "Directory or file path, relative to the workspace root or absolute. "
                 "Use '.' for the whole workspace."
             ),
         },
@@ -178,7 +178,7 @@ _SEARCH_TEXT_PARAMETERS: dict[str, object] = {
         },
         "relative_path": {
             "type": "string",
-            "description": "Directory or file path relative to the workspace root. Use '.' for the whole workspace.",
+            "description": "Directory or file path, relative to the workspace root or absolute. Use '.' for the whole workspace.",
         },
         "max_results": {
             "type": "integer",
@@ -254,6 +254,9 @@ class ToolContext:
     run_state: RunState
     context_manager: ContextManager | None = None
     history: ConversationHistory | None = None
+    invoke_tool: Callable[[str, dict], ToolResult] | None = None
+    check_execution: Callable[[], None] | None = None
+    invoke_programmatic_tool: Callable[[str, dict], ToolResult] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,6 +268,10 @@ class Tool:
     parameters: dict[str, object]
     handler: ToolHandler
     requires_approval: bool = False
+    # 仅注册时设置，不进入模型的工具定义或参数。
+    parallel_safe: bool = False
+    strict: bool = True
+    programmatic: bool = False
 
     def to_definition(self) -> dict[str, object]:
         """返回可以直接传给模型 API 的工具定义。"""
@@ -274,7 +281,7 @@ class Tool:
             "description": self.description,
             # 返回副本，避免调用方修改注册表内部保存的 Schema。
             "parameters": deepcopy(self.parameters),
-            "strict": True,
+            "strict": self.strict,
         }
 
 
@@ -312,10 +319,26 @@ class ToolRegistry:
             raise ValueError(f"tool is already registered: {tool.name}")
         self._tools[tool.name] = tool
 
+    def unregister(self, name: str) -> None:
+        self._tools.pop(name, None)
+
+    def snapshot(self) -> ToolRegistry:
+        registry = ToolRegistry()
+        registry._tools = self._tools.copy()
+        return registry
+
     def requires_approval(self, name: str) -> bool:
         """返回指定工具是否必须获得用户确认。"""
         tool = self._tools.get(name)
         return tool.requires_approval if tool is not None else False
+
+    def allows_programmatic(self, name: str) -> bool:
+        tool = self._tools.get(name)
+        return tool.programmatic if tool is not None else False
+
+    def is_parallel_safe(self, name: str) -> bool:
+        tool = self._tools.get(name)
+        return tool.parallel_safe if tool is not None else False
 
     def argument_error(self, name: str, detail: str) -> ToolResult:
         """参数解析或执行前校验失败时，只返回本次需要修正的差异。"""
@@ -335,6 +358,19 @@ class ToolRegistry:
         context: ToolContext,
     ) -> ToolResult:
         """注入运行时上下文并将工具输出或异常转换成统一结果。"""
+        prepared = self.prepare(name, arguments, context=context)
+        if isinstance(prepared, ToolResult):
+            return prepared
+        try:
+            result = prepared()
+            return result if isinstance(result, ToolResult) else ToolResult(True, result)
+        except Exception as error:
+            return ToolResult(False, f"{type(error).__name__}: {error}")
+
+    def prepare(
+        self, name: str, arguments: Mapping[str, object], *, context: ToolContext,
+    ) -> Callable[[], str] | ToolResult:
+        """在主线程校验参数并绑定 handler；返回失败结果或待执行函数。"""
         tool = self._tools.get(name)
         if tool is None:
             return ToolResult(False, f"unknown tool: {name}")
@@ -350,17 +386,15 @@ class ToolRegistry:
             signature(tool.handler).bind(context, **keyword_arguments)
         except TypeError as error:
             return self.argument_error(name, f"TypeError: {error}")
-        try:
-            output = tool.handler(context, **keyword_arguments)
-        except Exception as error:
-            # 将工具异常转换为结果，保证未来的 Agent 循环可以继续运行。
-            return ToolResult(False, f"{type(error).__name__}: {error}")
-
-        return ToolResult(True, output)
+        return partial(tool.handler, context, **keyword_arguments)
 
 
 def _argument_issues(tool: Tool, arguments: Mapping[str, object]) -> list[str]:
     """检查工具顶层参数；嵌套结构和业务约束继续由各工具校验。"""
+    if not tool.strict:
+        from jsonschema.validators import validator_for
+        validator = validator_for(tool.parameters)(tool.parameters)
+        return [error.message for error in validator.iter_errors(dict(arguments))]
     properties = tool.parameters.get("properties", {})
     issues: list[str] = []
     for name in arguments:
@@ -410,33 +444,68 @@ def _argument_issues(tool: Tool, arguments: Mapping[str, object]) -> list[str]:
     return issues
 
 
-def _inject_workspace(handler: ToolHandler) -> ToolHandler:
+def _read_location(context: ToolContext, name: str) -> tuple[Path, str]:
+    if Path(name).is_absolute():
+        # Local file references are readable across model-managed workspaces.
+        # Write tools remain relative to the assigned directory; this is not a sandbox.
+        path = Path(name).resolve()
+        return (path, ".") if path.is_dir() else (path.parent, path.name)
+    return context.workspace, name
+
+
+def _inject_workspace(handler: ToolHandler, *, external_reads: bool = False) -> ToolHandler:
     """把使用 Path 的底层函数适配为接收 ToolContext 的工具 handler。"""
 
     @wraps(handler)
     def execute(context: ToolContext, **arguments: object) -> str:
-        return handler(context.workspace, **arguments)
+        workspace = context.workspace
+        if external_reads:
+            workspace, arguments["relative_path"] = _read_location(context, arguments.get("relative_path", "."))
+        return handler(workspace, **arguments)
 
     return execute
 
 
-def create_default_registry() -> ToolRegistry:
+def create_default_registry(policy: ContextPolicy | None = None, *,
+                            check_execution: Callable[[], None] | None = None) -> ToolRegistry:
     """创建包含全部内置工具的注册表。"""
     # planning.tool 依赖这里的 Tool 类型，因此等 Registry 初始化完成再导入。
     from praxis_agent.planning.tool import create_update_plan_tool
+    from praxis_agent.context.capacity import ContextPolicy
+
+    policy = policy or ContextPolicy()
+    read_parameters = deepcopy(_READ_FILE_PARAMETERS)
+    read_parameters["properties"]["max_lines"]["maximum"] = policy.max_file_read_lines
+
+    def read_with_limits(
+        context: ToolContext, relative_path: str, start_line: int = 1,
+        max_lines: int = min(200, policy.max_file_read_lines),
+    ) -> str:
+        workspace, relative_path = _read_location(context, relative_path)
+        return read_file(
+            workspace, relative_path, start_line, max_lines,
+            line_limit=policy.max_file_read_lines, character_limit=policy.max_file_read_chars,
+        )
 
     registry = ToolRegistry()
+    def command_with_control(context: ToolContext, argv: list[str], relative_path: str = ".",
+                             timeout_seconds: int = 60) -> str:
+        return run_command(context.workspace, argv, relative_path, timeout_seconds,
+                           check_execution=check_execution)
     registry.register(
         Tool(
             name="read_file",
+            programmatic=True,
             description="Read a bounded line range from a UTF-8 workspace file.",
-            parameters=_READ_FILE_PARAMETERS,
-            handler=_inject_workspace(read_file),
+            parameters=read_parameters,
+            handler=read_with_limits,
+            parallel_safe=True,
         )
     )
     registry.register(
         Tool(
             name="edit_file",
+            programmatic=True,
             description=(
                 "Apply multiple exact text replacements to one existing "
                 "UTF-8 workspace file in a single all-or-nothing edit."
@@ -448,6 +517,7 @@ def create_default_registry() -> ToolRegistry:
     registry.register(
         Tool(
             name="create_file",
+            programmatic=True,
             description="Create a new UTF-8 workspace file.",
             parameters=_CREATE_FILE_PARAMETERS,
             handler=_inject_workspace(create_file),
@@ -456,18 +526,21 @@ def create_default_registry() -> ToolRegistry:
     registry.register(
         Tool(
             name="list_files",
+            programmatic=True,
             description=(
                 "List workspace entries by bounded depth, shallow levels first. "
                 "To locate a project, use entry_type=directories and max_depth=1, "
                 "then inspect likely parent directories."
             ),
             parameters=_LIST_FILES_PARAMETERS,
-            handler=_inject_workspace(list_files),
+            handler=_inject_workspace(list_files, external_reads=True),
+            parallel_safe=True,
         )
     )
     registry.register(
         Tool(
             name="find_files",
+            programmatic=True,
             description=(
                 "Find files, not directory names, by case-sensitive glob pattern. "
                 "Locate the project with list_files first, then scope relative_path "
@@ -475,12 +548,14 @@ def create_default_registry() -> ToolRegistry:
                 "selected subset may vary between searches."
             ),
             parameters=_FIND_FILES_PARAMETERS,
-            handler=_inject_workspace(find_files),
+            handler=_inject_workspace(find_files, external_reads=True),
+            parallel_safe=True,
         )
     )
     registry.register(
         Tool(
             name="search_text",
+            programmatic=True,
             description=(
                 "Search fixed text in workspace files using a glob pattern. "
                 "Returns path:line:text, bounded by per-line and total character limits. "
@@ -488,7 +563,8 @@ def create_default_registry() -> ToolRegistry:
                 "the file and query to inspect more."
             ),
             parameters=_SEARCH_TEXT_PARAMETERS,
-            handler=_inject_workspace(search_text),
+            handler=_inject_workspace(search_text, external_reads=True),
+            parallel_safe=True,
         )
     )
     registry.register(
@@ -499,13 +575,13 @@ def create_default_registry() -> ToolRegistry:
                 "return its exit code, stdout, and stderr."
             ),
             parameters=_RUN_COMMAND_PARAMETERS,
-            handler=_inject_workspace(run_command),
+            handler=command_with_control,
             requires_approval=True,
         )
     )
     registry.register(create_update_plan_tool())
     from praxis_agent.context.tools import create_context_tools
 
-    for tool in create_context_tools():
+    for tool in create_context_tools(max_history_read_chars=policy.max_history_read_chars):
         registry.register(tool)
     return registry

@@ -25,6 +25,25 @@ class TurnStarted(AgentEvent):
 
 
 @dataclass(frozen=True, slots=True)
+class ContextCompaction(AgentEvent):
+    """应急压缩及其分块请求的进度；容量为估算值，usage 为服务端值。"""
+
+    stage: str
+    before_tokens: int
+    reason: str = "context_overflow"
+    after_tokens: int | None = None
+    round_number: int = 0
+    chunk_number: int = 0
+    chunk_count: int = 0
+    request_count: int = 0
+    elapsed_seconds: float = 0.0
+    error: str = ""
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    model: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ModelRequestStarted(AgentEvent):
     """表示一次模型请求已经开始。"""
 
@@ -119,6 +138,26 @@ class TurnFailed(AgentEvent):
     message: str
 
 
+@dataclass(frozen=True, slots=True)
+class ChildAgentEvent(AgentEvent):
+    """A worker event routed on the parent thread, isolated from its transcript."""
+
+    agent_id: str
+    event: AgentEvent
+
+
+@dataclass(frozen=True, slots=True)
+class ChildAgentStatus(AgentEvent):
+    agent_id: str
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
+class ChildAgentMessage(AgentEvent):
+    agent_id: str
+    content: str
+
+
 class EventSink(Protocol):
     """接收 Agent 事件；终端、日志等组件都可以实现这个接口。"""
 
@@ -145,6 +184,10 @@ __all__ = [
     "AssistantTextDelta",
     "AssistantTextCompleted",
     "CompositeEventSink",
+    "ChildAgentEvent",
+    "ChildAgentStatus",
+    "ChildAgentMessage",
+    "ContextCompaction",
     "EventSink",
     "ModelRequestCompleted",
     "ModelRequestStarted",

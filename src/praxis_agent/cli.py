@@ -171,5 +171,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_task(agent, task)
         return _run_interactive(agent)
     finally:
-        if langfuse_sink is not None:
-            langfuse_sink.close()
+        try:
+            agent.close()
+        finally:
+            if langfuse_sink is not None:
+                langfuse_sink.close()

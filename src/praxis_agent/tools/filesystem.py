@@ -7,6 +7,8 @@ from difflib import unified_diff
 from pathlib import Path
 from threading import Event, Thread, Timer
 
+from praxis_agent.context.budgets import DEFAULT_BUDGETS
+
 
 # 递归扫描时跳过依赖目录、缓存目录和构建产物目录。
 _IGNORED_DIRECTORY_NAMES = frozenset(
@@ -27,8 +29,6 @@ _IGNORED_DIRECTORY_NAMES = frozenset(
 _IGNORED_DIRECTORY_SUFFIXES = (".egg-info",)
 _MAX_SEARCH_FILE_SIZE = 1_000_000
 _SEARCH_TIMEOUT_SECONDS = 30
-_MAX_READ_LINES = 400
-_MAX_READ_CHARACTERS = 20_000
 
 
 def _resolve_workspace(workspace: Path) -> Path:
@@ -364,14 +364,17 @@ def read_file(
     relative_path: str,
     start_line: int = 1,
     max_lines: int = 200,
+    *,
+    line_limit: int = DEFAULT_BUDGETS["max_file_read_lines"],
+    character_limit: int = DEFAULT_BUDGETS["max_file_read_chars"],
 ) -> str:
     """按行读取工作区内的 UTF-8 文本文件。"""
     if start_line < 1:
         raise ValueError("start_line must be at least 1")
     if max_lines < 1:
         raise ValueError("max_lines must be at least 1")
-    if max_lines > _MAX_READ_LINES:
-        raise ValueError(f"max_lines must not exceed {_MAX_READ_LINES}")
+    if max_lines > line_limit:
+        raise ValueError(f"max_lines must not exceed {line_limit}")
 
     file_path = _require_workspace_file(workspace, relative_path)
     lines = file_path.read_text(encoding="utf-8").splitlines(keepends=True)
@@ -391,7 +394,7 @@ def read_file(
 
     # 保证一次工具调用不会把过多文件内容送回模型上下文。
     for line in selected_lines:
-        remaining_characters = _MAX_READ_CHARACTERS - visible_characters
+        remaining_characters = character_limit - visible_characters
         if len(line) <= remaining_characters:
             visible_lines.append(line)
             visible_characters += len(line)
@@ -407,7 +410,7 @@ def read_file(
         header_parts.append(f"next_start_line={end_line + 1}")
     if last_line_truncated:
         header_parts.append(
-            f"line {end_line} truncated at {_MAX_READ_CHARACTERS} characters"
+            f"line {end_line} truncated at {character_limit} characters"
         )
 
     header = f"[{'; '.join(header_parts)}]"

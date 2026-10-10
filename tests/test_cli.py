@@ -12,6 +12,7 @@ class FakeAgent:
     def __init__(self) -> None:
         self.tasks: list[str] = []
         self.clear_count = 0
+        self.close_count = 0
         self.event_sink: EventSink | None = None
 
     def attach_event_sink(self, event_sink: EventSink) -> "FakeAgent":
@@ -37,6 +38,9 @@ class FakeAgent:
     def clear_history(self) -> None:
         self.clear_count += 1
 
+    def close(self) -> None:
+        self.close_count += 1
+
 
 def test_cli_runs_a_task(capsys, monkeypatch) -> None:
     agent = FakeAgent()
@@ -52,6 +56,7 @@ def test_cli_runs_a_task(capsys, monkeypatch) -> None:
     assert exit_code == 0
     assert capsys.readouterr().out == "completed: inspect repository\n"
     assert agent.tasks == ["inspect repository"]
+    assert agent.close_count == 1
 
 
 def test_cli_runs_an_interactive_session(capsys, monkeypatch) -> None:
@@ -75,6 +80,7 @@ def test_cli_runs_an_interactive_session(capsys, monkeypatch) -> None:
     assert exit_code == 0
     assert agent.tasks == ["first task", "follow-up task"]
     assert agent.clear_count == 1
+    assert agent.close_count == 1
     assert capsys.readouterr().out == (
         "completed: first task\n"
         "Conversation cleared.\n"

@@ -50,7 +50,7 @@ def test_registry_returns_model_tool_definitions() -> None:
             "properties": {
                 "relative_path": {
                     "type": "string",
-                    "description": "Path to read, relative to the workspace root.",
+                    "description": "Path to read, relative to the workspace root or an absolute file path.",
                 },
                 "start_line": {
                     "type": "integer",

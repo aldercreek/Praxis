@@ -26,13 +26,19 @@ from praxis_agent.planning import PlanStepStatus, RunStatus
 from praxis_agent.tools import create_default_registry
 
 
-EMPTY_RUN_STATE_CONTEXT = {
-    "role": "developer",
-    "content": (
-        "Current Praxis run state:\n"
-        '{"type":"praxis_run_state","plan":[],"changed_files":[]}'
-    ),
-}
+def _empty_run_state_context(task: str) -> dict[str, object]:
+    return {
+        "role": "developer",
+        "content": "Current Praxis run state:\n" + json.dumps(
+            {
+                "type": "praxis_run_state",
+                "original_task": task,
+                "plan": [],
+                "changed_files": [],
+            },
+            separators=(",", ":"),
+        ),
+    }
 
 
 class FakeModelClient:
@@ -104,7 +110,7 @@ def test_agent_returns_the_models_final_text(tmp_path: Path) -> None:
     assert model_client.inputs == [
         [
             {"role": "user", "content": "[message_id=m1]\ninspect repository"},
-            EMPTY_RUN_STATE_CONTEXT,
+            _empty_run_state_context("inspect repository"),
         ]
     ]
     assert len(model_client.tools[0]) == 12
@@ -126,7 +132,7 @@ def test_agent_returns_the_models_final_text(tmp_path: Path) -> None:
     assert event_sink.events[1].request_number == 1
     assert event_sink.events[1].input_items == (
         {"role": "user", "content": "[message_id=m1]\ninspect repository"},
-        EMPTY_RUN_STATE_CONTEXT,
+        _empty_run_state_context("inspect repository"),
     )
     assert event_sink.events[2].text == "Repository inspected."
     assert event_sink.events[3].response is not None
@@ -158,7 +164,7 @@ def test_agent_keeps_history_between_tasks(tmp_path: Path) -> None:
         {"role": "user", "content": "[message_id=m1]\nfirst task"},
         {**first_output_item, "content": "[message_id=m2]\nFirst response"},
         {"role": "user", "content": "[message_id=m3]\nfollow-up task"},
-        EMPTY_RUN_STATE_CONTEXT,
+        _empty_run_state_context("follow-up task"),
     ]
 
 
@@ -178,7 +184,7 @@ def test_agent_can_clear_history(tmp_path: Path) -> None:
     assert result == "Fresh response"
     assert model_client.inputs[1] == [
         {"role": "user", "content": "[message_id=m1]\nfresh task"},
-        EMPTY_RUN_STATE_CONTEXT,
+        _empty_run_state_context("fresh task"),
     ]
 
 

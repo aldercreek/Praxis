@@ -4,6 +4,7 @@ from collections.abc import Iterator, Sequence
 import re
 
 from praxis_agent.context.models import ConversationHistory
+from praxis_agent.context.budgets import DEFAULT_BUDGETS
 from praxis_agent.context.operations import ContextOperation, item_payload
 
 
@@ -71,12 +72,13 @@ def search_history(
 def read_history(
     history: ConversationHistory, operations: Sequence[ContextOperation],
     message_id: str, offset: int = 0, length: int = 8000,
+    *, max_length: int = DEFAULT_BUDGETS["max_history_read_chars"],
 ) -> dict[str, object]:
     """读取 Python 字符串切片；next_offset 可直接用于下一次调用。"""
     if not isinstance(offset, int) or offset < 0:
         raise ValueError("offset must be a non-negative integer")
-    if not isinstance(length, int) or not 1 <= length <= 8000:
-        raise ValueError("length must be between 1 and 8000")
+    if not isinstance(length, int) or not 1 <= length <= max_length:
+        raise ValueError(f"length must be between 1 and {max_length}")
     for current_id, text in _messages(history, operations):
         if current_id != message_id:
             continue

@@ -3,6 +3,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from praxis_agent.context.capacity import ContextPolicy
+from praxis_agent.context.budgets import DEFAULT_BUDGETS
 from praxis_agent.context.model_catalog import (
     ModelLimitOverrides,
     ModelLimits,
@@ -13,8 +14,9 @@ from praxis_agent.context.model_catalog import (
 _DEFAULT_ADA_BASE_URL = (
     "https://ada-cli-go.ctripcorp.com/coding-plan/openai/v1"
 )
-_DEFAULT_ADA_MODEL = "deepseek-v4.1-flash"
+_DEFAULT_ADA_MODEL = "gpt-5.6-terra-2026-07-09"
 _DEFAULT_LANGFUSE_BASE_URL = "https://langfuse.flight.ctripcorp.com"
+DEFAULT_MAX_PARALLEL_TOOLS = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,7 +31,14 @@ class ModelConfig:
         default_factory=ModelLimitOverrides,
         repr=False,
     )
-    context_policy: ContextPolicy = field(default_factory=ContextPolicy)
+    context_policy: ContextPolicy | None = None
+    max_parallel_tools: int = DEFAULT_MAX_PARALLEL_TOOLS
+
+    def __post_init__(self) -> None:
+        if self.max_parallel_tools < 1:
+            raise ValueError("max_parallel_tools must be at least 1")
+        if self.context_policy is None:
+            object.__setattr__(self, "context_policy", ContextPolicy.for_model(self.model_limits))
 
     @property
     def model_limits(self) -> ModelLimits:
@@ -40,6 +49,7 @@ class ModelConfig:
     def from_env(
         cls,
         environ: Mapping[str, str] | None = None,
+        *, model: str | None = None,
     ) -> "ModelConfig":
         """从环境变量读取并校验模型配置。"""
         # 参数主要用于测试；正常运行时直接读取当前进程的环境变量。
@@ -50,7 +60,7 @@ class ModelConfig:
             raise ValueError("ADA_API_KEY environment variable is required")
 
         # 模型和网关提供 ADA 默认值，需要时仍可通过环境变量覆盖。
-        model = values.get("ADA_MODEL", "").strip() or _DEFAULT_ADA_MODEL
+        model = model or values.get("ADA_MODEL", "").strip() or _DEFAULT_ADA_MODEL
         base_url = (
             values.get("ADA_BASE_URL", "").strip() or _DEFAULT_ADA_BASE_URL
         )
@@ -68,24 +78,29 @@ class ModelConfig:
                 "ADA_MAX_OUTPUT_TOKENS",
             ),
         )
-        context_policy = ContextPolicy(
-            desired_output_tokens=_read_integer(
-                values,
-                "ADA_DESIRED_OUTPUT_TOKENS",
-                16_000,
-            ),
+        policy_overrides = {}
+        for name in DEFAULT_BUDGETS:
+            value = _read_optional_integer(values, f"ADA_{name.upper()}")
+            if value is not None:
+                policy_overrides[name] = value
+        context_policy = ContextPolicy.for_model(
+            resolve_model_limits(model, model_limit_overrides),
+            **policy_overrides,
             safety_ratio=_read_float(
                 values,
                 "ADA_CONTEXT_SAFETY_RATIO",
                 0.95,
             ),
         )
+        max_parallel_tools = _read_optional_integer(values, "PRAXIS_MAX_PARALLEL_TOOLS")
         return cls(
             api_key=api_key,
             model=model,
             base_url=base_url,
             model_limit_overrides=model_limit_overrides,
             context_policy=context_policy,
+            max_parallel_tools=(DEFAULT_MAX_PARALLEL_TOOLS
+                                if max_parallel_tools is None else max_parallel_tools),
         )
 
 
@@ -133,20 +148,6 @@ class LangfuseConfig:
             base_url=base_url,
             environment=environment,
         )
-
-
-def _read_integer(
-    values: Mapping[str, str],
-    name: str,
-    default: int,
-) -> int:
-    raw_value = values.get(name, "").strip()
-    if not raw_value:
-        return default
-    try:
-        return int(raw_value)
-    except ValueError as error:
-        raise ValueError(f"{name} must be an integer") from error
 
 
 def _read_optional_integer(
