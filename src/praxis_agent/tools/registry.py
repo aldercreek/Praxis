@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
@@ -26,29 +28,20 @@ if TYPE_CHECKING:
     from praxis_agent.planning.state import RunState
 
 
-ToolHandler = Callable[..., str]
+ToolHandler = Callable[..., "str | ToolResult"]
 
 
 # parameters 使用 JSON Schema 约束模型生成的工具参数。
 _READ_FILE_PARAMETERS: dict[str, object] = {
     "type": "object",
     "properties": {
-        "relative_path": {
-            "type": "string",
-            "description": "Path to read, relative to the workspace root or an absolute file path.",
-        },
-        "start_line": {
-            "type": "integer",
-            "minimum": 1,
-            "description": "First one-based line to return.",
-        },
-        "max_lines": {
-            "type": "integer",
-            "minimum": 1,
-            "description": "Maximum number of lines to return.",
-        },
+        "relative_path": {"type": "string", "description": "Relative workspace path or absolute file path."},
+        "start_line": {"type": "integer", "minimum": 1, "description": "One-based starting line, inclusive; defaults to 1."},
+        "start_offset": {"type": "integer", "minimum": 0, "description": "Zero-based character offset within the starting line, including newline characters; defaults to 0."},
+        "end_line": {"type": ["integer", "null"], "minimum": 1, "description": "One-based ending line. Null with end_offset=null reads to EOF."},
+        "end_offset": {"type": ["integer", "null"], "minimum": 0, "description": "Exclusive character offset in the ending line. Supply both end fields or neither."},
     },
-    "required": ["relative_path", "start_line", "max_lines"],
+    "required": ["relative_path"],
     "additionalProperties": False,
 }
 
@@ -109,109 +102,36 @@ _LIST_FILES_PARAMETERS: dict[str, object] = {
     "properties": {
         "relative_path": {
             "type": "string",
-            "description": "Directory or file path, relative to the workspace root or absolute. Use '.' for the whole workspace.",
-        },
-        "max_entries": {
-            "type": "integer",
-            "minimum": 1,
-            "description": (
-                "Maximum number of file and directory entries to return."
-            ),
-        },
-        "max_depth": {
-            "type": "integer",
-            "minimum": 1,
-            "description": (
-                "Maximum traversal depth. Direct children have depth 1. "
-                "Use 1 to locate candidate project directories before exploring them."
-            ),
-        },
-        "entry_type": {
-            "type": "string",
-            "enum": ["all", "files", "directories"],
-            "description": "Use directories to locate projects; all for a project overview; files to omit directory entries.",
+            "description": "Directory to list, relative to the workspace root or absolute. Use '.' for the workspace root.",
         },
     },
-    "required": ["relative_path", "max_entries", "max_depth", "entry_type"],
+    "required": ["relative_path"],
     "additionalProperties": False,
 }
 
 _FIND_FILES_PARAMETERS: dict[str, object] = {
     "type": "object",
     "properties": {
-        "file_pattern": {
-            "type": "string",
-            "minLength": 1,
-            "description": (
-                "Glob pattern for file paths, for example '*.py' or "
-                "'src/*.py'."
-            ),
-        },
-        "relative_path": {
-            "type": "string",
-            "description": (
-                "Directory or file path, relative to the workspace root or absolute. "
-                "Use '.' for the whole workspace."
-            ),
-        },
-        "max_results": {
-            "type": "integer",
-            "minimum": 1,
-            "description": "Maximum number of matching file paths to return.",
-        },
-        "include_hidden": {
-            "type": "boolean",
-            "description": "Use false normally. Set true when searching hidden files or directories such as .github. Ignore rules still apply.",
-        },
+        "file_pattern": {"type": "string", "minLength": 1,
+            "description": "Positive ripgrep glob relative to the search directory. '*.py' matches names at any depth; 'src/*.py' matches directly under src; '**/*.py' matches recursively. Use '/' separators."},
+        "relative_path": {"type": "string",
+            "description": "Search directory, relative to the workspace root or absolute. Defaults to '.'."},
+        "ignore_patterns": {"type": "array", "items": {"type": "string", "minLength": 1},
+            "description": "Exclude matching paths using ripgrep globs relative to the search directory, e.g. ['**/node_modules/**', '**/.git/**', '*.log']. A trailing '/' excludes directory contents. No leading '!'. Defaults to []; hidden files and gitignored files are otherwise included."},
     },
-    "required": ["file_pattern", "relative_path", "max_results", "include_hidden"],
+    "required": ["file_pattern"],
     "additionalProperties": False,
 }
 
 _SEARCH_TEXT_PARAMETERS: dict[str, object] = {
     "type": "object",
     "properties": {
-        "query": {
-            "type": "string",
-            "minLength": 1,
-            "description": "Case-sensitive fixed text to find.",
-        },
-        "relative_path": {
-            "type": "string",
-            "description": "Directory or file path, relative to the workspace root or absolute. Use '.' for the whole workspace.",
-        },
-        "max_results": {
-            "type": "integer",
-            "minimum": 1,
-            "description": "Maximum number of matching lines to return.",
-        },
-        "max_line_characters": {
-            "type": "integer",
-            "minimum": 1,
-            "description": "Maximum characters of text per matching line. Use 500 normally. Longer lines return a snippet around the first match with column positions.",
-        },
-        "max_output_characters": {
-            "type": "integer",
-            "minimum": 512,
-            "description": "Maximum total returned characters including paths and truncation notice. Use 20000 normally; increase only for a narrowly scoped search.",
-        },
-        "file_pattern": {
-            "type": "string",
-            "minLength": 1,
-            "description": (
-                "Glob pattern for files, for example '*.py'. "
-                "Use '*' to search all files."
-            ),
-        },
+        "query": {"type": "string", "minLength": 1, "description": "Case-sensitive literal single-line text to locate; no regex."},
+        "relative_path": {"type": "string", "description": "Directory or file, relative to the workspace or absolute. Defaults to '.'."},
+        "file_pattern": {"type": "string", "minLength": 1, "description": "Positive ripgrep glob relative to the search directory; defaults to '*'."},
+        "ignore_patterns": deepcopy(_FIND_FILES_PARAMETERS["properties"]["ignore_patterns"]),
     },
-    "required": [
-        "query",
-        "relative_path",
-        "max_results",
-        "file_pattern",
-        "max_line_characters",
-        "max_output_characters",
-    ],
+    "required": ["query"],
     "additionalProperties": False,
 }
 
@@ -238,7 +158,7 @@ _RUN_COMMAND_PARAMETERS: dict[str, object] = {
             "type": "integer",
             "minimum": 1,
             "maximum": 120,
-            "description": "Maximum number of seconds to wait.",
+            "description": "Execution timeout in seconds, default 60, maximum 120; independent of model context size.",
         },
     },
     "required": ["argv", "relative_path", "timeout_seconds"],
@@ -257,6 +177,7 @@ class ToolContext:
     invoke_tool: Callable[[str, dict], ToolResult] | None = None
     check_execution: Callable[[], None] | None = None
     invoke_programmatic_tool: Callable[[str, dict], ToolResult] | None = None
+    programmatic_call: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,6 +212,7 @@ class ToolResult:
 
     success: bool
     output: str
+    structured_output: dict[str, object] | None = None
 
 
 class ToolRegistry:
@@ -369,7 +291,7 @@ class ToolRegistry:
 
     def prepare(
         self, name: str, arguments: Mapping[str, object], *, context: ToolContext,
-    ) -> Callable[[], str] | ToolResult:
+    ) -> Callable[[], str | ToolResult] | ToolResult:
         """在主线程校验参数并绑定 handler；返回失败结果或待执行函数。"""
         tool = self._tools.get(name)
         if tool is None:
@@ -439,8 +361,7 @@ def _argument_issues(tool: Tool, arguments: Mapping[str, object]) -> list[str]:
             if "minimum" in rule and value < rule["minimum"]:
                 issues.append(f"{name}={value} 小于下限 {rule['minimum']}。")
             if "maximum" in rule and value > rule["maximum"]:
-                hint = "请分段读取。" if tool.name == "read_file" and name == "max_lines" else ""
-                issues.append(f"{name}={value} 超过上限 {rule['maximum']}。{hint}")
+                issues.append(f"{name}={value} 超过上限 {rule['maximum']}。")
     return issues
 
 
@@ -457,11 +378,14 @@ def _inject_workspace(handler: ToolHandler, *, external_reads: bool = False) -> 
     """把使用 Path 的底层函数适配为接收 ToolContext 的工具 handler。"""
 
     @wraps(handler)
-    def execute(context: ToolContext, **arguments: object) -> str:
+    def execute(context: ToolContext, **arguments: object) -> str | ToolResult:
         workspace = context.workspace
         if external_reads:
             workspace, arguments["relative_path"] = _read_location(context, arguments.get("relative_path", "."))
-        return handler(workspace, **arguments)
+        data = handler(workspace, **arguments)
+        if isinstance(data, dict):
+            return ToolResult(True, json.dumps(data, ensure_ascii=False), structured_output=data)
+        return data
 
     return execute
 
@@ -474,18 +398,28 @@ def create_default_registry(policy: ContextPolicy | None = None, *,
     from praxis_agent.context.capacity import ContextPolicy
 
     policy = policy or ContextPolicy()
-    read_parameters = deepcopy(_READ_FILE_PARAMETERS)
-    read_parameters["properties"]["max_lines"]["maximum"] = policy.max_file_read_lines
-
     def read_with_limits(
         context: ToolContext, relative_path: str, start_line: int = 1,
-        max_lines: int = min(200, policy.max_file_read_lines),
-    ) -> str:
+        start_offset: int = 0, end_line: int | None = None, end_offset: int | None = None,
+    ) -> ToolResult:
         workspace, relative_path = _read_location(context, relative_path)
-        return read_file(
-            workspace, relative_path, start_line, max_lines,
-            line_limit=policy.max_file_read_lines, character_limit=policy.max_file_read_chars,
+        data = read_file(
+            workspace, relative_path, start_line, start_offset, end_line, end_offset,
+            character_limit=None if context.programmatic_call else min(
+                policy.max_file_read_chars, policy.max_tool_output_chars),
         )
+        return ToolResult(True, json.dumps(data, ensure_ascii=False), structured_output=data)
+
+    def list_directory(context: ToolContext, relative_path: str = ".") -> ToolResult:
+        workspace, relative_path = _read_location(context, relative_path)
+        data = list_files(workspace, relative_path)
+        return ToolResult(True, json.dumps(data, ensure_ascii=False), structured_output=data)
+
+    def find_paths(context: ToolContext, file_pattern: str, relative_path: str = ".",
+                   ignore_patterns: list[str] | None = None) -> ToolResult:
+        workspace, relative_path = _read_location(context, relative_path)
+        data = find_files(workspace, file_pattern, relative_path, ignore_patterns)
+        return ToolResult(True, json.dumps(data, ensure_ascii=False), structured_output=data)
 
     registry = ToolRegistry()
     def command_with_control(context: ToolContext, argv: list[str], relative_path: str = ".",
@@ -496,9 +430,15 @@ def create_default_registry(policy: ContextPolicy | None = None, *,
         Tool(
             name="read_file",
             programmatic=True,
-            description="Read a bounded line range from a UTF-8 workspace file.",
-            parameters=read_parameters,
+            description=("Read a UTF-8 file range as structured text/truncated/next_position/note. "
+                         "Positions use one-based lines and zero-based character offsets (including line endings); "
+                         "start inclusive, end exclusive. Omit both end fields or pass null for EOF. "
+                         "Model reads are bounded: continue from next_position with the same endpoint. "
+                         "Programmatic reads return the entire requested range as an object. "
+                         "truncated=false means the requested range is complete, not necessarily the whole file."),
+            parameters=_READ_FILE_PARAMETERS,
             handler=read_with_limits,
+            strict=False,
             parallel_safe=True,
         )
     )
@@ -508,7 +448,7 @@ def create_default_registry(policy: ContextPolicy | None = None, *,
             programmatic=True,
             description=(
                 "Apply multiple exact text replacements to one existing "
-                "UTF-8 workspace file in a single all-or-nothing edit."
+                "UTF-8 workspace file in a single all-or-nothing edit. Returns a path/diff object."
             ),
             parameters=_EDIT_FILE_PARAMETERS,
             handler=_inject_workspace(edit_file),
@@ -518,7 +458,7 @@ def create_default_registry(policy: ContextPolicy | None = None, *,
         Tool(
             name="create_file",
             programmatic=True,
-            description="Create a new UTF-8 workspace file.",
+            description="Create a new UTF-8 workspace file; returns a path/diff object. Existing files are rejected.",
             parameters=_CREATE_FILE_PARAMETERS,
             handler=_inject_workspace(create_file),
         )
@@ -528,12 +468,12 @@ def create_default_registry(policy: ContextPolicy | None = None, *,
             name="list_files",
             programmatic=True,
             description=(
-                "List workspace entries by bounded depth, shallow levels first. "
-                "To locate a project, use entry_type=directories and max_depth=1, "
-                "then inspect likely parent directories."
+                "List all immediate files and subdirectories, including hidden and ignored names. "
+                "Returns an entries object with path and type, directories first. "
+                "No recursion or entry limit; list a subdirectory explicitly to explore it."
             ),
             parameters=_LIST_FILES_PARAMETERS,
-            handler=_inject_workspace(list_files, external_reads=True),
+            handler=list_directory,
             parallel_safe=True,
         )
     )
@@ -542,13 +482,13 @@ def create_default_registry(policy: ContextPolicy | None = None, *,
             name="find_files",
             programmatic=True,
             description=(
-                "Find files, not directory names, by case-sensitive glob pattern. "
-                "Locate the project with list_files first, then scope relative_path "
-                "to that project. Limited results are sorted for display but the "
-                "selected subset may vary between searches."
+                "Find all files by case-sensitive glob, sorted by path, as a files object. "
+                "No result limit, no automatic ignore rules; hidden files are included. "
+                "Use ignore_patterns for exclusions and relative_path to scope the search."
             ),
             parameters=_FIND_FILES_PARAMETERS,
-            handler=_inject_workspace(find_files, external_reads=True),
+            handler=find_paths,
+            strict=False,
             parallel_safe=True,
         )
     )
@@ -557,13 +497,14 @@ def create_default_registry(policy: ContextPolicy | None = None, *,
             name="search_text",
             programmatic=True,
             description=(
-                "Search fixed text in workspace files using a glob pattern. "
-                "Returns path:line:text, bounded by per-line and total character limits. "
-                "Long lines show the first match's neighborhood; increase limits or narrow "
-                "the file and query to inspect more."
+                "Locate all non-overlapping literal matches in UTF-8 files. Returns a matches object "
+                "with path, one-based line and zero-based character offset for each occurrence; "
+                "no source text. Use read_file to inspect. No size/result caps or automatic ignores; "
+                "only ignore_patterns excludes paths. Same-line occurrences are separate records."
             ),
             parameters=_SEARCH_TEXT_PARAMETERS,
             handler=_inject_workspace(search_text, external_reads=True),
+            strict=False,
             parallel_safe=True,
         )
     )
@@ -582,6 +523,6 @@ def create_default_registry(policy: ContextPolicy | None = None, *,
     registry.register(create_update_plan_tool())
     from praxis_agent.context.tools import create_context_tools
 
-    for tool in create_context_tools(max_history_read_chars=policy.max_history_read_chars):
+    for tool in create_context_tools(max_history_read_chars=min(policy.max_history_read_chars, policy.max_tool_output_chars)):
         registry.register(tool)
     return registry

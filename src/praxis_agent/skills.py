@@ -53,8 +53,9 @@ def _read_header(stream: TextIO, path: Path) -> Skill:
 
 
 def discover_skills(project_root: Path, *, user_root: Path | None = None) -> tuple[Skill, ...]:
-    """Project entries override valid user entries by name; bad entries only warn."""
+    """User/project skills can override packaged defaults; bad entries only warn."""
     roots = (
+        Path(__file__).parent / "builtin_skills",
         user_root if user_root is not None else Path.home() / ".agents" / "skills",
         project_root / ".agents" / "skills",
     )

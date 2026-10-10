@@ -44,7 +44,7 @@ def _preview(message: dict[str, object], limit: int) -> dict[str, object]:
     notice = (
         f"\n[Tool result preview: {status}shown first {limit} characters "
         f"of {len(text)}. Full original result is saved as {message_id}. "
-        f"Use read_history(message_id=\"{message_id}\", offset={next_offset}, length=4000) "
+        f"Use read_history(message_id=\"{message_id}\", start_offset={next_offset}) "
         "to continue, or search_history(query=\"...\") to search the original. "
         "Manage context with compress/delete before requesting more large results.]"
     )

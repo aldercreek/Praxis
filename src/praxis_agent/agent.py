@@ -85,6 +85,8 @@ class Agent:
     execution_control: ExecutionControl | None = None
     close_callbacks: tuple[Callable[[], None], ...] = ()
     mcp_catalog: str = ""
+    code_session_context: Callable[[], dict[str, str]] | None = None
+    clear_code_sessions: Callable[[], None] | None = None
     _run_lock: Lock = field(default_factory=Lock, init=False, repr=False)
     _closed: bool = field(default=False, init=False)
     _pending_calls: list[FunctionCall] = field(default_factory=list, init=False, repr=False)
@@ -211,6 +213,8 @@ class Agent:
                 self._session_model(),
             )
             self.session_id = session.id
+        if self.clear_code_sessions is not None:
+            self.clear_code_sessions()
         self._history.clear()
         self.context_manager.reset()
         self.context_manager.operations.clear()
@@ -297,6 +301,8 @@ class Agent:
             tool_definitions = self.tool_registry.definitions()
             request_number += 1
             transient_items = (build_run_state_context(run_state),)
+            if self.code_session_context is not None:
+                transient_items += (self.code_session_context(),)
             if self.mcp_catalog:
                 transient_items += ({"role": "developer", "content": self.mcp_catalog},)
             if self.collaboration is not None:
@@ -507,7 +513,9 @@ def create_default_agent(
 
     from praxis_agent.tools.code import CodeRuntime
     code_runtime = CodeRuntime()
-    agent.tool_registry.register(code_runtime.tool())
+    agent.tool_registry.register(code_runtime.tool("parent"))
+    agent.code_session_context = lambda: code_runtime.context_item("parent")
+    agent.clear_code_sessions = lambda: code_runtime.release_agent("parent")
     agent.close_callbacks = (code_runtime.close, *agent.close_callbacks)
     agent.tool_registry.register(create_skill_tool(skills, max_chars=config.context_policy.max_tool_output_chars))
     mcp = MCPConnections()
@@ -534,7 +542,7 @@ def create_default_agent(
         for tool in create_default_registry(config.context_policy, check_execution=control.check).tools:
             if handle.mode == "execute" or tool.name in allowed:
                 registry.register(tool)
-        registry.register(code_runtime.tool())
+        registry.register(code_runtime.tool(agent_id))
         registry.register(create_skill_tool(skills, max_chars=config.context_policy.max_tool_output_chars))
         release_worker_tools = mcp.register(registry, read_only=handle.mode == "read_only", check_execution=control.check)
         register_worker_tools(registry, collaboration, agent_id)
@@ -549,13 +557,15 @@ def create_default_agent(
             model_client=client, tool_registry=registry,
             workspace=handle.workspace, name=agent_id,
             mcp_catalog=mcp.catalog() if handle.mode == "execute" else "",
+            code_session_context=lambda: code_runtime.context_item(agent_id),
+            clear_code_sessions=lambda: code_runtime.release_agent(agent_id),
             event_sink=sink, max_parallel_tools=config.max_parallel_tools,
             execution_control=control,
             approve_tool_call=lambda name, arguments: collaboration.request_approval(agent_id, name, arguments),
             bypass_approvals=agent.bypass_approvals,
             context_manager=_create_context_manager(config, worker_instructions, summary),
             receive_messages=lambda accept: collaboration.receive(agent_id, accept),
-            close_callbacks=(release_worker_tools, client.close, summary.close),
+            close_callbacks=(lambda: code_runtime.release_agent(agent_id), release_worker_tools, client.close, summary.close),
         )
 
     collaboration = AgentRuntime(create_worker, multi_agent_config, workspace=runtime_context.workspace_root,

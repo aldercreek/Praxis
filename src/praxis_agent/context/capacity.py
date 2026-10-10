@@ -45,7 +45,6 @@ class ContextPolicy:
     summary_target_tokens: int = DEFAULT_BUDGETS["summary_target_tokens"]
     summary_max_output_tokens: int = DEFAULT_BUDGETS["summary_max_output_tokens"]
     max_file_read_chars: int = DEFAULT_BUDGETS["max_file_read_chars"]
-    max_file_read_lines: int = DEFAULT_BUDGETS["max_file_read_lines"]
     max_history_read_chars: int = DEFAULT_BUDGETS["max_history_read_chars"]
 
     @classmethod

@@ -2,6 +2,7 @@
 
 from collections.abc import Iterator, Sequence
 import re
+import json
 
 from praxis_agent.context.models import ConversationHistory
 from praxis_agent.context.budgets import DEFAULT_BUDGETS
@@ -71,26 +72,49 @@ def search_history(
 
 def read_history(
     history: ConversationHistory, operations: Sequence[ContextOperation],
-    message_id: str, offset: int = 0, length: int = 8000,
-    *, max_length: int = DEFAULT_BUDGETS["max_history_read_chars"],
+    message_id: str, start_offset: int = 0, end_offset: int | None = None,
+    *, character_limit: int | None = DEFAULT_BUDGETS["max_history_read_chars"],
 ) -> dict[str, object]:
-    """读取 Python 字符串切片；next_offset 可直接用于下一次调用。"""
-    if not isinstance(offset, int) or offset < 0:
-        raise ValueError("offset must be a non-negative integer")
-    if not isinstance(length, int) or not 1 <= length <= max_length:
-        raise ValueError(f"length must be between 1 and {max_length}")
+    """Read a half-open character range, budgeting the complete model-facing JSON."""
+    if isinstance(start_offset, bool) or not isinstance(start_offset, int) or start_offset < 0:
+        raise ValueError("start_offset must be a non-negative integer")
+    if end_offset is not None and (
+        isinstance(end_offset, bool) or not isinstance(end_offset, int) or end_offset < start_offset
+    ):
+        raise ValueError("end_offset must be null or an integer at least start_offset")
     for current_id, text in _messages(history, operations):
         if current_id != message_id:
             continue
-        if offset > len(text):
-            raise ValueError(f"offset exceeds total_length {len(text)}")
-        end = min(len(text), offset + length)
-        return {
-            "message_id": message_id,
-            "offset": offset,
-            "text": text[offset:end],
-            "next_offset": end,
-            "total_length": len(text),
-            "eof": end == len(text),
-        }
+        end = len(text) if end_offset is None else end_offset
+        if start_offset > len(text) or end > len(text):
+            raise ValueError(f"range exceeds message length {len(text)}")
+
+        def render(stop):
+            truncated = stop < end
+            return {
+                "text": text[start_offset:stop],
+                "truncated": truncated,
+                "next_offset": stop if truncated else None,
+                "note": ("Only part of the requested range is shown. Continue with start_offset=next_offset "
+                         "and the same end_offset; omitted end means end of message.") if truncated else "",
+            }
+
+        if character_limit is None:
+            return render(end)
+        if character_limit < 1:
+            raise ValueError("character_limit must be positive")
+        candidate = render(min(end, start_offset + character_limit))
+        if len(json.dumps(candidate, ensure_ascii=False)) <= character_limit:
+            return candidate
+        low, high = start_offset, min(end - 1, start_offset + character_limit)
+        while low < high:
+            middle = (low + high + 1) // 2
+            if len(json.dumps(render(middle), ensure_ascii=False)) <= character_limit:
+                low = middle
+            else:
+                high = middle - 1
+        result = render(low)
+        if (low == start_offset and start_offset < end) or len(json.dumps(result, ensure_ascii=False)) > character_limit:
+            raise ValueError("Read budget cannot fit metadata and text; increase the output budget")
+        return result
     raise ValueError(f"text message not found: {message_id}")

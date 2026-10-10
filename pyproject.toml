@@ -30,5 +30,8 @@ praxis = "praxis_agent.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+praxis_agent = ["builtin_skills/*/SKILL.md"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -172,7 +172,10 @@ class ToolCallExecutor:
             registry = self.live_registry or self.tool_registry
             if not registry.allows_programmatic(name):
                 return ToolResult(False, f"Tool unavailable for programmatic calls: {name}")
-            return invoke_tool(name, values)
+            executor = replace(self, tool_registry=registry,
+                               context=replace(self.context, programmatic_call=True))
+            return executor.execute(turn_id, FunctionCall(
+                f"{function_call.call_id}:{uuid4().hex}", name, json.dumps(values)))
 
         context = replace(self.context, invoke_tool=invoke_tool,
                           invoke_programmatic_tool=invoke_programmatic_tool,
