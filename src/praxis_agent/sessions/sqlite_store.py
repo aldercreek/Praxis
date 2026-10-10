@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from sqlite3 import Connection, Row
 
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 _INTERRUPTED_RUN_ERROR = "Praxis stopped before this run completed."
 _INTERRUPTED_TOOL_OUTPUT = (
     "Tool execution was interrupted. Its completion is unknown.\n"
@@ -88,6 +88,7 @@ CREATE TABLE IF NOT EXISTS context_view_operations (
     PRIMARY KEY(session_id, sequence),
     FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
+
 """
 
 

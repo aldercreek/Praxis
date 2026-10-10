@@ -7,6 +7,7 @@ def build_run_state_context(run_state: RunState) -> dict[str, object]:
     """构造只参与当前模型请求的任务状态快照。"""
     snapshot = {
         "type": "praxis_run_state",
+        "original_task": run_state.original_task,
         "plan": [
             {
                 "step": step.description,

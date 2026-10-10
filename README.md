@@ -24,7 +24,7 @@ session:
 $env:ADA_API_KEY = "your-coding-plan-token"
 ```
 
-Praxis uses the ADA gateway and `deepseek-v4.1-flash` by default. These
+Praxis uses the ADA gateway and `gpt-5.6-terra-2026-07-09` by default for both the main and summary models. These
 optional variables can override either value:
 
 ```powershell
@@ -38,7 +38,7 @@ catalog, and finally a conservative 128,000-token fallback. The catalog covers
 current coding-oriented OpenAI, Claude, Gemini, DeepSeek, and Qwen models,
 including their dated snapshot names. Unset override fields still inherit from
 the catalog or fallback. By default, Praxis uses 95% of the selected window and
-plans 16,000 tokens for output. Override the model limits and context policy
+selects output, summary and read budgets from six tiers. Override the model limits and context policy
 when needed:
 
 ```powershell
@@ -49,9 +49,46 @@ $env:ADA_DESIRED_OUTPUT_TOKENS = "8000"
 $env:ADA_CONTEXT_SAFETY_RATIO = "0.95"
 ```
 
+Defaults are centralized in `context/budgets.py`. Windows and token counts below
+use decimal thousands (128k = 128,000); each row includes its upper boundary.
+
+| Context window | Output reserve | Summary target / generation cap | Tool preview / file chars | File lines | History chars |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| ≤32k | 4k | 2k / 4k | 16,000 | 400 | 8,000 |
+| ≤64k | 8k | 3k / 6k | 24,000 | 600 | 12,000 |
+| ≤128k | 16k | 4k / 8k | 32,000 | 800 | 16,000 |
+| ≤256k | 24k | 6k / 12k | 48,000 | 1,200 | 24,000 |
+| ≤512k | 32k | 8k / 16k | 64,000 | 1,600 | 32,000 |
+| >512k | 32k | 12k / 24k | 96,000 | 2,400 | 48,000 |
+
+Explicit overrides take precedence: `ADA_DESIRED_OUTPUT_TOKENS`,
+`ADA_SUMMARY_TARGET_TOKENS`, `ADA_SUMMARY_MAX_OUTPUT_TOKENS`,
+`ADA_MAX_TOOL_OUTPUT_CHARS`, `ADA_MAX_FILE_READ_CHARS`,
+`ADA_MAX_FILE_READ_LINES`, and `ADA_MAX_HISTORY_READ_CHARS`.
+Model input/output limits still apply. The main output reserve only affects
+input budgeting; it does not set the main request's generation cap. Summary
+targets guide the prompt, while the generation cap sets `max_output_tokens`.
+File reads still default to 200 lines and history reads to 8,000 characters;
+larger reads must be requested explicitly. Standalone tools without model
+configuration use the smallest tier. Search limits and timeouts are unchanged.
+
 The first model request uses a heuristic token estimate. Later requests use
 the previous response's exact `input_tokens` plus the estimated change in the
 model context, avoiding a full uncalibrated estimate on every request.
+
+Read-only tools (`read_file`, `list_files`, `find_files`, `search_text`,
+`search_history`, `read_history`) have an internal `parallel_safe` flag.
+Consecutive eligible calls run in bounded groups, with at most four handlers
+running simultaneously. Set `PRAXIS_MAX_PARALLEL_TOOLS` to a positive integer
+to override this (1 disables simultaneous execution). Other tools are serial
+barriers; no calls move across them. The next group starts only after the
+previous group's results have been saved in their original call order.
+Parsing, validation, approval, events, state updates and SQLite writes remain
+on the main thread. Only eligible handlers run in worker threads. Terminal
+completion events may arrive out of order, but history and model results
+retain the original order and `call_id`. The flag is not a model parameter.
+The prompt encourages batching independent known-argument calls and waiting
+for results before making dependent calls.
 
 ## Context management
 
@@ -231,6 +268,38 @@ conversation history. Successful plan updates are displayed as a checklist in
 the terminal. Each task also exposes its latest in-memory `RunState`,
 including the original request and final `running`, `completed`, or `failed`
 status.
+
+Context management normally remains model-driven through `delete` and `compress`.
+As a display safeguard, tool results show a prefix according to the selected
+tier (`ContextPolicy.max_tool_output_chars`). The limit counts decoded tool
+text, excluding the file line header (up to 512 characters);
+JSON escaping does not prematurely truncate a bounded file read. Continuation
+offsets still refer to the saved original serialized result.
+If the full request still exceeds the
+estimated input budget, Praxis reserves `ContextPolicy.summary_target_tokens`
+(4,000 tokens at 128k), keeps the recent interactions that fit, and summarizes
+the older prefix. Tool calls and their results stay together at the cut point.
+Previews include the original message ID, character offsets, and instructions
+for retrieving more text with `search_history` or `read_history`.
+
+These display limits do not create context operations or alter the saved tool
+results. Command stdout/stderr are saved without the previous output truncation.
+File/search tools still honor their requested ranges and result limits; history
+retrieval can only recover text the tool actually returned. View safeguards are
+recomputed when a session is resumed. Summarization processes the selected history
+in one request when it fits. Otherwise, it updates one running checkpoint with
+successive chronological chunks. Each request budgets for the actual previous
+summary, instructions, and output reserve; only the final checkpoint is retained.
+Summary requests have an output token cap; complete-response validation remains
+a known limitation. After the final request fits, one
+`compress` operation is saved, so resume preserves its effect. Ordinary requests
+do not automatically summarize history. Fixed context or recent interactions
+that cannot fit cause a clear error rather than silent removal. This initial
+implementation handles locally detected overflow; provider-side overflow retry
+is not yet implemented. Emergency compaction shows terminal progress, estimated
+tokens before/after, duration, and errors. Langfuse records a `context-compaction`
+span with a generation per summary/merge chunk, including actual token usage
+when returned by the provider. These events contain metrics, not history bodies.
 
 ## Test
 

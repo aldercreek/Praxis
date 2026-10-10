@@ -5,7 +5,7 @@ import logging
 import sys
 from collections.abc import Mapping
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
 from uuid import uuid4
@@ -15,6 +15,8 @@ from langfuse import Langfuse, propagate_attributes
 from praxis_agent.config import LangfuseConfig
 from praxis_agent.events import (
     AgentEvent,
+    ChildAgentEvent,
+    ContextCompaction,
     AssistantTextCompleted,
     ModelRequestCompleted,
     ModelRequestStarted,
@@ -134,6 +136,11 @@ class LangfuseEventSink:
         self._generations: dict[tuple[str, int], _Observation] = {}
         self._prepared_tools: dict[tuple[str, str], _PreparedToolCall] = {}
         self._tools: dict[tuple[str, str], _Observation] = {}
+        self._compactions: dict[str, _Observation] = {}
+        self._summary_requests: dict[tuple[str, int, int], _Observation] = {}
+        self._worker_spans: dict[str, _Observation] = {}
+        self._worker_requests: dict[tuple[str, int], _Observation] = {}
+        self._worker_tools: dict[tuple[str, str], _Observation] = {}
         self._disabled = False
 
     @property
@@ -165,8 +172,12 @@ class LangfuseEventSink:
             _LOGGER.warning("Failed to flush Langfuse events: %s", error)
 
     def _handle_event(self, event: AgentEvent) -> None:
-        if isinstance(event, TurnStarted):
+        if isinstance(event, ChildAgentEvent):
+            self._handle_worker_event(event)
+        elif isinstance(event, TurnStarted):
             self._start_turn(event)
+        elif isinstance(event, ContextCompaction):
+            self._compaction_progress(event)
         elif isinstance(event, ModelRequestStarted):
             self._start_generation(event)
         elif isinstance(event, ModelRequestCompleted):
@@ -183,6 +194,120 @@ class LangfuseEventSink:
             self._finish_turn(event.turn_id)
         elif isinstance(event, TurnFailed):
             self._fail_turn(event)
+
+    def _handle_worker_event(self, envelope: ChildAgentEvent) -> None:
+        """Use explicit parent observations, never overlapping context-manager stacks."""
+        event = envelope.event
+        worker_id = event.turn_id
+        if isinstance(event, TurnStarted):
+            parent = self._turns.get(envelope.turn_id)
+            if parent is not None:
+                self._worker_spans[worker_id] = parent.observation.start_observation(
+                    name="praxis-worker", as_type="agent",
+                    input=_truncate_text(event.task, _MAX_TASK_CHARS),
+                    metadata={"agent_id": envelope.agent_id, "run_id": worker_id,
+                              "parent_turn_id": envelope.turn_id},
+                )
+            return
+        worker = self._worker_spans.get(worker_id)
+        if worker is None:
+            return
+        if isinstance(event, ModelRequestStarted):
+            self._worker_requests[(worker_id, event.request_number)] = worker.start_observation(
+                name="worker-model", as_type="generation",
+                input=_bounded_payload(event.input_items, _MAX_MODEL_INPUT_CHARS),
+            )
+        elif isinstance(event, ModelRequestCompleted):
+            observation = self._worker_requests.pop((worker_id, event.request_number), None)
+            if observation is not None:
+                response = event.response
+                if response is not None:
+                    values = {"model": response.model,
+                              "output": _truncate_text(response.output_text, _MAX_MODEL_OUTPUT_CHARS)}
+                    if response.usage is not None:
+                        values["usage_details"] = {"input": response.usage.input_tokens,
+                                                   "output": response.usage.output_tokens,
+                                                   "total": response.usage.total_tokens}
+                    observation.update(**values)
+                observation.end()
+        elif isinstance(event, ToolStarted):
+            self._worker_tools[(worker_id, event.call_id)] = worker.start_observation(
+                name=event.tool_name, as_type="tool", metadata={"call_id": event.call_id},
+            )
+        elif isinstance(event, ToolFinished):
+            observation = self._worker_tools.pop((worker_id, event.call_id), None)
+            if observation is not None:
+                observation.update(output=_bounded_payload(asdict(event.result), _MAX_TOOL_RESULT_CHARS))
+                observation.end()
+        elif isinstance(event, AssistantTextCompleted):
+            worker.update(output=_truncate_text(event.text, _MAX_MODEL_OUTPUT_CHARS))
+        elif isinstance(event, (TurnCompleted, TurnFailed)):
+            if isinstance(event, TurnFailed):
+                worker.update(level="ERROR", status_message=_truncate_text(event.message, _MAX_VALUE_CHARS))
+            self._finish_worker(worker_id)
+
+    def _finish_worker(self, worker_id: str) -> None:
+        for observations in (self._worker_requests, self._worker_tools):
+            for key in list(observations):
+                if key[0] == worker_id:
+                    observation = observations.pop(key)
+                    observation.update(level="ERROR", status_message="Worker stopped before completion")
+                    observation.end()
+        worker = self._worker_spans.pop(worker_id, None)
+        if worker is not None:
+            worker.end()
+
+    def _compaction_progress(self, event: ContextCompaction) -> None:
+        turn = self._turns.get(event.turn_id)
+        if turn is None:
+            return
+        metadata = asdict(event)
+        metadata["error"] = _truncate_text(event.error, _MAX_VALUE_CHARS)
+        if event.stage == "started":
+            self._compactions[event.turn_id] = turn.observation.start_observation(
+                name="context-compaction", as_type="span", metadata=metadata,
+            )
+            return
+        compaction = self._compactions.get(event.turn_id)
+        if compaction is None:
+            return
+        key = (event.turn_id, event.round_number, event.chunk_number)
+        if event.stage == "chunk_started":
+            self._summary_requests[key] = compaction.start_observation(
+                name=f"summary-round-{event.round_number}-chunk-{event.chunk_number}",
+                as_type="generation", metadata=metadata,
+            )
+        elif event.stage == "chunk_completed":
+            generation = self._summary_requests.pop(key, None)
+            if generation is not None:
+                values: dict[str, object] = {"metadata": metadata}
+                if event.model is not None:
+                    values["model"] = event.model
+                if event.input_tokens is not None:
+                    values["usage_details"] = {"input": event.input_tokens, "output": event.output_tokens}
+                generation.update(**values)
+                generation.end()
+        elif event.stage in {"completed", "failed"}:
+            error = metadata["error"] if event.stage == "failed" else ""
+            self._close_summary_requests(event.turn_id, str(error))
+            values = {"metadata": metadata, "output": {
+                "estimated_before_tokens": event.before_tokens,
+                "estimated_after_tokens": event.after_tokens,
+                "elapsed_seconds": event.elapsed_seconds,
+            }}
+            if error:
+                values.update(level="ERROR", status_message=error)
+            compaction.update(**values)
+            compaction.end()
+            del self._compactions[event.turn_id]
+
+    def _close_summary_requests(self, turn_id: str, error: str) -> None:
+        for key, observation in list(self._summary_requests.items()):
+            if key[0] != turn_id:
+                continue
+            observation.update(level="ERROR", status_message=error or "Summary request interrupted")
+            observation.end()
+            del self._summary_requests[key]
 
     def _start_turn(self, event: TurnStarted) -> None:
         task = _bounded_payload(event.task, _MAX_TASK_CHARS)
@@ -406,6 +531,11 @@ class LangfuseEventSink:
         incomplete: bool,
     ) -> None:
         status = "Turn ended before this observation completed"
+        self._close_summary_requests(turn_id, status)
+        compaction = self._compactions.pop(turn_id, None)
+        if compaction is not None:
+            compaction.update(level="ERROR", status_message=status)
+            compaction.end()
         for key, observation in list(self._generations.items()):
             if key[0] != turn_id:
                 continue
@@ -427,6 +557,8 @@ class LangfuseEventSink:
                 del self._prepared_tools[key]
 
     def _close_open_traces(self) -> None:
+        for worker_id in list(self._worker_spans):
+            self._finish_worker(worker_id)
         for turn_id in list(self._turns):
             try:
                 turn = self._turns[turn_id]

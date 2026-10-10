@@ -99,6 +99,36 @@ def is_editable(payload: Mapping[str, object]) -> bool:
     )
 
 
+def compression_reasoning_ids(
+    messages: Sequence[dict[str, object]], selected_ids: set[str],
+) -> set[str]:
+    """整组助手输出被压缩时，附带移除其 reasoning；部分工具结果压缩时保留。"""
+    selected_calls = {
+        message["payload"].get("call_id") for message in messages
+        if message["message_id"] in selected_ids
+        and message["payload"].get("type") == "function_call_output"
+    }
+    reasoning_ids: set[str] = set()
+    for index, message in enumerate(messages):
+        if message["payload"].get("type") != "reasoning":
+            continue
+        outputs = []
+        for following in messages[index + 1:]:
+            payload = following["payload"]
+            if payload.get("type") == "function_call" or payload.get("role") == "assistant":
+                outputs.append(following)
+            else:
+                break
+        if outputs and all(
+            output["message_id"] in selected_ids
+            or (output["payload"].get("type") == "function_call"
+                and output["payload"].get("call_id") in selected_calls)
+            for output in outputs
+        ):
+            reasoning_ids.add(message["message_id"])
+    return reasoning_ids
+
+
 @dataclass(slots=True)
 class ContextOperations:
     """上下文操作层：重放操作生成视图，永远不覆盖原始历史。"""
@@ -146,6 +176,8 @@ class ContextOperations:
                 if messages[index]["payload"].get("type") == "function_call_output"
             }
             projected = []
+            pending_calls: set[str] = set()
+            replacement_pending = False
             for index, message in enumerate(messages):
                 is_paired_call = (
                     message["payload"].get("type") == "function_call"
@@ -153,8 +185,20 @@ class ContextOperations:
                 )
                 if message["message_id"] not in targets and not is_paired_call:
                     projected.append(message)
+                    payload = message["payload"]
+                    if payload.get("type") == "function_call":
+                        pending_calls.add(payload["call_id"])
+                    elif payload.get("type") == "function_call_output":
+                        pending_calls.discard(payload["call_id"])
                 # 非连续选择也只替换目标，保留中间未选择的消息。
                 if index == positions[-1]:
+                    replacement_pending = True
+                # 部分工具结果被替换时，摘要必须等其余调用结果全部返回后再插入。
+                # 否则普通 assistant 消息会切断网关要求连续的工具调用/结果序列。
+                if replacement_pending and not pending_calls:
                     projected.append(operation.replacement)
+                    replacement_pending = False
+            if replacement_pending:
+                raise ValueError("cannot insert context replacement before pending tool results")
             messages = projected
         return messages

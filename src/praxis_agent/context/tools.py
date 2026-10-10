@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from praxis_agent.context import retrieval
+from praxis_agent.context.budgets import DEFAULT_BUDGETS
 from praxis_agent.tools.registry import Tool, ToolContext
 
 
@@ -46,8 +47,18 @@ def compress(
     return _change(context, "compress", message_ids, instructions)
 
 
-def create_context_tools() -> tuple[Tool, ...]:
+def create_context_tools(
+    *, max_history_read_chars: int = DEFAULT_BUDGETS["max_history_read_chars"],
+) -> tuple[Tool, ...]:
     """只注册定义；当前会话和上下文管理器由执行时注入。"""
+    def read_with_limits(
+        context: ToolContext, message_id: str, offset: int = 0,
+        length: int = min(8000, max_history_read_chars),
+    ) -> str:
+        return read_history(
+            context, message_id, offset, length, max_length=max_history_read_chars,
+        )
+
     return (
         Tool(
             name="delete",
@@ -67,6 +78,8 @@ def create_context_tools() -> tuple[Tool, ...]:
                 "in a separate model request. Specify message_ids and instructions describing "
                 "what to preserve or omit. Replaces the selected messages with one message "
                 "containing the summary. Returns its message_id and an operation_id. "
+                "The summary uses observable records, not reasoning. Reasoning attached "
+                "to fully selected assistant output groups is also removed from the view. "
                 "Original contents remain saved in complete history. Placeholders and "
                 "context-management tool results can also be selected. Protocol calls "
                 "and multimodal content cannot be selected."
@@ -87,6 +100,7 @@ def create_context_tools() -> tuple[Tool, ...]:
         ),
         Tool(
             name="search_history",
+            programmatic=True,
             description=(
                 "Search original conversation text and saved replacement messages, including "
                 "hidden content. Literal case-insensitive search; returns message_id, text "
@@ -104,9 +118,11 @@ def create_context_tools() -> tuple[Tool, ...]:
                 "additionalProperties": False,
             },
             handler=search_history,
+            parallel_safe=True,
         ),
         Tool(
             name="read_history",
+            programmatic=True,
             description=(
                 "Read original or replacement message text by message_id, including hidden "
                 "messages. offset and length count Python string characters, not bytes or "
@@ -119,12 +135,13 @@ def create_context_tools() -> tuple[Tool, ...]:
                 "properties": {
                     "message_id": {"type": "string", "minLength": 1},
                     "offset": {"type": "integer", "minimum": 0},
-                    "length": {"type": "integer", "minimum": 1, "maximum": 8000},
+                    "length": {"type": "integer", "minimum": 1, "maximum": max_history_read_chars},
                 },
                 "required": ["message_id", "offset", "length"],
                 "additionalProperties": False,
             },
-            handler=read_history,
+            handler=read_with_limits,
+            parallel_safe=True,
         ),
     )
 
@@ -140,10 +157,12 @@ def search_history(context: ToolContext, query: str, max_results: int = 10) -> s
 
 def read_history(
     context: ToolContext, message_id: str, offset: int = 0, length: int = 8000,
+    *, max_length: int = DEFAULT_BUDGETS["max_history_read_chars"],
 ) -> str:
     if context.history is None or context.context_manager is None:
         raise ValueError("history retrieval is unavailable")
     result = retrieval.read_history(
         context.history, context.context_manager.operations.records, message_id, offset, length,
+        max_length=max_length,
     )
     return json.dumps(result, ensure_ascii=False)

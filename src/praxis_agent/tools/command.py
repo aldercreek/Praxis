@@ -1,10 +1,14 @@
 import subprocess
+import tempfile
+from collections.abc import Callable
 from pathlib import Path
+from time import monotonic
+
+from praxis_agent.tools.processes import CommandProcess
 
 
 _DEFAULT_TIMEOUT_SECONDS = 60
 _MAX_TIMEOUT_SECONDS = 120
-_MAX_OUTPUT_CHARS = 10_000
 
 
 def _resolve_working_directory(
@@ -32,22 +36,13 @@ def _resolve_working_directory(
     return working_directory
 
 
-def _truncate_output(output: str) -> str:
-    """限制单个输出流的长度，避免一次结果占用过多模型上下文。"""
-    if len(output) <= _MAX_OUTPUT_CHARS:
-        return output
-    removed_chars = len(output) - _MAX_OUTPUT_CHARS
-    return (
-        output[:_MAX_OUTPUT_CHARS]
-        + f"\n... truncated {removed_chars} characters"
-    )
-
-
 def run_command(
     workspace: Path,
     argv: list[str],
     relative_path: str = ".",
     timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS,
+    *,
+    check_execution: Callable[[], None] | None = None,
 ) -> str:
     """在工作区内运行非交互式命令，并返回退出码和输出。"""
     if not isinstance(argv, list) or not argv:
@@ -66,29 +61,34 @@ def run_command(
 
     working_directory = _resolve_working_directory(workspace, relative_path)
 
-    try:
-        completed = subprocess.run(
-            argv,
-            cwd=working_directory,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout_seconds,
-            check=False,
-            shell=False,
-        )
-    except subprocess.TimeoutExpired as error:
-        raise TimeoutError(
-            f"command timed out after {timeout_seconds} seconds"
-        ) from error
-
-    stdout = _truncate_output(completed.stdout)
-    stderr = _truncate_output(completed.stderr)
+    if check_execution is not None:
+        check_execution()
+    # Disk-backed output also avoids hanging on inherited pipes after the direct
+    # child exits. Commands are foreground jobs; detached descendants are cleaned up.
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        command = CommandProcess(argv, cwd=working_directory, stdin=subprocess.DEVNULL,
+                                 stdout=out, stderr=err, shell=False)
+        try:
+            deadline = monotonic() + timeout_seconds
+            while command.process.poll() is None:
+                if check_execution is not None:
+                    check_execution()
+                if monotonic() >= deadline:
+                    raise TimeoutError(f"command timed out after {timeout_seconds} seconds")
+                try:
+                    command.process.wait(timeout=min(0.1, max(0.001, deadline - monotonic())))
+                except subprocess.TimeoutExpired:
+                    pass
+            returncode = command.process.returncode
+        finally:
+            command.close()
+        out.seek(0)
+        err.seek(0)
+        stdout = out.read().decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+        stderr = err.read().decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
     return "\n".join(
         (
-            f"exit_code: {completed.returncode}",
+            f"exit_code: {returncode}",
             f"stdout:\n{stdout or '<empty>'}",
             f"stderr:\n{stderr or '<empty>'}",
         )
