@@ -193,7 +193,10 @@ class MCPConnections:
                 "Activation is idempotent; execution is not. Do not automatically retry failed or timed-out executions. "
                 "Batch only independent calls; separate calls with dependencies. "
                 "Use deactivate_tools at phase end or under context pressure; avoid unhelpful activation churn. "
-                "Each agent manages its own active tools; read-only workers have no MCP access.")
+                "Each agent manages its own active tools; read-only workers have no MCP access. "
+                "Management tools are direct-call only. In run_code, call an activated tool by its "
+                "registered name (candidate name), not its server/tool_id. MCP returns a JSON string "
+                "envelope, without automatic content.text decoding or remote pagination.")
 
     def register(self, registry: ToolRegistry, *, read_only=False, check_execution=None):
         if read_only or self.index is None:
@@ -289,20 +292,20 @@ class MCPConnections:
                             "additionalProperties": False}, handler=handler, strict=False))
 
         register("search_tools", "Search MCP candidates without activating or returning schemas. Use several specific keywords covering object, action and constraints, with useful synonyms or English terms when appropriate. Keyword (default) uses BM25; name matches identifiers/prefixes/substrings.", {
-            "query": {"type": "string", "minLength": 1, "maxLength": 2000},
-            "mode": {"type": "string", "enum": ["keyword", "name"]},
-            "server": {"type": "string"},
-            "limit": {"type": ["integer", "null"], "minimum": 1, "maximum": 20}}, ["query"], search_tools)
+            "query": {"type": "string", "minLength": 1, "maxLength": 2000, "description": "Specific keywords for the object/action/constraints, or a tool name in name mode."},
+            "mode": {"type": "string", "enum": ["keyword", "name"], "description": "keyword (default): BM25; name: identifier, prefix or substring matching."},
+            "server": {"type": "string", "description": "Exact service name from the catalog; omit or use empty string to search all available services."},
+            "limit": {"type": ["integer", "null"], "minimum": 1, "maximum": 20, "description": "Candidate count; omit/null uses configured default. Candidates are not activated."}}, ["query"], search_tools)
         register("list_tools", "Browse a service's tools in stable pages without activating or returning schemas. Continue with next_cursor; empty means end.", {
-            "server": {"type": "string", "minLength": 1}, "cursor": {"type": "string"},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 20}}, ["server"], list_tools)
+            "server": {"type": "string", "minLength": 1, "description": "Exact service name from the catalog."}, "cursor": {"type": "string", "description": "Empty/omitted initially; copy next_cursor unchanged for the same service."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 20, "description": "Page size, default 10; no activation."}}, ["server"], list_tools)
         register("activate_tools", "Activate MCP tools for this agent. Omit arguments to activate only. Supplying arguments (including {}) executes once through normal validation and approval. Use only known parameters, not guesses. Execution is not idempotent; no automatic retry. Batch independent items only.", {
-            "tools": {"type": "array", "minItems": 1, "items": {
-                "type": "object", "properties": {"tool_id": {"type": "string", "minLength": 1},
-                "arguments": {"type": "object"}}, "required": ["tool_id"],
+            "tools": {"type": "array", "minItems": 1, "description": "Independent activation requests, processed sequentially; each may optionally execute once.", "items": {
+                "type": "object", "properties": {"tool_id": {"type": "string", "minLength": 1, "description": "Exact server/tool identifier returned by search_tools or list_tools."},
+                "arguments": {"type": "object", "description": "Omit to activate only. An object, including {}, executes once using already-known tool parameters; never guess."}}, "required": ["tool_id"],
                 "additionalProperties": False}}}, ["tools"], activate_tools)
         register("deactivate_tools", "Remove specified MCP definitions from this agent's future requests. History and running calls remain; other agents are unaffected. Reactivate when needed.", {
-            "tool_ids": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}},
+            "tool_ids": {"type": "array", "minItems": 1, "description": "Exact server/tool identifiers to deactivate in this agent only.", "items": {"type": "string", "minLength": 1}}},
             ["tool_ids"], deactivate_tools)
 
         def release():

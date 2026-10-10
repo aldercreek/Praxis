@@ -1,33 +1,16 @@
 import os
+import json
+import base64
+from bisect import bisect_right
 import shutil
 import subprocess
-from collections import deque
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Mapping
 from difflib import unified_diff
 from pathlib import Path
-from threading import Event, Thread, Timer
 
 from praxis_agent.context.budgets import DEFAULT_BUDGETS
 
 
-# 递归扫描时跳过依赖目录、缓存目录和构建产物目录。
-_IGNORED_DIRECTORY_NAMES = frozenset(
-    {
-        ".git",
-        ".idea",
-        ".mypy_cache",
-        ".pytest_cache",
-        ".ruff_cache",
-        ".venv",
-        "__pycache__",
-        "build",
-        "dist",
-        "node_modules",
-        "target",
-    }
-)
-_IGNORED_DIRECTORY_SUFFIXES = (".egg-info",)
-_MAX_SEARCH_FILE_SIZE = 1_000_000
 _SEARCH_TIMEOUT_SECONDS = 30
 
 
@@ -65,276 +48,34 @@ def _require_workspace_file(workspace: Path, relative_path: str) -> Path:
     return file_path
 
 
-def _is_ignored_directory(name: str) -> bool:
-    """判断目录是否属于依赖、缓存或构建产物。"""
-    return name in _IGNORED_DIRECTORY_NAMES or name.endswith(
-        _IGNORED_DIRECTORY_SUFFIXES
-    )
-
-
-def _iter_workspace_entries(
-    workspace_root: Path,
-    target_path: Path,
-    max_depth: int,
-) -> Iterator[tuple[Path, bool]]:
-    """按层遍历有限深度的目录，优先返回浅层条目，不跟随目录链接。"""
-    if target_path.is_file():
-        yield target_path, False
-        return
-
-    pending = deque([(target_path, 1)])
-    while pending:
-        directory, depth = pending.popleft()
-        try:
-            with os.scandir(directory) as scanner:
-                children = sorted(scanner, key=lambda entry: entry.name)
-        except OSError:
-            continue
-
-        for entry in children:
-            child = Path(entry.path)
-            try:
-                resolved_child = child.resolve()
-                is_directory = entry.is_dir()
-                is_file = entry.is_file()
-            except OSError:
-                continue
-            if not resolved_child.is_relative_to(workspace_root):
-                continue
-            if is_directory and _is_ignored_directory(child.name):
-                continue
-            if not is_directory and not is_file:
-                continue
-
-            yield child, is_directory
-            if (
-                is_directory
-                and depth < max_depth
-                and not entry.is_symlink()
-                and not child.is_junction()
-            ):
-                pending.append((child, depth + 1))
-
-
-def _normalize_search_match(match: str) -> str:
-    """统一 ripgrep 返回的路径分隔符和相对路径前缀。"""
-    parts = match.split(":", 2)
-    if len(parts) != 3:
-        return match
-    display_path, line_number, content = parts
-    display_path = display_path.replace("\\", "/").removeprefix("./")
-    return f"{display_path}:{line_number}:{content}"
-
-
-def _ripgrep_glob_arguments(file_pattern: str) -> list[str]:
-    """构造文件模式和忽略目录对应的 ripgrep 参数。"""
-    arguments: list[str] = []
-    if file_pattern != "*":
-        arguments.extend(("--glob", file_pattern))
-    for directory_name in sorted(_IGNORED_DIRECTORY_NAMES):
-        arguments.extend(("--glob", f"!**/{directory_name}/**"))
-    for directory_suffix in _IGNORED_DIRECTORY_SUFFIXES:
-        arguments.extend(("--glob", f"!**/*{directory_suffix}/**"))
+def _glob_arguments(file_pattern: str, ignore_patterns: list[str] | None) -> list[str]:
+    if not isinstance(file_pattern, str) or not file_pattern or file_pattern.startswith("!"):
+        raise ValueError("file_pattern must be a non-empty positive glob")
+    if ignore_patterns is None:
+        ignore_patterns = []
+    if not isinstance(ignore_patterns, list) or any(
+        not isinstance(pattern, str) or not pattern or pattern.startswith("!")
+        for pattern in ignore_patterns
+    ):
+        raise ValueError("ignore_patterns must be a list of non-empty globs without a leading !")
+    arguments = ["--glob", file_pattern]
+    for pattern in ignore_patterns:
+        arguments.extend(("--glob", "!" + (pattern + "**" if pattern.endswith("/") else pattern)))
     return arguments
 
 
-def _search_snippet(match: str, query: str, max_characters: int) -> str:
-    """按调用方指定长度保留首个命中附近的正文，路径和行号不变。"""
-    match = _normalize_search_match(match)
-    parts = match.split(":", 2)
-    if len(parts) != 3:
-        return match[:max_characters]
-    path, line_number, content = parts
-    if len(content) <= max_characters:
-        return match
-    position = max(0, content.find(query))
-    before = min(100, max(0, max_characters - len(query)))
-    start = max(0, position - before)
-    end = min(len(content), start + max_characters)
-    return (
-        f"{path}:{line_number}:"
-        f"{'…' if start else ''}{content[start:end]}{'…' if end < len(content) else ''} "
-        f"[snippet; columns {start + 1}-{end} of {len(content)}; first match]"
-    )
-
-
-def _run_ripgrep(
-    workspace_root: Path,
-    arguments: list[str],
-    max_results: int,
-    operation: str,
-    *,
-    format_line: Callable[[str], str] | None = None,
-    max_characters: int | None = None,
-) -> tuple[list[str], bool]:
-    """运行必需的 ripgrep，并限制执行时间和输出行数。"""
+def _run_ripgrep(workspace: Path, arguments: list[str]) -> bytes:
     executable = shutil.which("rg")
     if executable is None:
-        raise RuntimeError(
-            "ripgrep (rg) is required for find_files and search_text; "
-            "install it and ensure rg is available on PATH"
-        )
-
+        raise RuntimeError("ripgrep (rg) is required; install it on PATH")
     try:
-        process = subprocess.Popen(
-            [executable, *arguments],
-            cwd=workspace_root,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-    except OSError as error:
-        raise RuntimeError(f"failed to start ripgrep: {error}") from error
-
-    output_lines: list[str] = []
-    truncated = False
-    output_characters = 0
-    timed_out = Event()
-    stderr_parts: list[str] = []
-    assert process.stdout is not None
-    assert process.stderr is not None
-
-    def read_stderr() -> None:
-        stderr_parts.append(process.stderr.read())
-
-    def kill_after_timeout() -> None:
-        if process.poll() is not None:
-            return
-        timed_out.set()
-        try:
-            process.kill()
-        except OSError:
-            pass
-
-    stderr_reader = Thread(target=read_stderr, daemon=True)
-    timeout_timer = Timer(_SEARCH_TIMEOUT_SECONDS, kill_after_timeout)
-    timeout_timer.daemon = True
-    stderr_reader.start()
-    timeout_timer.start()
-
-    # 多读取一行，用来区分“刚好达到上限”和“确实被截断”。
-    try:
-        for output_line in process.stdout:
-            line = output_line.removesuffix("\n").removesuffix("\r")
-            if format_line is not None:
-                line = format_line(line)
-            if len(output_lines) >= max_results or (
-                max_characters is not None
-                and output_characters + len(line) + 1 > max_characters
-            ):
-                truncated = True
-                break
-            output_lines.append(line)
-            output_characters += len(line) + 1
-    finally:
-        timeout_timer.cancel()
-        timeout_timer.join(timeout=1)
-        if truncated and process.poll() is None:
-            try:
-                process.terminate()
-            except OSError:
-                pass
-        try:
-            process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
-        stderr_reader.join(timeout=2)
-        process.stdout.close()
-        process.stderr.close()
-
-    if timed_out.is_set():
-        raise TimeoutError(
-            f"ripgrep {operation} timed out after "
-            f"{_SEARCH_TIMEOUT_SECONDS} seconds; narrow relative_path "
-            "or file_pattern"
-        )
-
-    if not truncated and process.returncode not in (0, 1):
-        stderr = "".join(stderr_parts)
-        detail = stderr.strip() or f"exit code {process.returncode}"
-        raise RuntimeError(f"ripgrep {operation} failed: {detail}")
-    return output_lines[:max_results], truncated
-
-
-def _search_with_ripgrep(
-    workspace_root: Path,
-    target_path: Path,
-    query: str,
-    file_pattern: str,
-    max_results: int,
-    max_line_characters: int,
-    max_output_characters: int,
-) -> tuple[list[str], bool]:
-    """使用 ripgrep 搜索文件内容。"""
-    target_argument = target_path.relative_to(workspace_root).as_posix() or "."
-    arguments = [
-        "--fixed-strings",
-        "--line-number",
-        "--no-heading",
-        "--with-filename",
-        "--hidden",
-        "--color",
-        "never",
-        "--sort",
-        "path",
-        "--path-separator",
-        "/",
-        "--max-filesize",
-        str(_MAX_SEARCH_FILE_SIZE),
-        "--no-messages",
-    ]
-    arguments.extend(_ripgrep_glob_arguments(file_pattern))
-    arguments.extend(("--", query, target_argument))
-
-    result = _run_ripgrep(
-        workspace_root,
-        arguments,
-        max_results,
-        "search",
-        format_line=lambda line: _search_snippet(line, query, max_line_characters),
-        # 给末尾的截断提示预留空间，保证总返回长度也在预算内。
-        max_characters=max_output_characters - 256,
-    )
-    matches, truncated = result
-    return matches, truncated
-
-
-def _find_files_with_ripgrep(
-    workspace_root: Path,
-    target_path: Path,
-    file_pattern: str,
-    max_results: int,
-    include_hidden: bool,
-) -> tuple[list[str], bool]:
-    """使用 ripgrep 按 glob 模式查找文件。"""
-    target_argument = target_path.relative_to(workspace_root).as_posix() or "."
-    arguments = [
-        "--files",
-        "--path-separator",
-        "/",
-        "--no-messages",
-    ]
-    if include_hidden:
-        arguments.append("--hidden")
-    arguments.extend(_ripgrep_glob_arguments(file_pattern))
-    arguments.extend(("--", target_argument))
-
-    result = _run_ripgrep(
-        workspace_root,
-        arguments,
-        max_results,
-        "file discovery",
-    )
-    matches, truncated = result
-    normalized_matches = [
-        match.replace("\\", "/").removeprefix("./")
-        for match in matches
-    ]
-    normalized_matches.sort()
-    return normalized_matches, truncated
+        result = subprocess.run([executable, "--no-config", *arguments], cwd=workspace,
+                                capture_output=True, timeout=_SEARCH_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as error:
+        raise TimeoutError("Search timed out; narrow relative_path or file_pattern") from error
+    if result.returncode not in (0, 1):
+        raise RuntimeError("Search failed: " + result.stderr.decode("utf-8", errors="replace").strip())
+    return result.stdout
 
 
 def _build_unified_diff(
@@ -363,65 +104,80 @@ def read_file(
     workspace: Path,
     relative_path: str,
     start_line: int = 1,
-    max_lines: int = 200,
+    start_offset: int = 0,
+    end_line: int | None = None,
+    end_offset: int | None = None,
     *,
-    line_limit: int = DEFAULT_BUDGETS["max_file_read_lines"],
-    character_limit: int = DEFAULT_BUDGETS["max_file_read_chars"],
-) -> str:
-    """按行读取工作区内的 UTF-8 文本文件。"""
-    if start_line < 1:
-        raise ValueError("start_line must be at least 1")
-    if max_lines < 1:
-        raise ValueError("max_lines must be at least 1")
-    if max_lines > line_limit:
-        raise ValueError(f"max_lines must not exceed {line_limit}")
+    character_limit: int | None = DEFAULT_BUDGETS["max_file_read_chars"],
+) -> dict[str, object]:
+    """Read a half-open text range; offsets count characters including line endings.
 
+    A None limit is reserved for programmatic calls. A finite limit budgets the
+    complete JSON result, so the model preview cannot cut off continuation data.
+    """
     file_path = _require_workspace_file(workspace, relative_path)
-    lines = file_path.read_text(encoding="utf-8").splitlines(keepends=True)
-    total_lines = len(lines)
-    if total_lines == 0:
-        return "[lines 0-0 of 0]"
-    if start_line > total_lines:
-        raise ValueError(
-            f"start_line {start_line} is past the end of the file "
-            f"({total_lines} lines)"
-        )
+    with file_path.open(encoding="utf-8", newline="") as source:
+        text = source.read()
+    lines = text.splitlines(keepends=True) or [""]
+    if lines[-1].endswith(("\n", "\r")):
+        lines.append("")
+    starts = [0]
+    for line in lines[:-1]:
+        starts.append(starts[-1] + len(line))
 
-    selected_lines = lines[start_line - 1 : start_line - 1 + max_lines]
-    visible_lines: list[str] = []
-    visible_characters = 0
-    last_line_truncated = False
+    def position(line, offset):
+        if isinstance(line, bool) or not isinstance(line, int) or not 1 <= line <= len(lines):
+            raise ValueError(f"line must be between 1 and {len(lines)}")
+        if isinstance(offset, bool) or not isinstance(offset, int) or not 0 <= offset <= len(lines[line - 1]):
+            raise ValueError(f"offset for line {line} must be between 0 and {len(lines[line - 1])}")
+        return starts[line - 1] + offset
 
-    # 保证一次工具调用不会把过多文件内容送回模型上下文。
-    for line in selected_lines:
-        remaining_characters = character_limit - visible_characters
-        if len(line) <= remaining_characters:
-            visible_lines.append(line)
-            visible_characters += len(line)
-            continue
-        if not visible_lines:
-            visible_lines.append(line[:remaining_characters])
-            last_line_truncated = True
-        break
+    start = position(start_line, start_offset)
+    if end_line is None and end_offset is None:
+        end = len(text)
+    elif end_line is None or end_offset is None:
+        raise ValueError("end_line and end_offset must both be supplied or both omitted/null")
+    else:
+        end = position(end_line, end_offset)
+    if end < start:
+        raise ValueError("end position must not precede start position")
 
-    end_line = start_line + len(visible_lines) - 1
-    header_parts = [f"lines {start_line}-{end_line} of {total_lines}"]
-    if end_line < total_lines:
-        header_parts.append(f"next_start_line={end_line + 1}")
-    if last_line_truncated:
-        header_parts.append(
-            f"line {end_line} truncated at {character_limit} characters"
-        )
+    def render(stop):
+        truncated = stop < end
+        index = bisect_right(starts, stop) - 1
+        return {
+            "text": text[start:stop],
+            "truncated": truncated,
+            "next_position": {"line": index + 1, "offset": stop - starts[index]} if truncated else None,
+            "note": ("Only part of the requested range is shown. Continue from next_position "
+                     "with the same end_line/end_offset; omitted end means end of file.") if truncated else "",
+        }
 
-    header = f"[{'; '.join(header_parts)}]"
-    return f"{header}\n{''.join(visible_lines)}"
+    if character_limit is None:
+        return render(end)
+    if character_limit < 1:
+        raise ValueError("character_limit must be positive")
+    candidate = render(min(end, start + character_limit))
+    if len(json.dumps(candidate, ensure_ascii=False)) <= character_limit:
+        return candidate
+    low, high = start, min(end - 1, start + character_limit)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if len(json.dumps(render(middle), ensure_ascii=False)) <= character_limit:
+            low = middle
+        else:
+            high = middle - 1
+    result = render(low)
+    if (low == start and start < end) or len(json.dumps(result, ensure_ascii=False)) > character_limit:
+        raise ValueError("Read budget cannot fit metadata and text; increase the output budget")
+    return result
 
 
 def edit_file(
     workspace: Path,
     relative_path: str,
     edits: list[Mapping[str, object]],
-) -> str:
+) -> dict[str, object]:
     """按顺序应用多个精确替换，并在全部成功后写入文件。"""
     if not isinstance(edits, list) or not edits:
         raise ValueError("edits must be a non-empty list")
@@ -467,10 +223,10 @@ def edit_file(
 
     diff = _build_unified_diff(relative_path, original_content, updated_content)
     file_path.write_text(updated_content, encoding="utf-8")
-    return diff
+    return {"path": Path(relative_path).as_posix(), "diff": diff}
 
 
-def create_file(workspace: Path, relative_path: str, content: str) -> str:
+def create_file(workspace: Path, relative_path: str, content: str) -> dict[str, object]:
     """创建新的 UTF-8 文本文件，并返回统一差异格式。"""
     workspace_root = _resolve_workspace(workspace)
     file_path = _resolve_workspace_path(workspace_root, relative_path)
@@ -482,128 +238,100 @@ def create_file(workspace: Path, relative_path: str, content: str) -> str:
     with file_path.open("x", encoding="utf-8") as new_file:
         new_file.write(content)
 
-    return _build_unified_diff(relative_path, "", content, created=True)
+    return {"path": Path(relative_path).as_posix(),
+            "diff": _build_unified_diff(relative_path, "", content, created=True)}
 
 
-def list_files(
-    workspace: Path,
-    relative_path: str = ".",
-    max_entries: int = 200,
-    max_depth: int = 2,
-    entry_type: str = "all",
-) -> str:
-    """列出工作区内有限深度的文件和目录。"""
-    if max_entries < 1:
-        raise ValueError("max_entries must be at least 1")
-    if max_depth < 1:
-        raise ValueError("max_depth must be at least 1")
-    if entry_type not in {"all", "files", "directories"}:
-        raise ValueError("entry_type must be all, files or directories")
-
+def list_files(workspace: Path, relative_path: str = ".") -> dict[str, object]:
+    """List all immediate files and directories, including hidden/ignored names."""
     workspace_root = _resolve_workspace(workspace)
     target_path = _resolve_workspace_path(workspace_root, relative_path)
     if not target_path.exists():
         raise FileNotFoundError(f"path does not exist: {relative_path}")
-    if not target_path.is_file() and not target_path.is_dir():
-        raise ValueError(f"path is not a file or directory: {relative_path}")
+    if not target_path.is_dir():
+        raise NotADirectoryError(f"path is not a directory: {relative_path}")
 
-    entries: list[str] = []
-    for entry_path, is_directory in _iter_workspace_entries(
-        workspace_root,
-        target_path,
-        max_depth,
-    ):
-        if entry_type == "directories" and not is_directory:
-            continue
-        if entry_type == "files" and is_directory:
-            continue
-        if len(entries) == max_entries:
-            entries.append(f"... truncated after {max_entries} entries")
-            break
-        display_path = entry_path.relative_to(workspace_root).as_posix()
-        entries.append(f"{display_path}/" if is_directory else display_path)
-
-    return "\n".join(entries) if entries else "No entries found."
+    entries = []
+    with os.scandir(target_path) as scanner:
+        for entry in scanner:
+            if entry.is_dir():
+                kind = "directory"
+            elif entry.is_file():
+                kind = "file"
+            else:
+                continue
+            entries.append({
+                "path": (target_path / entry.name).relative_to(workspace_root).as_posix(),
+                "type": kind,
+            })
+    entries.sort(key=lambda entry: (entry["type"] != "directory", entry["path"]))
+    return {"entries": entries}
 
 
 def find_files(
     workspace: Path,
     file_pattern: str,
     relative_path: str = ".",
-    max_results: int = 100,
-    include_hidden: bool = False,
-) -> str:
-    """按 glob 模式查找工作区内的文件路径。"""
-    if not file_pattern:
-        raise ValueError("file_pattern must not be empty")
-    if max_results < 1:
-        raise ValueError("max_results must be at least 1")
-
+    ignore_patterns: list[str] | None = None,
+) -> dict[str, object]:
+    """Find every matching file; only caller-supplied globs exclude paths."""
+    globs = _glob_arguments(file_pattern, ignore_patterns)
     workspace_root = _resolve_workspace(workspace)
     target_path = _resolve_workspace_path(workspace_root, relative_path)
     if not target_path.exists():
         raise FileNotFoundError(f"path does not exist: {relative_path}")
-    if not target_path.is_file() and not target_path.is_dir():
-        raise ValueError(f"path is not a file or directory: {relative_path}")
-
-    matches, truncated = _find_files_with_ripgrep(
-        workspace_root,
-        target_path,
-        file_pattern,
-        max_results,
-        include_hidden,
+    if not target_path.is_dir():
+        raise NotADirectoryError(f"path is not a directory: {relative_path}")
+    output = _run_ripgrep(target_path, ["--files", "--hidden", "--no-ignore",
+                                      "--null", "--path-separator", "/", *globs, "--", "."])
+    prefix = target_path.relative_to(workspace_root)
+    files = sorted(
+        (prefix / name.removeprefix("./")).as_posix()
+        for name in output.decode("utf-8").split("\0") if name
     )
-
-    if not matches:
-        return f"No files found matching {file_pattern!r}."
-    if truncated:
-        matches.append(f"... truncated after {max_results} files")
-    return "\n".join(matches)
+    return {"files": files}
 
 
 def search_text(
     workspace: Path,
     query: str,
     relative_path: str = ".",
-    max_results: int = 50,
     file_pattern: str = "*",
-    max_line_characters: int = 500,
-    max_output_characters: int = 20_000,
-) -> str:
-    """搜索固定字符串；长度参数按字符计，分别限制命中正文和总输出。"""
-    if not query:
-        raise ValueError("query must not be empty")
-    if max_results < 1:
-        raise ValueError("max_results must be at least 1")
-    if not file_pattern:
-        raise ValueError("file_pattern must not be empty")
-    if max_line_characters < 1:
-        raise ValueError("max_line_characters must be at least 1")
-    if max_output_characters < 512:
-        raise ValueError("max_output_characters must be at least 512")
-
+    ignore_patterns: list[str] | None = None,
+) -> dict[str, object]:
+    """Return every non-overlapping literal match as path/line/character offset."""
+    if not isinstance(query, str) or not query or "\n" in query or "\r" in query:
+        raise ValueError("query must be a non-empty single-line string")
+    globs = _glob_arguments(file_pattern, ignore_patterns)
     workspace_root = _resolve_workspace(workspace)
-    target_path = _resolve_workspace_path(workspace_root, relative_path)
-    if not target_path.exists():
+    target = _resolve_workspace_path(workspace_root, relative_path)
+    if not target.exists():
         raise FileNotFoundError(f"path does not exist: {relative_path}")
-    if not target_path.is_file() and not target_path.is_dir():
+    if not target.is_dir() and not target.is_file():
         raise ValueError(f"path is not a file or directory: {relative_path}")
+    directory = target if target.is_dir() else target.parent
+    target_argument = "." if target.is_dir() else target.name
+    output = _run_ripgrep(directory, ["--json", "--fixed-strings", "--case-sensitive",
+        "--hidden", "--no-ignore", "--text", "--encoding", "utf-8", "--path-separator", "/",
+        *globs, "--", query, target_argument])
 
-    matches, truncated = _search_with_ripgrep(
-        workspace_root,
-        target_path,
-        query,
-        file_pattern,
-        max_results,
-        max_line_characters,
-        max_output_characters,
-    )
+    def decode(value):
+        return value["text"] if "text" in value else base64.b64decode(value["bytes"]).decode("utf-8")
 
-    if not matches and not truncated:
-        return f"No matches found for {query!r}."[:max_output_characters]
-    if truncated:
-        matches.append(
-            f"... truncated after {len(matches)} matches (count or total character limit); "
-            "narrow the search or increase max_output_characters."
-        )
-    return "\n".join(matches)
+    matches = []
+    for record in output.splitlines():
+        event = json.loads(record)
+        if event["type"] != "match":
+            continue
+        data = event["data"]
+        path = (directory / decode(data["path"])).relative_to(workspace_root).as_posix()
+        line = decode(data["lines"]).encode("utf-8")
+        previous_byte = 0
+        character_offset = 0
+        for match in data["submatches"]:
+            byte_offset = match["start"]
+            character_offset += len(line[previous_byte:byte_offset].decode("utf-8"))
+            matches.append({"path": path, "line": data["line_number"], "offset": character_offset})
+            previous_byte = byte_offset
+    matches.sort(key=lambda match: (match["path"], match["line"], match["offset"]))
+    return {"matches": matches}

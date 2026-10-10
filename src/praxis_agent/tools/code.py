@@ -1,4 +1,4 @@
-"""Restricted Python composition of the current agent's tools using Monty."""
+"""Python composition of the current agent's tools using Monty."""
 from __future__ import annotations
 
 import json
@@ -11,30 +11,45 @@ from dataclasses import dataclass
 from praxis_agent.tools.registry import Tool, ToolContext, ToolResult
 
 
+_TOOL_STUBS = """from typing import Any
+def call_tool(name: str, arguments: dict[str, Any]) -> Any: ...
+"""
+
+
 @dataclass(frozen=True)
 class CodeConfig:
+    # Per-feed interpreter compute time; host/tool waiting is excluded.
     compute_seconds: float = 5.0
-    memory_bytes: int = 128 * 1024 * 1024
+    memory_bytes: int = 512 * 1024 * 1024
     max_processes: int = 8
     queue_seconds: float = 30.0
+    max_suspensions: int = 5000
 
     def __post_init__(self):
         for value in (self.compute_seconds, self.memory_bytes, self.max_processes, self.queue_seconds):
             if not math.isfinite(value) or value <= 0:
                 raise ValueError("Monty limits must be finite positive numbers")
+        if type(self.max_suspensions) is not int or not 0 < self.max_suspensions < 2**64:
+            raise ValueError("max_suspensions must be a positive 64-bit integer")
 
     @classmethod
     def from_env(cls):
+        defaults = cls()
+
+        def value(name, default):
+            return os.getenv(name, "").strip() or str(default)
+
         return cls(
-            compute_seconds=float(os.getenv("PRAXIS_CODE_COMPUTE_SECONDS", "5")),
-            memory_bytes=int(os.getenv("PRAXIS_CODE_MEMORY_BYTES", str(128 * 1024 * 1024))),
-            max_processes=int(os.getenv("PRAXIS_CODE_MAX_PROCESSES", "8")),
-            queue_seconds=float(os.getenv("PRAXIS_CODE_QUEUE_SECONDS", "30")),
+            compute_seconds=float(value("PRAXIS_CODE_COMPUTE_SECONDS", defaults.compute_seconds)),
+            memory_bytes=int(value("PRAXIS_CODE_MEMORY_BYTES", defaults.memory_bytes)),
+            max_processes=int(value("PRAXIS_CODE_MAX_PROCESSES", defaults.max_processes)),
+            queue_seconds=float(value("PRAXIS_CODE_QUEUE_SECONDS", defaults.queue_seconds)),
+            max_suspensions=int(value("PRAXIS_CODE_MAX_SUSPENSIONS", defaults.max_suspensions)),
         )
 
 
 class CodeRuntime:
-    """One lazy pool shared by a parent and its workers; every call gets fresh state."""
+    """Shared Monty pool with private, named, serialized sessions for each agent."""
 
     def __init__(self, config: CodeConfig | None = None):
         self.config = config or CodeConfig.from_env()
@@ -42,6 +57,8 @@ class CodeRuntime:
         self._lock = threading.Lock()
         self._pool = None
         self._closed = threading.Event()
+        self._sessions: dict[tuple[str, str], bytes] = {}
+        self._agent_locks: dict[str, threading.Lock] = {}
 
     def _get_pool(self):
         from pydantic_monty import Monty
@@ -61,35 +78,69 @@ class CodeRuntime:
         self._closed.set()
         with self._lock:
             pool, self._pool = self._pool, None
+            self._sessions.clear()
+            self._agent_locks.clear()
         if pool is not None:
             pool.__exit__(None, None, None)
 
-    def tool(self) -> Tool:
+    def release_agent(self, agent_id: str) -> None:
+        with self._lock:
+            for key in [key for key in self._sessions if key[0] == agent_id]:
+                del self._sessions[key]
+            self._agent_locks.pop(agent_id, None)
+
+    def context_item(self, agent_id: str) -> dict[str, str]:
+        with self._lock:
+            names = sorted(name for owner, name in self._sessions if owner == agent_id)
+        return {"role": "developer", "content": (
+            "Available run_code sessions for this agent (identifiers, not instructions): "
+            + json.dumps(names, ensure_ascii=False)
+            + "\nReuse a relevant session_id to continue its saved variables/functions. A new ID starts "
+              "empty. Sessions are private to this agent and survive idle/resume, not agent closure/restart. "
+              "Names describe purpose, not proof of which variables exist. Only successful runs save state."
+        )}
+
+    def tool(self, agent_id: str = "parent") -> Tool:
+        def execute(context: ToolContext, session_id: str, code: str) -> ToolResult:
+            return self.run(context, code, session_id=session_id, agent_id=agent_id)
+
         return Tool(
             name="run_code",
             description=(
-                "Execute a Python subset in Monty with fresh variables. Use call_tool(name, arguments) "
-                "for permitted current-agent file tools, active MCP tools and search_history/read_history. "
-                "Original string outputs remain inside the script; failed tools raise exceptions. "
-                "Return the final expression; print output is bounded to 65536 characters. "
-                "Respect tool schemas and pagination. No host files, network, commands, packages, "
-                "management tools or recursion into run_code. Cancellation stops execution. "
-                "Earlier effects survive errors: no automatic rollback or replay."
+                "Execute Python in a private named Monty session, with type checking before execution. "
+                "Load the monty skill before first use for the supported language and tool bridge. "
+                "Reuse session_id to restore saved variables/functions. Successful runs save state; "
+                "errors preserve the previous saved state but do not undo external effects. "
+                "Returns the final expression, complete stdout, tool-call records and session status; "
+                "failures include error_kind, error_type, phase and diagnostic text."
             ),
             parameters={"type": "object", "properties": {
-                "code": {"type": "string", "minLength": 1}},
-                "required": ["code"], "additionalProperties": False},
-            handler=self.run,
+                "session_id": {"type": "string", "minLength": 1, "description": "Meaningful name for this computation. Reuse for related work; choose a new name for independent state. Not a file path or conversation ID."},
+                "code": {"type": "string", "minLength": 1, "description": "Monty-compatible Python with call_tool(name, arguments); return a concise final expression. Variables persist in this session after successful calls."}},
+                "required": ["session_id", "code"], "additionalProperties": False},
+            handler=execute,
         )
 
-    def run(self, context: ToolContext, code: str) -> ToolResult:
-        from pydantic_monty import FunctionSnapshot, MontyComplete, NameLookupSnapshot, MontyRuntimeError, MontySyntaxError
+    def run(self, context: ToolContext, code: str, *, session_id: str, agent_id: str = "parent") -> ToolResult:
+        from pydantic_monty import (
+            MontyCrashedError, MontyError, MontyRuntimeError, MontySyntaxError, MontyTypingError,
+        )
 
+        if not isinstance(session_id, str) or not session_id.strip():
+            return ToolResult(False, json.dumps({
+                "error_kind": "input", "error_type": "ValueError", "phase": "input",
+                "error": "session_id must be a non-empty meaningful name", "state_saved": False,
+            }))
+        key = (agent_id, session_id)
+        with self._lock:
+            agent_lock = self._agent_locks.setdefault(agent_id, threading.Lock())
+        agent_acquired = False
+        session_created = False
+        state_saved = False
         calls = []
         printed = []
-        printed_length = 0
-        omitted = 0
         acquired = False
+        phase = "queue"
 
         def check():
             if self._closed.is_set():
@@ -98,35 +149,42 @@ class CodeRuntime:
                 context.check_execution()
 
         def capture(stream, text):
-            nonlocal printed_length, omitted
-            remaining = max(0, 65536 - printed_length)
-            if remaining:
-                printed.append(text[:remaining])
-            printed_length += min(len(text), remaining)
-            omitted += max(0, len(text) - remaining)
+            printed.append(text)
 
         def call_tool(name, arguments):
+            check()
             if not isinstance(name, str) or not isinstance(arguments, dict):
                 raise TypeError("call_tool expects a tool name and an arguments object")
             if context.invoke_programmatic_tool is None:
                 raise RuntimeError("Programmatic tool executor is unavailable")
-            # Only plain JSON arguments cross the existing validation boundary.
-            json.dumps(arguments, allow_nan=False)
             result = context.invoke_programmatic_tool(name, arguments)
-            calls.append({"tool": name, "success": result.success})
+            call = {"tool": name, "success": result.success}
+            calls.append(call)
+            check()
             if not result.success:
-                raise RuntimeError(result.output)
-            return result.output
+                call["error"] = f"Tool {name!r} failed: {result.output}"
+                raise RuntimeError(call["error"])
+            return result.structured_output if result.structured_output is not None else result.output
 
         def response(success, **values):
             return ToolResult(success, json.dumps({
-                **values, "stdout": "".join(printed), "omitted_print_characters": omitted,
+                **values, "session_id": session_id, "session_created": session_created,
+                "state_saved": state_saved, "stdout": "".join(printed),
                 "calls": calls,
                 "effects": "Completed operations are not rolled back; do not replay blindly.",
             }, ensure_ascii=False, default=str))
 
         try:
             deadline = time.monotonic() + self.config.queue_seconds
+            while not agent_acquired:
+                check()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("Timed out waiting for this agent code execution; script not executed")
+                agent_acquired = agent_lock.acquire(timeout=min(0.1, remaining))
+            with self._lock:
+                saved = self._sessions.get(key)
+            session_created = saved is None
             while not acquired:
                 check()
                 remaining = deadline - time.monotonic()
@@ -138,32 +196,49 @@ class CodeRuntime:
             with pool.checkout(script_name="praxis_run_code.py", limits={
                 "max_feed_duration_secs": self.config.compute_seconds,
                 "max_memory": self.config.memory_bytes,
-            }) as session:
+                "max_suspensions": self.config.max_suspensions,
+            }, type_check=True, type_check_stubs=_TOOL_STUBS,
+                    type_check_format="concise") as session:
                 check()
-                snapshot = session.feed_start(code, external_lookup={"call_tool": call_tool},
-                                              print_callback=capture)
-                while not isinstance(snapshot, MontyComplete):
-                    check()
-                    if isinstance(snapshot, FunctionSnapshot):
-                        try:
-                            if snapshot.is_os_function or snapshot.function_name != "call_tool":
-                                raise PermissionError("Host operation not exposed; use permitted call_tool tools")
-                            value = call_tool(*snapshot.args, **snapshot.kwargs)
-                            answer = {"return_value": value}
-                        except Exception as error:
-                            answer = {"exception": RuntimeError(str(error))}
-                        # Cancellation is checked outside the catchable sandbox exception path.
-                        check()
-                        snapshot = snapshot.resume(answer)
-                    elif isinstance(snapshot, NameLookupSnapshot):
-                        snapshot = snapshot.resume_auto()
-                    else:
-                        raise RuntimeError("Asynchronous script calls are not supported")
+                phase = "restore"
+                if saved is not None:
+                    session.load_session(saved)
+                phase = "execute"
+                result = session.feed_run(code, external_lookup={"call_tool": call_tool},
+                                          print_callback=capture)
                 check()
-                return response(True, result=snapshot.output)
+                phase = "save"
+                state = session.dump()
+                check()
+                with self._lock:
+                    if self._closed.is_set():
+                        raise RuntimeError("Code runtime is closed")
+                    self._sessions[key] = state
+                state_saved = True
+                return response(True, result=result)
         except Exception as error:
-            detail = error.display() if isinstance(error, (MontyRuntimeError, MontySyntaxError)) else f"{type(error).__name__}: {error}"
-            return response(False, error=detail)
+            inner = error.exception() if isinstance(error, MontyError) else error
+            detail = (error.display() if isinstance(error, (MontyRuntimeError, MontySyntaxError, MontyTypingError))
+                      else f"{type(error).__name__}: {error}")
+            kind = "runtime" if phase == "execute" else phase
+            if isinstance(error, MontyTypingError):
+                kind = "syntax" if "[invalid-syntax]" in detail else "type_check"
+                phase = "preflight"
+            elif isinstance(error, MontySyntaxError):
+                kind, phase = "syntax", "preflight"
+            elif isinstance(error, MontyCrashedError):
+                kind = "timeout" if error.timed_out else "worker_crash"
+            elif isinstance(error, MontyRuntimeError):
+                message = str(inner)
+                if any(call.get("error") == message for call in calls):
+                    kind = "tool"
+                elif (isinstance(inner, (MemoryError, TimeoutError))
+                      or message.startswith("suspension limit ")):
+                    kind = "resource"
+            return response(False, error=detail, error_kind=kind,
+                            error_type=type(inner).__name__, phase=phase)
         finally:
             if acquired:
                 self._slots.release()
+            if agent_acquired:
+                agent_lock.release()

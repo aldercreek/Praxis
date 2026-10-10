@@ -413,7 +413,7 @@ class ConsoleRenderer:
             self._commit(
                 file_change_cell(
                     _string_argument(call.arguments, "relative_path"),
-                    result.output,
+                    result.structured_output["diff"] if result.structured_output is not None else result.output,
                     created=call.name == "create_file",
                 )
             )
@@ -531,8 +531,10 @@ def _exploration_item(
     path = _string_argument(arguments, "relative_path") or "."
     if name == "read_file":
         start = arguments.get("start_line", 1)
-        count = arguments.get("max_lines", 400)
-        return ExplorationItem("Read", f"{path} · 起始行 {start}，最多 {count} 行")
+        offset = arguments.get("start_offset", 0)
+        end_line = arguments.get("end_line")
+        end = "文件末尾" if end_line is None else f"{end_line}:{arguments.get("end_offset", 0)}（不含）"
+        return ExplorationItem("Read", f"{path} · {start}:{offset} → {end}")
     if name == "list_files":
         return ExplorationItem("List", path)
     if name == "find_files":
