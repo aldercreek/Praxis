@@ -40,10 +40,9 @@ class ContextPolicy:
     soft_ratio: float = 0.65
     hard_ratio: float = 0.80
     emergency_ratio: float = 0.92
+    recent_history_ratio: float = 0.25
     # 仅限制模型视图中的单条工具结果正文，完整历史仍保留原文。
     max_tool_output_chars: int = DEFAULT_BUDGETS["max_tool_output_chars"]
-    summary_target_tokens: int = DEFAULT_BUDGETS["summary_target_tokens"]
-    summary_max_output_tokens: int = DEFAULT_BUDGETS["summary_max_output_tokens"]
     max_file_read_chars: int = DEFAULT_BUDGETS["max_file_read_chars"]
     max_history_read_chars: int = DEFAULT_BUDGETS["max_history_read_chars"]
 
@@ -59,6 +58,8 @@ class ContextPolicy:
                 raise ValueError(f"{name} must be positive")
         if self.desired_output_tokens < 0:
             raise ValueError("desired_output_tokens must not be negative")
+        if not 0 < self.recent_history_ratio < 1:
+            raise ValueError("recent_history_ratio must be between 0 and 1")
         if not 0 < self.safety_ratio <= 1:
             raise ValueError("safety_ratio must be greater than 0 and at most 1")
         if not (

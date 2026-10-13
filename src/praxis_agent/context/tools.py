@@ -27,13 +27,14 @@ _MESSAGE_IDS_SCHEMA = {
 
 
 def _change(
-    context: ToolContext, action: str, message_ids: list[str], instructions: str = "",
+    context: ToolContext, action: str, message_ids: list[str], instructions: str | None = None,
+    summary: str | None = None,
 ) -> str:
     manager = context.context_manager
     if manager is None:
         raise ValueError("context management is unavailable")
     return manager.change_messages(
-        action, message_ids, instructions=instructions,
+        action, message_ids, instructions=instructions, summary=summary,
     )
 
 
@@ -42,9 +43,10 @@ def delete(context: ToolContext, message_ids: list[str]) -> str:
 
 
 def compress(
-    context: ToolContext, message_ids: list[str], instructions: str,
+    context: ToolContext, message_ids: list[str], instructions: str | None = None,
+    summary: str | None = None,
 ) -> str:
-    return _change(context, "compress", message_ids, instructions)
+    return _change(context, "compress", message_ids, instructions, summary)
 
 
 def create_context_tools(
@@ -76,8 +78,9 @@ def create_context_tools(
             name="compress",
             description=(
                 "Summarize selected user/assistant text, tool results or earlier summaries "
-                "in a separate model request. Specify message_ids and instructions describing "
-                "what to preserve or omit. Replaces the selected messages with one message "
+                "using exactly one of summary (your replacement text, no model request) or "
+                "instructions (what a separate summary model should preserve or omit). "
+                "Replaces the selected messages with one message "
                 "containing the summary. Returns its message_id and an operation_id. "
                 "The summary uses observable records, not reasoning. Reasoning attached "
                 "to fully selected assistant output groups is also removed from the view. "
@@ -93,11 +96,17 @@ def create_context_tools(
                         "type": "string", "minLength": 1,
                         "description": "What facts, constraints, evidence and unfinished work the summary must preserve; what may be omitted.",
                     },
+                    "summary": {
+                        "type": "string", "minLength": 1,
+                        "description": "Complete replacement summary, used directly without a summary-model request. Mutually exclusive with instructions.",
+                    },
                 },
-                "required": ["message_ids", "instructions"],
+                "required": ["message_ids"],
+                "oneOf": [{"required": ["instructions"]}, {"required": ["summary"]}],
                 "additionalProperties": False,
             },
             handler=compress,
+            strict=False,
         ),
         Tool(
             name="search_history",

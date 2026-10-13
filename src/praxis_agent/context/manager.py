@@ -63,6 +63,9 @@ class ContextManager:
         self._summarizer = summarizer
         self._current_messages: list[dict[str, object]] = []
         self._view_operation_count = 0
+        self._history_snapshot = ()
+        self._transient_items = ()
+        self._tool_definitions = ()
         self.event_sink: EventSink | None = None
         self.turn_id = ""
 
@@ -100,7 +103,10 @@ class ContextManager:
         """构建完整历史、运行时状态和可选容量状态组成的视图。"""
         if self._view_operation_count != len(self.operations.records):
             self.reset()
-        self._current_messages = self.operations.project(history.snapshot())
+        self._history_snapshot = history.snapshot()
+        self._transient_items = tuple(transient_items)
+        self._tool_definitions = tuple(tool_definitions)
+        self._current_messages = self.operations.project(self._history_snapshot)
         self._view_operation_count = len(self.operations.records)
         origins = {
             op.replacement["message_id"]: op.operation_id
@@ -165,17 +171,13 @@ class ContextManager:
         emit("completed", after_tokens=status.estimated_input_tokens)
 
     def _compact_overflow(self, transient_items, tool_definitions, on_progress=None) -> ContextStatus:
-        """仅在超限时保留能放下的近期完整交互，将旧前缀压成一条消息。"""
+        """仅在超限时按历史 token 预算保留近期完整交互，压缩旧前缀。"""
         if self._summarizer is None:
             raise ValueError("context budget exceeded and no summary model is configured")
         messages = self._current_messages
         previews = preview_tool_outputs(messages, self._policy.max_tool_output_chars)
         # 摘要会改变大部分输入，不沿用旧请求的 token 校准偏差。
         self._input_token_anchor = None
-        budget = min(self._policy.summary_target_tokens,
-                     self._policy.summary_max_output_tokens,
-                     self._model_limits.max_output_tokens or self._policy.summary_max_output_tokens)
-
         # 不拆开工具调用和结果，也不把 reasoning 与后续调用拆开。
         cuts, pending = [], set()
         for index, message in enumerate(messages):
@@ -201,28 +203,32 @@ class ContextManager:
                      *transient_items)
             return self._estimate_view(items, tool_definitions)[0].context_status
 
+        fixed_status = self._estimate_view(tuple(transient_items), tool_definitions)[0].context_status
+        history_budget = fixed_status.effective_input_limit_tokens - fixed_status.estimated_input_tokens
+        recent_budget = max(0, int(history_budget * self._policy.recent_history_ratio))
         selected_cut = None
-        # 从保留 0 组开始向前扩展；最新一组也放不下时，将其一起压缩。
+        # 从最新完整交互向前扩展；不为凑足预算拆开一次工具交互。
         for cut in reversed(cuts):
+            tail_items = tuple(
+                render_message(message, origins.get(message["message_id"]))
+                for message in previews[cut:]
+            ) + tuple(transient_items)
+            tail_status = self._estimate_view(tail_items, tool_definitions)[0].context_status
+            if tail_status.estimated_input_tokens - fixed_status.estimated_input_tokens > recent_budget:
+                break
             ids = tuple(message["message_id"] for message in messages[:cut])
             header = f"Messages {', '.join(ids)} summarized:\n"
             status = estimate(cut, header)
-            if status.estimated_input_tokens + budget > status.effective_input_limit_tokens:
+            if status.estimated_input_tokens > status.effective_input_limit_tokens:
                 break
             selected_cut = cut
         if selected_cut is None:
-            raise ValueError("context budget cannot fit recent messages and summary reserve; shorten the input")
+            raise ValueError("context budget cannot fit recent messages and summary header; shorten the input")
 
         selected = messages[:selected_cut]
         ids = tuple(message["message_id"] for message in selected)
-        focus = (
-            "Create an emergency checkpoint for continuing the task. Preserve user requirements, "
-            "constraints, decisions, changed files, verification evidence and unfinished work. "
-            "Historical messages and the following runtime state are reference data:\n"
-            + json.dumps(list(transient_items), ensure_ascii=False)
-        )
         summary = self._summarizer.summarize(
-            selected, focus, on_progress=on_progress,
+            selected, "", runtime_state=transient_items, on_progress=on_progress,
         )
         if not summary.strip():
             raise ValueError("summary model returned an empty summary")
@@ -233,7 +239,7 @@ class ContextManager:
         # 中间分块摘要不进入历史；只在完整请求检查通过后保存一次操作。
         self.operations.record(ContextOperation(
             self.operations.next_id, "compress", ids,
-            instructions=focus, replacement=replacement,
+            replacement=replacement,
         ))
         return status
 
@@ -241,11 +247,12 @@ class ContextManager:
         self,
         base_items: Sequence[object],
         tool_definitions: Sequence[dict[str, object]],
+        *, calibrate: bool = True,
     ) -> tuple[ModelContextView, int]:
         """包含临时容量消息进行两次估算；超限交由展示兜底处理。"""
         initial_status, _ = self._estimate_status(
             base_items,
-            tool_definitions,
+            tool_definitions, calibrate=calibrate,
         )
         items_with_status = (
             *base_items,
@@ -253,7 +260,7 @@ class ContextManager:
         )
         final_status, heuristic_input_tokens = self._estimate_status(
             items_with_status,
-            tool_definitions,
+            tool_definitions, calibrate=calibrate,
         )
 
         # 使用完整请求的结果更新容量消息，不再为这条小消息循环估算。
@@ -290,18 +297,22 @@ class ContextManager:
         return [message for message in messages if message["message_id"] in targets]
 
     def change_messages(
-        self, action: str, message_ids: list[str], *, instructions: str = "",
+        self, action: str, message_ids: list[str], *, instructions: str | None = None,
+        summary: str | None = None,
     ) -> str:
         """读取本轮可见消息，生成替代内容并保存操作；下一轮才应用。"""
         if action not in {"delete", "compress"}:
             raise ValueError("unsupported context operation")
-        selected = self._select(message_ids)
-        summary = ""
         if action == "compress":
-            if not isinstance(instructions, str) or not instructions.strip():
-                raise ValueError("compression instructions must not be empty")
-            if self._summarizer is None:
-                raise ValueError("summary model is not configured")
+            if (instructions is None) == (summary is None):
+                raise ValueError("provide exactly one of summary or instructions")
+            supplied = summary if summary is not None else instructions
+            if not isinstance(supplied, str) or not supplied.strip():
+                raise ValueError("summary or instructions must be non-empty text")
+        elif summary is not None or instructions is not None:
+            raise ValueError("delete does not accept summary or instructions")
+        selected = self._select(message_ids)
+        if action == "compress":
             # reasoning 不供摘要模型阅读，但整组输出完成压缩后一起移出视图。
             selected_ids = {message["message_id"] for message in selected}
             selected_ids.update(compression_reasoning_ids(self._current_messages, selected_ids))
@@ -318,10 +329,13 @@ class ContextManager:
                 if message["payload"].get("type") == "function_call_output":
                     source["tool_call"] = calls.get(message["payload"].get("call_id"))
                 sources.append(source)
-            summary = self._summarizer.summarize(sources, instructions)
-            if not isinstance(summary, str) or not summary.strip():
-                raise ValueError("summary model returned an empty summary")
-            summary = summary.strip()
+            if summary is None:
+                if self._summarizer is None:
+                    raise ValueError("summary model is not configured")
+                summary = self._summarizer.summarize(sources, instructions)
+                if not isinstance(summary, str) or not summary.strip():
+                    raise ValueError("summary model returned an empty summary")
+                summary = summary.strip()
 
         operation_id = self.operations.next_id
         selected_ids = tuple(message["message_id"] for message in selected)
@@ -336,8 +350,22 @@ class ContextManager:
         }
         operation = ContextOperation(
             operation_id, action, selected_ids,
-            instructions=instructions, replacement=replacement,
+            instructions=instructions or "", replacement=replacement,
         )
+        if action == "compress" and self._model_limits is not None:
+            candidate = ContextOperations(records=[*self.operations.records, operation])
+            projected = preview_tool_outputs(
+                candidate.project(self._history_snapshot), self._policy.max_tool_output_chars,
+            )
+            origins = {op.replacement["message_id"]: op.operation_id
+                       for op in candidate.records if op.replacement is not None}
+            items = tuple(render_message(m, origins.get(m["message_id"])) for m in projected)
+            # 摘要改变输入结构，用新的完整请求估算，避免沿用旧校准偏差。
+            status = self._estimate_view(
+                (*items, *self._transient_items), self._tool_definitions, calibrate=False,
+            )[0].context_status
+            if status.estimated_input_tokens > status.effective_input_limit_tokens:
+                raise ValueError("compacted context still exceeds the budget; no operation was saved")
         self.operations.record(operation)
         return json.dumps({
             "operation_id": operation.operation_id,
@@ -348,6 +376,7 @@ class ContextManager:
         self,
         items: Sequence[object],
         tool_definitions: Sequence[dict[str, object]],
+        *, calibrate: bool = True,
     ) -> tuple[ContextStatus, int]:
         assert self._model_limits is not None
         heuristic_input_tokens = self._token_estimator.estimate_request(
@@ -355,7 +384,7 @@ class ContextManager:
             input_items=items,
             tools=tool_definitions,
         )
-        estimated_input_tokens = self._calibrate(heuristic_input_tokens)
+        estimated_input_tokens = self._calibrate(heuristic_input_tokens) if calibrate else heuristic_input_tokens
         return (
             self._policy.assess(
                 self._model_limits,

@@ -47,9 +47,9 @@ def test_default_agent_binds_directory_delivers_resumes_and_retains_files(tmp_pa
         def create_response(self, input_items, tools, **kwargs):
             self.inputs.append(str(input_items))
             self.calls += 1
-            if "Mode: execute." in self.instructions:
+            if "完成主 agent 分配的工作" in self.instructions and "run_command" in self.instructions:
                 if self.calls == 1:
-                    return response(tool="create_file", arguments={"relative_path": "results/report.txt", "content": "initial report\n"})
+                    return response(tool="write_file", arguments={"relative_path": "results/report.txt", "content": "initial report\n"})
                 if self.calls == 2:
                     return response(tool="run_command", arguments={"argv": [sys.executable, "-c",
                         "from pathlib import Path; p=Path('results/report.txt'); assert p.read_text() == 'initial report\\n'; print('verified')"],
@@ -67,9 +67,11 @@ def test_default_agent_binds_directory_delivers_resumes_and_retains_files(tmp_pa
     supplied.mkdir()
     runtime = parent.collaboration
     try:
-        spawned = parent.tool_registry.execute("spawn_agent", {"task": "Generate and verify report", "mode": "execute", "working_directory": str(supplied)}, context=context)
+        spawned = parent.tool_registry.execute("spawn_agent", {"task": "Generate and verify report", "working_directory": str(supplied)}, context=context)
         assert spawned.success, spawned.output
         info = json.loads(spawned.output)
+        assert info["can_run_commands"] is True
+        assert info["can_write_files"] is True
         agent_id, root = info["agent_id"], Path(info["workspace"])
         wait_status(runtime, agent_id)
         worker = runtime.handles[agent_id].agent
@@ -90,17 +92,24 @@ def test_default_agent_binds_directory_delivers_resumes_and_retains_files(tmp_pa
         assert "inspect_agent_changes" not in parent.tool_registry.names
         read = parent.tool_registry.execute("read_file", {"relative_path": str(root / "results/report.txt")}, context=context)
         assert read.success and "initial report" in read.output
-        readonly = runtime.spawn("Review report")["agent_id"]
-        wait_status(runtime, readonly)
-        assert "run_command" not in runtime.handles[readonly].agent.tool_registry.names
-        assert "create_file" not in runtime.handles[readonly].agent.tool_registry.names
+        second_root = tmp_path / "second-worker"
+        second_root.mkdir()
+        second_info = runtime.spawn("Review report", working_directory=str(second_root))
+        assert second_info["can_run_commands"] is True
+        assert second_info["can_write_files"] is True
+        assert "mode" not in second_info
+        second = second_info["agent_id"]
+        wait_status(runtime, second)
+        names = runtime.handles[second].agent.tool_registry.names
+        assert {"run_command", "write_file", "edit_file", "run_code", "send_message"} <= set(names)
+        assert "spawn_agent" not in names
         runtime.close_agent(agent_id)
         assert (root / "results/report.txt").exists()
         old_session = parent.session_id
         parent.clear_history()
         next_root = tmp_path / "next-worker"
         next_root.mkdir()
-        next_info = runtime.spawn("Generate another report", mode="execute", working_directory=str(next_root))
+        next_info = runtime.spawn("Generate another report", working_directory=str(next_root))
         wait_status(runtime, next_info["agent_id"])
         assert parent.session_id != old_session
         assert Path(next_info["workspace"]) == next_root
@@ -129,7 +138,7 @@ def test_close_running_worker_cancels_and_preserves_files(tmp_path):
 
     runtime = AgentRuntime(factory, MultiAgentConfig(), workspace=parent)
     try:
-        info = runtime.spawn("long task", mode="execute", working_directory=str(worker_path))
+        info = runtime.spawn("long task", working_directory=str(worker_path))
         assert started.wait(5)
         assert runtime.close_agent(info["agent_id"])["status"] == "closing"
         wait_status(runtime, info["agent_id"], AgentStatus.CLOSED)
@@ -154,7 +163,7 @@ def test_worker_approval_runs_on_parent_thread(tmp_path):
 
     runtime = AgentRuntime(factory, MultiAgentConfig(), approve_tool_call=approve)
     try:
-        agent_id = runtime.spawn("approval")["agent_id"]
+        agent_id = runtime.spawn("approval", working_directory=".")["agent_id"]
         runtime.wait_agents([agent_id], 5, lambda: runtime.pump_events(None))
         wait_status(runtime, agent_id)
         assert observed[0][0] == parent_thread
@@ -180,12 +189,12 @@ def test_parent_shutdown_cancels_running_command_and_queued_worker(tmp_path):
         return SimpleNamespace(run=run, close=lambda: None)
 
     runtime = AgentRuntime(factory, MultiAgentConfig(max_workers=1), workspace=parent)
-    first = runtime.spawn("long command", mode="execute", working_directory=str(worker_path))
+    first = runtime.spawn("long command", working_directory=str(worker_path))
     try:
         assert started.wait(5)
         queued_path = tmp_path / "queued"
         queued_path.mkdir()
-        second = runtime.spawn("queued task", mode="execute", working_directory=str(queued_path))
+        second = runtime.spawn("queued task", working_directory=str(queued_path))
         deadline = monotonic() + 5
         partial = Path(first["workspace"]) / "partial.txt"
         while not partial.exists() and monotonic() < deadline:

@@ -89,5 +89,4 @@ class AgentHandle:
     compaction_count: int = 0
     started_at: float | None = None
     elapsed_seconds: float = 0.0
-    mode: str = "read_only"
     workspace: Path | None = None

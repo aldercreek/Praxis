@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
+import json
 
 
 def item_payload(item: object) -> dict[str, object]:
@@ -201,4 +202,38 @@ class ContextOperations:
             if replacement_pending:
                 raise ValueError("cannot insert context replacement before pending tool results")
             messages = projected
+        # Successful direct summaries live in their replacement messages. Retain the
+        # protocol call/result pair, but show a reference instead of a second full copy.
+        replacements = {
+            op.operation_id: op.replacement["message_id"]
+            for op in self.records if op.action == "compress" and op.replacement is not None
+        }
+        applied_calls = {}
+        for payload in payloads:
+            if payload.get("type") != "function_call_output":
+                continue
+            try:
+                result = json.loads(payload.get("output", ""))
+                if not isinstance(result, dict) or result.get("success") is not True:
+                    continue
+                receipt = json.loads(result.get("output", ""))
+                mid = replacements.get(receipt.get("operation_id"))
+            except (ValueError, TypeError, AttributeError):
+                continue
+            if mid is not None:
+                applied_calls[payload.get("call_id")] = mid
+        for index, message in enumerate(messages):
+            payload = message["payload"]
+            mid = applied_calls.get(payload.get("call_id"))
+            if payload.get("type") != "function_call" or payload.get("name") != "compress" or mid is None:
+                continue
+            try:
+                arguments = json.loads(payload.get("arguments", ""))
+            except (ValueError, TypeError):
+                continue
+            if isinstance(arguments, dict) and "summary" in arguments:
+                arguments["summary"] = f"[Submitted summary saved as {mid}; original arguments remain in history.]"
+                messages[index] = {**message, "payload": {
+                    **payload, "arguments": json.dumps(arguments, ensure_ascii=False),
+                }}
         return messages

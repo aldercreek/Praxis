@@ -12,7 +12,6 @@ def _preview(message: dict[str, object], limit: int) -> dict[str, object]:
     # 即使正文只能展示极少字符，也保留执行状态和命令退出码。
     status = ""
     text = output
-    next_offset = limit
     try:
         result = json.loads(output)
     except (ValueError, TypeError):
@@ -34,21 +33,16 @@ def _preview(message: dict[str, object], limit: int) -> dict[str, object]:
             start = output.find(encoded)
             if start >= 0:
                 text = body
-                # 历史续读仍使用原始序列化文本的字符位置，不改变既有 offset 语义。
-                next_offset = start + 1 + len(json.dumps(body[:limit], ensure_ascii=False)[1:-1])
 
     if len(text) <= limit:
         return message
 
     message_id = message["message_id"]
     notice = (
-        f"\n[Tool result preview: {status}shown first {limit} characters "
-        f"of {len(text)}. Full original result is saved as {message_id}. "
-        f"Use read_history(message_id=\"{message_id}\", start_offset={next_offset}) "
-        "to continue, or search_history(query=\"...\") to search the original. "
-        "Manage context with compress/delete before requesting more large results.]"
+        f"[Tool result preview: {status}shown first {limit} characters "
+        f"of {len(text)}. Full original result is saved as {message_id}.]\n\n"
     )
-    return {**message, "payload": {**payload, "output": text[:limit] + notice}}
+    return {**message, "payload": {**payload, "output": notice + text[:limit]}}
 
 
 def preview_tool_outputs(

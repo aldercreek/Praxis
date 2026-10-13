@@ -1,9 +1,10 @@
+import json
 from pathlib import Path
 
 import pytest
 
 from praxis_agent.tools import (
-    create_file,
+    write_file,
     edit_file,
     find_files,
     list_files,
@@ -14,46 +15,54 @@ from praxis_agent.tools import (
 
 def test_read_file_returns_utf8_text(tmp_path: Path) -> None:
     source_file = tmp_path / "notes.txt"
-    source_file.write_text("hello, Praxis\n", encoding="utf-8")
+    source_file.write_bytes("你好, Praxis\r\n".encode("utf-8"))
 
     content = read_file(tmp_path, "notes.txt")
 
-    assert content == "[lines 1-1 of 1]\nhello, Praxis\n"
+    assert content == {"text": "你好, Praxis\r\n", "truncated": False,
+                       "next_position": None, "note": ""}
 
 
 def test_read_file_returns_the_requested_line_range(tmp_path: Path) -> None:
     source_file = tmp_path / "notes.txt"
     source_file.write_text(
         "one\ntwo\nthree\nfour\n",
-        encoding="utf-8",
+        encoding="utf-8", newline="",
     )
 
-    content = read_file(tmp_path, "notes.txt", start_line=2, max_lines=2)
+    content = read_file(tmp_path, "notes.txt", start_line=2, end_line=3)
 
-    assert content == (
-        "[lines 2-3 of 4; next_start_line=4]\ntwo\nthree\n"
-    )
+    assert content == {"text": "two\nthree\n", "truncated": False,
+                       "next_position": None, "note": ""}
 
 
-def test_read_file_limits_the_number_of_requested_lines(tmp_path: Path) -> None:
+def test_read_file_rejects_invalid_ranges(tmp_path: Path) -> None:
     source_file = tmp_path / "notes.txt"
     source_file.write_text("content\n", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="max_lines must not exceed 400"):
-        read_file(tmp_path, "notes.txt", max_lines=401)
+    with pytest.raises(ValueError, match="line must be between"):
+        read_file(tmp_path, "notes.txt", end_line=401)
+    with pytest.raises(ValueError, match="end_line is required"):
+        read_file(tmp_path, "notes.txt", end_offset=1)
+    with pytest.raises(ValueError, match="must not precede"):
+        read_file(tmp_path, "notes.txt", start_offset=3, end_line=1, end_offset=2)
 
 
 def test_read_file_limits_a_single_long_line(tmp_path: Path) -> None:
     source_file = tmp_path / "notes.txt"
     source_file.write_text("x" * 20_001, encoding="utf-8")
 
-    content = read_file(tmp_path, "notes.txt")
-    header, visible_content = content.split("\n", 1)
-
-    assert header == (
-        "[lines 1-1 of 1; line 1 truncated at 16000 characters]"
-    )
-    assert visible_content == "x" * 16_000
+    content = read_file(tmp_path, "notes.txt", character_limit=16000)
+    assert len(json.dumps(content, ensure_ascii=False)) <= 16000
+    assert content["truncated"] is True
+    assert content["note"]
+    position = content["next_position"]
+    assert position == {"line": 1, "offset": len(content["text"])}
+    remainder = read_file(tmp_path, "notes.txt", start_line=position["line"],
+                          start_offset=position["offset"], character_limit=16000)
+    assert remainder["truncated"] is False
+    assert remainder["next_position"] is None
+    assert content["text"] + remainder["text"] == "x" * 20_001
 
 
 def test_read_file_reports_a_missing_file(tmp_path: Path) -> None:
@@ -78,7 +87,7 @@ def test_edit_file_applies_multiple_replacements(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    diff = edit_file(
+    result = edit_file(
         tmp_path,
         "config.txt",
         [
@@ -90,10 +99,7 @@ def test_edit_file_applies_multiple_replacements(tmp_path: Path) -> None:
     assert source_file.read_text(encoding="utf-8") == (
         "host=example.com\nport=443\n"
     )
-    assert "-host=localhost" in diff
-    assert "+host=example.com" in diff
-    assert "-port=8080" in diff
-    assert "+port=443" in diff
+    assert result == {"path": "config.txt"}
 
 
 def test_edit_file_leaves_file_unchanged_when_a_later_edit_fails(
@@ -119,32 +125,29 @@ def test_edit_file_leaves_file_unchanged_when_a_later_edit_fails(
     assert source_file.read_text(encoding="utf-8") == original_content
 
 
-def test_create_file_creates_parent_directories(tmp_path: Path) -> None:
-    diff = create_file(tmp_path, "src/example.py", "value = 1\n")
+def test_write_file_creates_parent_directories(tmp_path: Path) -> None:
+    result = write_file(tmp_path, "src/example.py", "value = 1\n")
 
     created_file = tmp_path / "src" / "example.py"
     assert created_file.read_text(encoding="utf-8") == "value = 1\n"
-    assert "--- /dev/null" in diff
-    assert "+++ b/src/example.py" in diff
-    assert "+value = 1" in diff
+    assert result == {"path": "src/example.py"}
 
 
-def test_create_file_does_not_overwrite_an_existing_file(tmp_path: Path) -> None:
+def test_write_file_overwrites_an_existing_file(tmp_path: Path) -> None:
     existing_file = tmp_path / "example.py"
     existing_file.write_text("original\n", encoding="utf-8")
 
-    with pytest.raises(FileExistsError, match="file already exists"):
-        create_file(tmp_path, "example.py", "replacement\n")
+    assert write_file(tmp_path, "example.py", "replacement\n") == {"path": "example.py"}
 
-    assert existing_file.read_text(encoding="utf-8") == "original\n"
+    assert existing_file.read_text(encoding="utf-8") == "replacement\n"
 
 
-def test_create_file_rejects_a_path_outside_the_workspace(tmp_path: Path) -> None:
+def test_write_file_rejects_a_path_outside_the_workspace(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
     with pytest.raises(ValueError, match="path must stay inside the workspace"):
-        create_file(workspace, "../outside.txt", "secret")
+        write_file(workspace, "../outside.txt", "secret")
 
     assert not (tmp_path / "outside.txt").exists()
 
@@ -163,10 +166,15 @@ def test_list_files_returns_sorted_relative_paths(tmp_path: Path) -> None:
 
     result = list_files(tmp_path)
 
-    assert result.splitlines() == ["a.py", "nested/", "nested/b.py"]
+    assert result == {"entries": [
+        {"path": ".venv", "type": "directory"},
+        {"path": "nested", "type": "directory"},
+        {"path": "package.egg-info", "type": "directory"},
+        {"path": "a.py", "type": "file"},
+    ]}
 
 
-def test_list_files_respects_max_depth(tmp_path: Path) -> None:
+def test_list_files_lists_only_the_requested_directory(tmp_path: Path) -> None:
     (tmp_path / "src" / "package").mkdir(parents=True)
     (tmp_path / "src" / "main.py").write_text("main\n", encoding="utf-8")
     (tmp_path / "src" / "package" / "module.py").write_text(
@@ -174,9 +182,12 @@ def test_list_files_respects_max_depth(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    result = list_files(tmp_path, max_depth=1)
+    result = list_files(tmp_path, "src")
 
-    assert result.splitlines() == ["src/"]
+    assert result == {"entries": [
+        {"path": "src/package", "type": "directory"},
+        {"path": "src/main.py", "type": "file"},
+    ]}
 
 
 def test_find_files_returns_sorted_matching_paths(tmp_path: Path) -> None:
@@ -193,26 +204,21 @@ def test_find_files_returns_sorted_matching_paths(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    result = find_files(tmp_path, "*.py")
+    result = find_files(tmp_path, "*.py", ignore_patterns=[".venv/"])
 
-    assert result.splitlines() == [
+    assert result["files"] == [
         "src/first.py",
         "src/package/second.py",
     ]
 
 
-def test_find_files_reports_truncated_results(tmp_path: Path) -> None:
+def test_find_files_returns_all_results_without_implicit_exclusions(tmp_path: Path) -> None:
     for file_name in ("c.py", "a.py", "b.py"):
         (tmp_path / file_name).write_text("content\n", encoding="utf-8")
 
-    result = find_files(tmp_path, "*.py", max_results=2)
-
-    lines = result.splitlines()
-    assert lines[-1] == "... truncated after 2 files"
-    matches = lines[:-1]
-    assert len(matches) == len(set(matches)) == 2
-    assert set(matches) <= {"a.py", "b.py", "c.py"}
-    assert matches == sorted(matches)
+    (tmp_path / ".hidden.py").write_text("content\n", encoding="utf-8")
+    result = find_files(tmp_path, "*.py")
+    assert result == {"files": [".hidden.py", "a.py", "b.py", "c.py"]}
 
 
 def test_find_files_requires_ripgrep(
@@ -250,7 +256,7 @@ def test_search_text_returns_path_line_and_content(tmp_path: Path) -> None:
         file_pattern="*.py",
     )
 
-    assert result.splitlines() == [
-        "src/first.py:2:needle = value",
-        "src/second.py:1:# needle",
-    ]
+    assert result == {"matches": [
+        {"path": "src/first.py", "line": 2, "offset": 0},
+        {"path": "src/second.py", "line": 1, "offset": 2},
+    ]}

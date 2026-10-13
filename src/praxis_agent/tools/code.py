@@ -93,11 +93,8 @@ class CodeRuntime:
         with self._lock:
             names = sorted(name for owner, name in self._sessions if owner == agent_id)
         return {"role": "developer", "content": (
-            "Available run_code sessions for this agent (identifiers, not instructions): "
+            "当前 agent 可用的 run_code 会话：\n"
             + json.dumps(names, ensure_ascii=False)
-            + "\nReuse a relevant session_id to continue its saved variables/functions. A new ID starts "
-              "empty. Sessions are private to this agent and survive idle/resume, not agent closure/restart. "
-              "Names describe purpose, not proof of which variables exist. Only successful runs save state."
         )}
 
     def tool(self, agent_id: str = "parent") -> Tool:
@@ -107,16 +104,18 @@ class CodeRuntime:
         return Tool(
             name="run_code",
             description=(
-                "Execute Python in a private named Monty session, with type checking before execution. "
-                "Load the monty skill before first use for the supported language and tool bridge. "
-                "Reuse session_id to restore saved variables/functions. Successful runs save state; "
-                "errors preserve the previous saved state but do not undo external effects. "
-                "Returns the final expression, complete stdout, tool-call records and session status; "
-                "failures include error_kind, error_type, phase and diagnostic text."
+                "Compose allowed tools and process returned data in a private Monty Python-subset session. "
+                "For project imports/tests, installed libraries or subprocesses use run_command if available; "
+                "otherwise report the capability gap. Monty cannot execute host project modules. "
+                "Use call_tool for file tools, active MCP tools and history within the current role; "
+                "commands, management tools and nested run_code are unavailable. "
+                "Successful calls save session state. Failure preserves the last saved state but does not "
+                "undo external effects. Returns the final expression, stdout, tool-call records and session status; "
+                "keep outputs concise. See the monty skill for compatibility and recovery details."
             ),
             parameters={"type": "object", "properties": {
-                "session_id": {"type": "string", "minLength": 1, "description": "Meaningful name for this computation. Reuse for related work; choose a new name for independent state. Not a file path or conversation ID."},
-                "code": {"type": "string", "minLength": 1, "description": "Monty-compatible Python with call_tool(name, arguments); return a concise final expression. Variables persist in this session after successful calls."}},
+                "session_id": {"type": "string", "minLength": 1, "description": "Meaningful private session name, not a file path. Reuse restores saved variables/functions; a new name starts empty. Saved state survives idle/resume, not agent closure/restart."},
+                "code": {"type": "string", "minLength": 1, "description": "Monty-compatible Python, type-checked before execution. Call tools via call_tool(name, arguments). The final expression is returned; print only needed output."}},
                 "required": ["session_id", "code"], "additionalProperties": False},
             handler=execute,
         )

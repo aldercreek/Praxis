@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 from praxis_agent.tools.command import run_command
 from praxis_agent.tools.filesystem import (
-    create_file,
+    write_file,
     edit_file,
     find_files,
     list_files,
@@ -38,8 +38,8 @@ _READ_FILE_PARAMETERS: dict[str, object] = {
         "relative_path": {"type": "string", "description": "Relative workspace path or absolute file path."},
         "start_line": {"type": "integer", "minimum": 1, "description": "One-based starting line, inclusive; defaults to 1."},
         "start_offset": {"type": "integer", "minimum": 0, "description": "Zero-based character offset within the starting line, including newline characters; defaults to 0."},
-        "end_line": {"type": ["integer", "null"], "minimum": 1, "description": "One-based ending line. Null with end_offset=null reads to EOF."},
-        "end_offset": {"type": ["integer", "null"], "minimum": 0, "description": "Exclusive character offset in the ending line. Supply both end fields or neither."},
+        "end_line": {"type": ["integer", "null"], "minimum": 1, "description": "One-based last line to read. Without end_offset, include this entire line and its line ending. Omit both end fields for EOF."},
+        "end_offset": {"type": ["integer", "null"], "minimum": 0, "description": "Exclusive character offset within end_line. Requires end_line. Omit/null to include the entire ending line."},
     },
     "required": ["relative_path"],
     "additionalProperties": False,
@@ -81,16 +81,16 @@ _EDIT_FILE_PARAMETERS: dict[str, object] = {
     "additionalProperties": False,
 }
 
-_CREATE_FILE_PARAMETERS: dict[str, object] = {
+_WRITE_FILE_PARAMETERS: dict[str, object] = {
     "type": "object",
     "properties": {
         "relative_path": {
             "type": "string",
-            "description": "New file path, relative to the workspace root.",
+            "description": "File path to create or completely overwrite, relative to the workspace root.",
         },
         "content": {
             "type": "string",
-            "description": "Complete UTF-8 text content for the new file.",
+            "description": "Complete replacement UTF-8 text content. Existing content is overwritten.",
         },
     },
     "required": ["relative_path", "content"],
@@ -144,7 +144,7 @@ _RUN_COMMAND_PARAMETERS: dict[str, object] = {
             "minItems": 1,
             "description": (
                 "Command and arguments as separate strings. "
-                "Do not use shell syntax such as pipes or redirects."
+                "No implicit shell expansion. For pipes or redirects explicitly invoke an available shell with its command argument."
             ),
         },
         "relative_path": {
@@ -158,7 +158,7 @@ _RUN_COMMAND_PARAMETERS: dict[str, object] = {
             "type": "integer",
             "minimum": 1,
             "maximum": 120,
-            "description": "Execution timeout in seconds, default 60, maximum 120; independent of model context size.",
+            "description": "Execution timeout in seconds, from 1 to 120; use 60 for ordinary commands.",
         },
     },
     "required": ["argv", "relative_path", "timeout_seconds"],
@@ -430,12 +430,10 @@ def create_default_registry(policy: ContextPolicy | None = None, *,
         Tool(
             name="read_file",
             programmatic=True,
-            description=("Read a UTF-8 file range as structured text/truncated/next_position/note. "
-                         "Positions use one-based lines and zero-based character offsets (including line endings); "
-                         "start inclusive, end exclusive. Omit both end fields or pass null for EOF. "
-                         "Model reads are bounded: continue from next_position with the same endpoint. "
-                         "Programmatic reads return the entire requested range as an object. "
-                         "truncated=false means the requested range is complete, not necessarily the whole file."),
+            description=("Read UTF-8 file text. Use start_line/end_line for an inclusive whole-line range; "
+                         "offsets are optional for precise character ranges. Returns text, truncated, next_position and note. "
+                         "Model previews have a character budget; continue from next_position with the same endpoint. "
+                         "Programmatic calls receive the complete requested range. A complete range may be only part of a file."),
             parameters=_READ_FILE_PARAMETERS,
             handler=read_with_limits,
             strict=False,
@@ -448,7 +446,9 @@ def create_default_registry(policy: ContextPolicy | None = None, *,
             programmatic=True,
             description=(
                 "Apply multiple exact text replacements to one existing "
-                "UTF-8 workspace file in a single all-or-nothing edit. Returns a path/diff object."
+                "UTF-8 workspace file in a single all-or-nothing edit. Use the shortest old_text that matches uniquely; "
+                "avoid unchanged surrounding blocks. Batch edits to the same file. Edits apply in order, each "
+                "matching the content after earlier replacements. Use write_file for complete rewrites. Returns the path."
             ),
             parameters=_EDIT_FILE_PARAMETERS,
             handler=_inject_workspace(edit_file),
@@ -456,11 +456,11 @@ def create_default_registry(policy: ContextPolicy | None = None, *,
     )
     registry.register(
         Tool(
-            name="create_file",
+            name="write_file",
             programmatic=True,
-            description="Create a new UTF-8 workspace file; returns a path/diff object. Existing files are rejected.",
-            parameters=_CREATE_FILE_PARAMETERS,
-            handler=_inject_workspace(create_file),
+            description="Create or completely overwrite a UTF-8 file, creating parent directories as needed. Inspect existing content before rewriting; use edit_file for local changes. Returns the path, without echoing file content.",
+            parameters=_WRITE_FILE_PARAMETERS,
+            handler=_inject_workspace(write_file),
         )
     )
     registry.register(
@@ -513,7 +513,8 @@ def create_default_registry(policy: ContextPolicy | None = None, *,
             name="run_command",
             description=(
                 "Run a non-interactive command inside the workspace and "
-                "return its exit code, stdout, and stderr."
+                "return its exit code, stdout, and stderr. Use for actual project execution, tests and full Python. "
+                "Commands run in the foreground; descendant processes stop when the command ends or is cancelled."
             ),
             parameters=_RUN_COMMAND_PARAMETERS,
             handler=command_with_control,

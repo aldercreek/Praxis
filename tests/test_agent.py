@@ -26,13 +26,12 @@ from praxis_agent.planning import PlanStepStatus, RunStatus
 from praxis_agent.tools import create_default_registry
 
 
-def _empty_run_state_context(task: str) -> dict[str, object]:
+def _empty_run_state_context() -> dict[str, object]:
     return {
         "role": "developer",
         "content": "Current Praxis run state:\n" + json.dumps(
             {
                 "type": "praxis_run_state",
-                "original_task": task,
                 "plan": [],
                 "changed_files": [],
             },
@@ -110,7 +109,7 @@ def test_agent_returns_the_models_final_text(tmp_path: Path) -> None:
     assert model_client.inputs == [
         [
             {"role": "user", "content": "[message_id=m1]\ninspect repository"},
-            _empty_run_state_context("inspect repository"),
+            _empty_run_state_context(),
         ]
     ]
     assert len(model_client.tools[0]) == 12
@@ -132,7 +131,7 @@ def test_agent_returns_the_models_final_text(tmp_path: Path) -> None:
     assert event_sink.events[1].request_number == 1
     assert event_sink.events[1].input_items == (
         {"role": "user", "content": "[message_id=m1]\ninspect repository"},
-        _empty_run_state_context("inspect repository"),
+        _empty_run_state_context(),
     )
     assert event_sink.events[2].text == "Repository inspected."
     assert event_sink.events[3].response is not None
@@ -164,7 +163,7 @@ def test_agent_keeps_history_between_tasks(tmp_path: Path) -> None:
         {"role": "user", "content": "[message_id=m1]\nfirst task"},
         {**first_output_item, "content": "[message_id=m2]\nFirst response"},
         {"role": "user", "content": "[message_id=m3]\nfollow-up task"},
-        _empty_run_state_context("follow-up task"),
+        _empty_run_state_context(),
     ]
 
 
@@ -184,7 +183,7 @@ def test_agent_can_clear_history(tmp_path: Path) -> None:
     assert result == "Fresh response"
     assert model_client.inputs[1] == [
         {"role": "user", "content": "[message_id=m1]\nfresh task"},
-        _empty_run_state_context("fresh task"),
+        _empty_run_state_context(),
     ]
 
 
@@ -234,9 +233,13 @@ def test_agent_executes_a_tool_and_returns_its_result_to_model(
     tool_output = second_input[2]
     assert tool_output["type"] == "function_call_output"
     assert tool_output["call_id"] == "call-1"
-    assert json.loads(tool_output["output"].split("\n", 1)[1]) == {
-        "success": True,
-        "output": "[lines 1-1 of 1]\nhello\n",
+    result_payload = json.loads(tool_output["output"].split("\n", 1)[1])
+    assert result_payload["success"] is True
+    assert json.loads(result_payload["output"]) == {
+        "text": (tmp_path / "notes.txt").read_bytes().decode("utf-8"),
+        "truncated": False,
+        "next_position": None,
+        "note": "",
     }
     assert [type(event) for event in event_sink.events] == [
         TurnStarted,
@@ -268,7 +271,7 @@ def test_agent_can_execute_a_write_tool(tmp_path: Path) -> None:
                 function_calls=(
                     FunctionCall(
                         call_id="call-1",
-                        name="create_file",
+                        name="write_file",
                         arguments=(
                             '{"relative_path":"created.txt",'
                             '"content":"created by Praxis\\n"}'
