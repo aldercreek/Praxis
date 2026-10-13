@@ -1,0 +1,89 @@
+tests/test_agent.py
+  s_848905f309983e::t_2cdb52a385830e 236-242,274
+  s_848905f309983e::t_76f90e21bc3f0a 29,112,134,166,186
+src/praxis_agent/context/manager.py
+  s_848905f309983e::t_8b881846498481 174,206,208,210,212-218,222,226,231,242,250,255,263,300-301,306-313,332-338,353
+src/praxis_agent/tools/command.py
+  s_848905f309983e::t_70515d814853e8 1-2,16-28,84
+src/praxis_agent/context/tools.py
+  s_848905f309983e::t_404de61571b3fd 30-31,37,46-47,49,81-83,99-102,104-105,109
+src/praxis_agent/tools/filesystem.py
+  s_01c1b2890a376a::t_69a87758305420 204,216
+tests/test_command.py
+  s_848905f309983e::t_dec139f5cf0413 55-56
+  s_848905f309983e::t_70515d814853e8 1-2,57-71
+src/praxis_agent/context/operations.py
+  s_848905f309983e::t_b07e9eae208e9a 5,205-238
+src/praxis_agent/context/tool_output.py
+  s_848905f309983e::t_404de61571b3fd 42,45
+  s_848905f309983e::t_cb86456c01858f 43
+src/praxis_agent/prompts.py
+  s_848905f309983e::t_fadb3863be7097 61-64,66
+tests/test_summary_simplification.py
+  s_db65e522cf6283::t_5b39d73179c8b6 1-84,87,89,91-124
+tests/test_worker_execution.py
+  s_848905f309983e::t_24b734ddd8043d 52,70,73-74
+src/praxis_agent/tools/registry.py
+  s_848905f309983e::t_59c6495ef2bf19 16,41-42,84,89,93,147,161,433-436,449-451,459,461-463,516-517
+src/praxis_agent/context/model_context.py
+  s_848905f309983e::t_404de61571b3fd 1,10
+tests/test_prompts.py
+  s_848905f309983e::t_067db82c6b476b 19,21-22,24
+  s_848905f309983e::t_24b734ddd8043d 4,23
+src/praxis_agent/agent.py
+  s_848905f309983e::t_59c6495ef2bf19 453,534-537,541-544,547,550,562,574
+  s_848905f309983e::t_fadb3863be7097 470
+tests/test_filesystem.py
+  s_848905f309983e::t_dec139f5cf0413 1,7,18,22-23,30,33,35-36,39,43-48,55-65,90,102,128-129,133,136,140,142,145,150,169-174,177,185,187-190,207,209,215,219-221,259-262
+src/praxis_agent/builtin_skills/monty/SKILL.md
+  s_848905f309983e::t_59c6495ef2bf19 3,5-11,15,23-24,31,40,42-45,52-53,58,62
+src/praxis_agent/tools/code.py
+  s_848905f309983e::t_59c6495ef2bf19 107-114,117-118
+src/praxis_agent/multi_agent/runtime.py
+  s_848905f309983e::t_59c6495ef2bf19 103,107-108,128-129,131-132
+tests/test_single_agent.py
+  s_848905f309983e::t_24b734ddd8043d 1-4,6-32,34-44,46-47
+  s_848905f309983e::t_fadb3863be7097 48-49,53-55
+src/praxis_agent/context/capacity.py
+  s_848905f309983e::t_404de61571b3fd 43,61-62
+tests/test_context_redesign.py
+  s_848905f309983e::t_95fd1c4315bd67 1-115,117-135,137-149
+tests/test_registry.py
+  s_848905f309983e::t_dec139f5cf0413 1,4-6,21,43-58,76,86-88
+src/praxis_agent/multi_agent/tools.py
+  s_848905f309983e::t_ff91afd5b8788b 55
+src/praxis_agent/terminal/renderer.py
+  s_01c1b2890a376a::t_866e1fcb77cd32 413
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.49-trip",
+  "base_commit_sha": "38dd435828b72abd4d053ada54a0cfe32ccd8069",
+  "prompts": {},
+  "sessions": {
+    "s_01c1b2890a376a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0d343-93a7-74f3-aaff-07a436d25308",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "wanjl <wanjl@trip.com>"
+    },
+    "s_848905f309983e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a12ad8-c4d2-7ca1-86b0-1176c8f492dd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "wanjl <wanjl@trip.com>"
+    },
+    "s_db65e522cf6283": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a12fd3-1be3-79b3-b9a5-7a86c3f61712",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "wanjl <wanjl@trip.com>"
+    }
+  }
+}
