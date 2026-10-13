@@ -1,4 +1,8 @@
+import json
 from pathlib import Path
+
+import pytest
+from jsonschema import ValidationError, validate
 
 from praxis_agent.planning import RunState
 from praxis_agent.tools import ToolContext, create_default_registry
@@ -14,7 +18,7 @@ def test_default_registry_contains_all_builtin_tools() -> None:
     assert registry.names == (
         "read_file",
         "edit_file",
-        "create_file",
+        "write_file",
         "list_files",
         "find_files",
         "search_text",
@@ -24,9 +28,6 @@ def test_default_registry_contains_all_builtin_tools() -> None:
         "compress",
         "search_history",
         "read_history",
-    )
-    assert registry.tools[0].description == (
-        "Read a bounded line range from a UTF-8 workspace file."
     )
     assert registry.requires_approval("run_command") is True
 
@@ -39,36 +40,22 @@ def test_registry_returns_model_tool_definitions() -> None:
     assert [definition["name"] for definition in definitions] == list(
         registry.names
     )
-    assert definitions[0] == {
-        "type": "function",
-        "name": "read_file",
-        "description": (
-            "Read a bounded line range from a UTF-8 workspace file."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "relative_path": {
-                    "type": "string",
-                    "description": "Path to read, relative to the workspace root or an absolute file path.",
-                },
-                "start_line": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "First one-based line to return.",
-                },
-                "max_lines": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 400,
-                    "description": "Maximum number of lines to return.",
-                },
-            },
-            "required": ["relative_path", "start_line", "max_lines"],
-            "additionalProperties": False,
-        },
-        "strict": True,
-    }
+    definition = definitions[0]
+    assert definition["type"] == "function"
+    assert definition["name"] == "read_file"
+    assert definition["description"]
+    assert definition["strict"] is False
+    schema = definition["parameters"]
+    for arguments in (
+        {"relative_path": "notes.txt"},
+        {"relative_path": "notes.txt", "start_line": 2, "end_line": 3},
+        {"relative_path": "notes.txt", "start_offset": 0, "end_line": None, "end_offset": None},
+    ):
+        validate(arguments, schema)
+    for arguments in ({}, {"relative_path": "notes.txt", "start_line": 0},
+                      {"relative_path": "notes.txt", "max_lines": 2}):
+        with pytest.raises(ValidationError):
+            validate(arguments, schema)
 
 
 def test_registry_returns_new_parameter_schema_copies() -> None:
@@ -81,14 +68,12 @@ def test_registry_returns_new_parameter_schema_copies() -> None:
 
     assert second_definitions[0]["parameters"]["required"] == [
         "relative_path",
-        "start_line",
-        "max_lines",
     ]
 
 
 def test_registry_executes_a_tool_with_its_workspace(tmp_path: Path) -> None:
     source_file = tmp_path / "notes.txt"
-    source_file.write_text("hello\n", encoding="utf-8")
+    source_file.write_bytes(b"hello\n")
     registry = create_default_registry()
 
     result = registry.execute(
@@ -98,7 +83,9 @@ def test_registry_executes_a_tool_with_its_workspace(tmp_path: Path) -> None:
     )
 
     assert result.success is True
-    assert result.output == "[lines 1-1 of 1]\nhello\n"
+    expected = {"text": "hello\n", "truncated": False, "next_position": None, "note": ""}
+    assert json.loads(result.output) == expected
+    assert result.structured_output == expected
 
 
 def test_registry_returns_an_error_for_unknown_tools(tmp_path: Path) -> None:

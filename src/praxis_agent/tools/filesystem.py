@@ -5,7 +5,6 @@ from bisect import bisect_right
 import shutil
 import subprocess
 from collections.abc import Mapping
-from difflib import unified_diff
 from pathlib import Path
 
 from praxis_agent.context.budgets import DEFAULT_BUDGETS
@@ -78,28 +77,6 @@ def _run_ripgrep(workspace: Path, arguments: list[str]) -> bytes:
     return result.stdout
 
 
-def _build_unified_diff(
-    relative_path: str,
-    original_content: str,
-    updated_content: str,
-    *,
-    created: bool = False,
-) -> str:
-    """为修改或新建的文件生成 Git 风格的差异文本。"""
-    display_path = Path(relative_path).as_posix()
-    before_path = "/dev/null" if created else f"a/{display_path}"
-    diff = "".join(
-        unified_diff(
-            original_content.splitlines(keepends=True),
-            updated_content.splitlines(keepends=True),
-            fromfile=before_path,
-            tofile=f"b/{display_path}",
-        )
-    )
-    # 新建空文件时 difflib 不会生成变更块，因此至少保留文件头信息。
-    return diff or f"--- {before_path}\n+++ b/{display_path}\n"
-
-
 def read_file(
     workspace: Path,
     relative_path: str,
@@ -135,8 +112,10 @@ def read_file(
     start = position(start_line, start_offset)
     if end_line is None and end_offset is None:
         end = len(text)
-    elif end_line is None or end_offset is None:
-        raise ValueError("end_line and end_offset must both be supplied or both omitted/null")
+    elif end_line is None:
+        raise ValueError("end_line is required when end_offset is supplied")
+    elif end_offset is None:
+        end = position(end_line, 0) + len(lines[end_line - 1])
     else:
         end = position(end_line, end_offset)
     if end < start:
@@ -221,25 +200,20 @@ def edit_file(
     if updated_content == original_content:
         raise ValueError("edits must produce a file change")
 
-    diff = _build_unified_diff(relative_path, original_content, updated_content)
     file_path.write_text(updated_content, encoding="utf-8")
-    return {"path": Path(relative_path).as_posix(), "diff": diff}
+    return {"path": Path(relative_path).as_posix()}
 
 
-def create_file(workspace: Path, relative_path: str, content: str) -> dict[str, object]:
-    """创建新的 UTF-8 文本文件，并返回统一差异格式。"""
+def write_file(workspace: Path, relative_path: str, content: str) -> dict[str, object]:
+    """创建或完整重写 UTF-8 文本文件，并返回文件路径。"""
     workspace_root = _resolve_workspace(workspace)
     file_path = _resolve_workspace_path(workspace_root, relative_path)
-    if file_path.exists():
-        raise FileExistsError(f"file already exists: {relative_path}")
 
     file_path.parent.mkdir(parents=True, exist_ok=True)
-    # 独占创建模式可以防止在存在性检查后误覆盖其他进程刚创建的文件。
-    with file_path.open("x", encoding="utf-8") as new_file:
+    with file_path.open("w", encoding="utf-8") as new_file:
         new_file.write(content)
 
-    return {"path": Path(relative_path).as_posix(),
-            "diff": _build_unified_diff(relative_path, "", content, created=True)}
+    return {"path": Path(relative_path).as_posix()}
 
 
 def list_files(workspace: Path, relative_path: str = ".") -> dict[str, object]:

@@ -1,3 +1,5 @@
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -50,3 +52,20 @@ def test_run_command_rejects_a_directory_outside_workspace(
 def test_run_command_rejects_an_invalid_timeout(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="between 1 and 120"):
         run_command(tmp_path, [sys.executable, "--version"], ".", 121)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows executable search order")
+def test_run_command_honors_path_without_overriding_explicit_interpreter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = tmp_path / "selected environment"
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(environment)], check=True)
+    monkeypatch.setenv("PATH", str(environment / "Scripts") + os.pathsep + os.environ["PATH"])
+    argv = ["python", "-c", "import sys; print(sys.prefix)"]
+
+    result = run_command(tmp_path, argv, timeout_seconds=10)
+    assert f"stdout:\n{environment}\n" in result
+    assert argv == ["python", "-c", "import sys; print(sys.prefix)"]
+
+    explicit = run_command(tmp_path, [sys.executable, *argv[1:]], timeout_seconds=10)
+    assert f"stdout:\n{sys.prefix}\n" in explicit

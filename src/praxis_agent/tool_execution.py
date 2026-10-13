@@ -253,7 +253,7 @@ class ToolCallExecutor:
         result: ToolResult,
     ) -> ToolResult:
         """发布工具调用的最终事件，并原样返回结果。"""
-        if result.success and function_call.name in {"create_file", "edit_file"}:
+        if result.success and function_call.name in {"write_file", "edit_file"}:
             path = json.loads(function_call.arguments).get("relative_path")
             if isinstance(path, str):
                 self.context.run_state.record_changed_file(path)

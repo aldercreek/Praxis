@@ -30,7 +30,7 @@ def test_binds_supplied_directory_without_copying_and_keeps_it_on_close(tmp_path
 
     runtime = AgentRuntime(factory, MultiAgentConfig(), workspace=parent)
     try:
-        info = runtime.spawn("Process prepared data", mode="execute", working_directory="../worker")
+        info = runtime.spawn("Process prepared data", working_directory="../worker")
         assert Path(info["workspace"]) == worker
         assert finished.wait(5)
     finally:
@@ -49,7 +49,7 @@ def test_invalid_directory_does_not_create_a_worker_or_files(tmp_path):
     try:
         for directory in ("", "missing", "file.txt", None):
             with pytest.raises(ValueError, match="working_directory"):
-                runtime.spawn("task", mode="execute", working_directory=directory)
+                runtime.spawn("task", working_directory=directory)
         assert runtime.handles == {}
         assert not (tmp_path / "missing").exists()
     finally:
@@ -69,7 +69,7 @@ def test_absolute_deliveries_from_multiple_directories_remain_readable(tmp_path)
         assert read.success and name in read.output
         listing = registry.execute("list_files", {"relative_path": str(directory)}, context=context)
         assert listing.success and "report.txt" in listing.output
-        write = registry.execute("create_file", {"relative_path": str(directory / "bad.txt"), "content": "bad"}, context=context)
+        write = registry.execute("write_file", {"relative_path": str(directory / "bad.txt"), "content": "bad"}, context=context)
         assert not write.success and not (directory / "bad.txt").exists()
 
 

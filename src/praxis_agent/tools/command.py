@@ -1,3 +1,5 @@
+import os
+import shutil
 import subprocess
 import tempfile
 from collections.abc import Callable
@@ -9,6 +11,19 @@ from praxis_agent.tools.processes import CommandProcess
 
 _DEFAULT_TIMEOUT_SECONDS = 60
 _MAX_TIMEOUT_SECONDS = 120
+
+
+def _resolve_command_argv(argv: list[str]) -> list[str]:
+    executable = Path(argv[0])
+    if os.name == "nt" and not executable.drive and executable.name == argv[0]:
+        # CreateProcess searches the parent executable's directory before PATH.
+        # A virtualenv Python may therefore launch its base interpreter even when
+        # PATH selects another environment. Resolve bare names before spawning;
+        # explicit executable paths keep their original meaning.
+        resolved = shutil.which(argv[0])
+        if resolved is not None:
+            return [str(Path(resolved).resolve()), *argv[1:]]
+    return list(argv)
 
 
 def _resolve_working_directory(
@@ -66,7 +81,7 @@ def run_command(
     # Disk-backed output also avoids hanging on inherited pipes after the direct
     # child exits. Commands are foreground jobs; detached descendants are cleaned up.
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
-        command = CommandProcess(argv, cwd=working_directory, stdin=subprocess.DEVNULL,
+        command = CommandProcess(_resolve_command_argv(argv), cwd=working_directory, stdin=subprocess.DEVNULL,
                                  stdout=out, stderr=err, shell=False)
         try:
             deadline = monotonic() + timeout_seconds

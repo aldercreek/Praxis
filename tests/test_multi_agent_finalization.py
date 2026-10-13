@@ -28,9 +28,9 @@ def test_parent_rejects_early_answer_and_reads_results_before_finishing(tmp_path
         return SimpleNamespace(run=run, close=lambda: None)
 
     runtime = AgentRuntime(factory, MultiAgentConfig(max_workers=1))
-    first = runtime.spawn("Verify the value")["agent_id"]
+    first = runtime.spawn("Verify the value", working_directory=".")["agent_id"]
     assert started.wait(5)
-    second = runtime.spawn("Check the citation")["agent_id"]
+    second = runtime.spawn("Check the citation", working_directory=".")["agent_id"]
 
     class Model:
         def create_response(self, input_items, tools, **kwargs):

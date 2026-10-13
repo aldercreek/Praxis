@@ -52,7 +52,7 @@ from praxis_agent.tools import (
 from praxis_agent.multi_agent.models import ExecutionControl, MultiAgentConfig
 from praxis_agent.multi_agent.runtime import AgentRuntime
 from praxis_agent.multi_agent.tools import (
-    PARENT_INSTRUCTIONS, WORKER_INSTRUCTIONS, READ_ONLY_INSTRUCTIONS, EXECUTE_INSTRUCTIONS,
+    PARENT_INSTRUCTIONS, WORKER_INSTRUCTIONS,
     register_parent_tools, register_worker_tools,
 )
 
@@ -450,6 +450,7 @@ def create_default_agent(
     resume_latest: bool = False,
     resume_session_id: str | None = None,
     session_database_path: Path | None = None,
+    enable_multi_agent: bool = True,
 ) -> Agent:
     """使用环境配置和内置工具创建默认 Agent。"""
     if resume_latest and resume_session_id is not None:
@@ -463,11 +464,12 @@ def create_default_agent(
     )
 
     config = ModelConfig.from_env()
-    multi_agent_config = MultiAgentConfig.from_env()
     runtime_context = collect_runtime_context(workspace)
     skills = discover_skills(runtime_context.workspace_root)
-    base_instructions = build_instructions(runtime_context, skills=skills)
-    instructions = base_instructions + PARENT_INSTRUCTIONS
+    instructions = build_instructions(
+        runtime_context, skills=skills,
+        collaboration_instructions=PARENT_INSTRUCTIONS if enable_multi_agent else "",
+    )
     session_store = SQLiteSessionStore(session_database_path)
     history: list[object] = []
 
@@ -529,22 +531,23 @@ def create_default_agent(
         raise
     agent.close_callbacks = (release_mcp_tools, mcp.close, *agent.close_callbacks)
 
+    if not enable_multi_agent:
+        agent.restore_history(history)
+        return agent
+
     def create_worker(agent_id: str, control: ExecutionControl, sink: EventSink) -> Agent:
         handle = collaboration.handles[agent_id]
         # Skill discovery belongs to the session project, not a worker's output directory.
-        worker_instructions = (build_instructions(collect_runtime_context(handle.workspace),
-                                                 skills=skills)
-                               + WORKER_INSTRUCTIONS
-                               + (EXECUTE_INSTRUCTIONS if handle.mode == "execute" else READ_ONLY_INSTRUCTIONS))
+        worker_instructions = build_instructions(
+            collect_runtime_context(handle.workspace), skills=skills,
+            collaboration_instructions=WORKER_INSTRUCTIONS,
+        )
         registry = ToolRegistry()
-        allowed = {"read_file", "list_files", "find_files", "search_text",
-                   "update_plan", "delete", "compress", "search_history", "read_history"}
         for tool in create_default_registry(config.context_policy, check_execution=control.check).tools:
-            if handle.mode == "execute" or tool.name in allowed:
-                registry.register(tool)
+            registry.register(tool)
         registry.register(code_runtime.tool(agent_id))
         registry.register(create_skill_tool(skills, max_chars=config.context_policy.max_tool_output_chars))
-        release_worker_tools = mcp.register(registry, read_only=handle.mode == "read_only", check_execution=control.check)
+        release_worker_tools = mcp.register(registry, check_execution=control.check)
         register_worker_tools(registry, collaboration, agent_id)
         client = OpenAIModelClient(
             config, instructions=worker_instructions, execution_control=control,
@@ -556,7 +559,7 @@ def create_default_agent(
         return Agent(
             model_client=client, tool_registry=registry,
             workspace=handle.workspace, name=agent_id,
-            mcp_catalog=mcp.catalog() if handle.mode == "execute" else "",
+            mcp_catalog=mcp.catalog(),
             code_session_context=lambda: code_runtime.context_item(agent_id),
             clear_code_sessions=lambda: code_runtime.release_agent(agent_id),
             event_sink=sink, max_parallel_tools=config.max_parallel_tools,
@@ -568,7 +571,7 @@ def create_default_agent(
             close_callbacks=(lambda: code_runtime.release_agent(agent_id), release_worker_tools, client.close, summary.close),
         )
 
-    collaboration = AgentRuntime(create_worker, multi_agent_config, workspace=runtime_context.workspace_root,
+    collaboration = AgentRuntime(create_worker, MultiAgentConfig.from_env(), workspace=runtime_context.workspace_root,
                                  approve_tool_call=approve_tool_call)
     agent.collaboration = collaboration
     agent.receive_messages = lambda accept: collaboration.receive("parent", accept)
@@ -587,8 +590,7 @@ def _create_context_manager(
         summarizer=ModelContextSummarizer(
             summary_client,
             model_limits=config.model_limits,
-            target_tokens=config.context_policy.summary_target_tokens,
-            output_budget=config.context_policy.summary_max_output_tokens,
+            input_limit_tokens=config.context_policy.effective_input_limit(config.model_limits),
             safety_ratio=config.context_policy.safety_ratio,
         ),
     )

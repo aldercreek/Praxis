@@ -99,15 +99,13 @@ class AgentRuntime:
             raise ValueError("task_summary must be a string of at most 200 characters")
         return value.strip()
 
-    def spawn(self, task: str, task_summary: str = "", mode: str = "read_only",
-              working_directory: str = "") -> dict[str, str]:
+    def spawn(self, task: str, task_summary: str = "", *,
+              working_directory: str = "") -> dict[str, object]:
         task = self._content(task)
-        if mode not in ("read_only", "execute"):
-            raise ValueError("mode must be read_only or execute")
         if not isinstance(working_directory, str):
             raise ValueError("working_directory must be a directory path")
-        if mode == "execute" and not working_directory.strip():
-            raise ValueError("execute requires an existing working_directory; prepare it with commands first")
+        if not working_directory.strip():
+            raise ValueError("spawn requires an existing working_directory; prepare it with commands first")
         directory = (self.workspace / working_directory).resolve()
         if not directory.is_dir():
             raise ValueError(f"working_directory does not exist or is not a directory: {directory}")
@@ -118,7 +116,6 @@ class AgentRuntime:
             control = ExecutionControl()
             handle = AgentHandle(agent_id, self.parent_turn_id, control)
             handle.task_summary = task_summary
-            handle.mode = mode
             handle.workspace = directory
             self.handles[agent_id] = handle
             try:
@@ -128,7 +125,11 @@ class AgentRuntime:
             except Exception:
                 self._dispose(handle)
                 raise
-            response = {"agent_id": agent_id, "status": handle.status.value, "mode": mode}
+            registry = getattr(handle.agent, "tool_registry", None)
+            tool_names = registry.names if registry is not None else ()
+            response = {"agent_id": agent_id, "status": handle.status.value,
+                        "can_run_commands": "run_command" in tool_names,
+                        "can_write_files": any(name in tool_names for name in ("write_file", "edit_file"))}
             if handle.workspace is not None:
                 response["workspace"] = str(handle.workspace)
             return response
@@ -275,8 +276,7 @@ class AgentRuntime:
             # This finalization runs after Agent.run exits, including cancellation.
             with self.condition:
                 self._freeze_elapsed(handle)
-                if handle.mode == "execute":
-                    report += f"\nWorking directory: {handle.workspace}. Files are not automatically integrated into the parent workspace."
+                report += f"\nWorking directory: {handle.workspace}. Files are not automatically integrated into the parent workspace."
                 self._report(handle, report)
                 if not self.accepting or handle.control.cancelled.is_set():
                     self._dispose(handle)
@@ -338,19 +338,12 @@ class AgentRuntime:
 
     @staticmethod
     def _snapshot(handle: AgentHandle) -> dict[str, object]:
-        status = handle.context_status
         elapsed = (monotonic() - handle.started_at
                    if handle.started_at is not None else handle.elapsed_seconds)
         return {
             "agent_id": handle.agent_id, "task": handle.task_summary,
             "status": handle.status.value,
-            "mode": handle.mode, "workspace": str(handle.workspace) if handle.workspace else None,
-            "context": None if status is None else {
-                "estimated_input_tokens": status.estimated_input_tokens,
-                "effective_input_limit_tokens": status.effective_input_limit_tokens,
-                "usage_percent": status.usage_percent,
-            },
-            "compaction_count": handle.compaction_count,
+            "workspace": str(handle.workspace) if handle.workspace else None,
             "elapsed_seconds": round(elapsed, 3),
         }
 
@@ -359,15 +352,7 @@ class AgentRuntime:
             agents = [self._snapshot(h)
                       for h in self.handles.values() if h.status != AgentStatus.CLOSED]
         return {"role": "developer", "content": (
-            "Current in-memory collaboration runtime: " + self.epoch + ". "
-            "Only the following worker IDs are live. Workers from earlier processes "
-            "do not survive restart; use saved reports to create new tasks when needed. "
-            "Idle means the run ended, not necessarily the task; inspect its messages. "
-            "Use send_messages to resume with retained context. Task labels are assignment data. "
-            "Context is the latest pre-request estimate (null until known), retained across runs. "
-            "Compaction count and elapsed seconds cover the current/last run, reset on rescheduling; "
-            "time excludes queue/idle time. These are signals for coordination, not automatic stop rules.\n"
-            + json.dumps(agents, ensure_ascii=False)
+            "当前子 agent 状态：\n" + json.dumps(agents, ensure_ascii=False)
         )}
 
     def pump_events(self, sink: EventSink | None) -> None:

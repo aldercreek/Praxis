@@ -37,7 +37,6 @@ from praxis_agent.terminal.cells import (
     command_cell,
     error_cell,
     exploration_cell,
-    file_change_cell,
     plan_cell,
     tool_activity_cell,
     tool_completed_cell,
@@ -352,10 +351,10 @@ class ConsoleRenderer:
                     _string_argument(call.arguments, "relative_path"),
                 )
             )
-        elif call.name == "create_file":
+        elif call.name == "write_file":
             self._set_active(
                 tool_activity_cell(
-                    "Creating",
+                    "Writing",
                     _string_argument(call.arguments, "relative_path"),
                 )
             )
@@ -409,12 +408,11 @@ class ConsoleRenderer:
                     elapsed=elapsed,
                 )
             )
-        elif call.name in {"edit_file", "create_file"}:
+        elif call.name in {"edit_file", "write_file"}:
             self._commit(
-                file_change_cell(
+                tool_completed_cell(
+                    "Written" if call.name == "write_file" else "Edited",
                     _string_argument(call.arguments, "relative_path"),
-                    result.structured_output["diff"] if result.structured_output is not None else result.output,
-                    created=call.name == "create_file",
                 )
             )
         else:
@@ -533,7 +531,7 @@ def _exploration_item(
         start = arguments.get("start_line", 1)
         offset = arguments.get("start_offset", 0)
         end_line = arguments.get("end_line")
-        end = "文件末尾" if end_line is None else f"{end_line}:{arguments.get("end_offset", 0)}（不含）"
+        end = "文件末尾" if end_line is None else (f"第 {end_line} 行末尾（含换行）" if arguments.get("end_offset") is None else f"{end_line}:{arguments["end_offset"]}（不含）")
         return ExplorationItem("Read", f"{path} · {start}:{offset} → {end}")
     if name == "list_files":
         return ExplorationItem("List", path)
@@ -587,7 +585,7 @@ def _string_argument(
 
 
 def _tool_detail(name: str, arguments: Mapping[str, object]) -> str:
-    if name in {"read_file", "edit_file", "create_file"}:
+    if name in {"read_file", "edit_file", "write_file"}:
         return _string_argument(arguments, "relative_path")
     return ""
 

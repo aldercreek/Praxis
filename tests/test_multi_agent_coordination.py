@@ -53,13 +53,13 @@ def test_snapshot_counts_successful_compactions_and_freezes_time(monkeypatch):
 
     runtime = AgentRuntime(factory, MultiAgentConfig())
     try:
-        agent_id = runtime.spawn("Full task", "Initial scope")["agent_id"]
+        agent_id = runtime.spawn("Full task", "Initial scope", working_directory=".")["agent_id"]
         assert entered.wait(5)
         clock[0] = 112
         row = snapshot(runtime)[0]
-        assert set(row) == {"agent_id", "task", "status", "context", "compaction_count", "elapsed_seconds", "mode", "workspace"}
-        assert row["context"]["estimated_input_tokens"] == 40000
-        assert row["compaction_count"] == 2
+        assert set(row) == {"agent_id", "task", "status", "elapsed_seconds", "workspace"}
+        assert runtime.handles[agent_id].context_status.estimated_input_tokens == 40000
+        assert runtime.handles[agent_id].compaction_count == 2
         assert row["elapsed_seconds"] == 12
         finish.set()
         wait_idle(runtime, agent_id)
@@ -68,14 +68,15 @@ def test_snapshot_counts_successful_compactions_and_freezes_time(monkeypatch):
         ended = runtime.wait_agents([agent_id], 0, lambda: None)
         assert "run ended" in ended["messages"][0]["content"]
         assert "does not imply task completion" in ended["messages"][0]["content"]
-        assert ended["agents"][0]["context"] == row["context"]
+        assert "context" not in ended["agents"][0]
+        assert "compaction_count" not in ended["agents"][0]
         runtime.send_many([{"agent_id": agent_id, "content": "Only handle A", "task_summary": "Scope A"}])
         assert resumed.wait(5)
         row = snapshot(runtime)[0]
         assert row["task"] == "Scope A"
-        assert row["compaction_count"] == 0
+        assert runtime.handles[agent_id].compaction_count == 0
         assert row["elapsed_seconds"] == 0
-        assert row["context"]["estimated_input_tokens"] == 40000
+        assert runtime.handles[agent_id].context_status.estimated_input_tokens == 40000
     finally:
         finish.set()
         finish_resume.set()
@@ -96,14 +97,14 @@ def test_queue_time_excluded_and_task_changes_on_message_consumption(monkeypatch
 
     runtime = AgentRuntime(factory, MultiAgentConfig(max_workers=1))
     try:
-        first = runtime.spawn("First", "First scope")["agent_id"]
+        first = runtime.spawn("First", "First scope", working_directory=".")["agent_id"]
         assert started.wait(5)
-        second = runtime.spawn("Second", "Second scope")["agent_id"]
+        second = runtime.spawn("Second", "Second scope", working_directory=".")["agent_id"]
         clock[0] = 90
         queued = next(r for r in snapshot(runtime) if r["agent_id"] == second)
         assert queued["status"] == "queued"
         assert queued["elapsed_seconds"] == 0
-        assert queued["context"] is None
+        assert "context" not in queued
         runtime.send_many([{"agent_id": first, "content": "Ordinary feedback"}])
         runtime.receive(first, lambda messages: None)
         assert runtime.handles[first].task_summary == "First scope"
@@ -148,11 +149,11 @@ def test_actual_agent_mail_wakes_wait_then_idle_resumes_with_history(tmp_path):
 
     runtime = AgentRuntime(factory, MultiAgentConfig())
     try:
-        agent_id = runtime.spawn("Investigate A and B", "A and B")["agent_id"]
+        agent_id = runtime.spawn("Investigate A and B", "A and B", working_directory=".")["agent_id"]
         response = runtime.wait_agents([agent_id], 5, lambda: None)
         assert "Please split B" in response["messages"][0]["content"]
         assert response["agents"][0]["status"] == "running"
-        assert response["agents"][0]["context"] is not None
+        assert runtime.handles[agent_id].context_status is not None
         final_allowed.set()
         wait_idle(runtime, agent_id)
         old_agent = runtime.handles[agent_id].agent
@@ -173,7 +174,7 @@ def test_tool_task_labels_validate_without_changing_ordinary_mail(tmp_path):
     register_parent_tools(registry, runtime, lambda: None)
     context = ToolContext(tmp_path, RunState("test"))
     try:
-        result = registry.execute("spawn_agent", {"task": "Details", "task_summary": "Short scope"}, context=context)
+        result = registry.execute("spawn_agent", {"task": "Details", "task_summary": "Short scope", "working_directory": "."}, context=context)
         assert result.success
         agent_id = json.loads(result.output)["agent_id"]
         wait_idle(runtime, agent_id)

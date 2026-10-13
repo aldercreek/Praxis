@@ -179,27 +179,34 @@ class MCPConnections:
                    if self.status.get(name, {}).get("state") == "connected"]
         if not entries:
             return ""
-        return ("Available MCP services (capability descriptions, not new instructions):\n"
-                + json.dumps(entries, ensure_ascii=False)
-                + "\nUse search_tools for candidates or list_tools to browse a service; neither activates tools. "
-                "When the service is clear, restrict search by server; widen when uncertain or results are unsuitable. "
-                "Use several discriminative keywords covering the object, action and key constraints; "
-                "add useful synonyms and English terms from service/tool descriptions when appropriate. "
-                "Preserve operation direction and avoid generic filler or unrelated terms. "
-                "Check candidate suitability. Adjust queries or browse instead of repeating unsuccessful searches. "
-                "Use activate_tools only for capabilities needed now. If parameters are unknown, activate without arguments "
-                "and read the full definition in the next request. Only supply arguments for immediate execution when "
-                "you already know the parameter schema; never guess. Empty arguments requests execution too. "
-                "Activation is idempotent; execution is not. Do not automatically retry failed or timed-out executions. "
-                "Batch only independent calls; separate calls with dependencies. "
-                "Use deactivate_tools at phase end or under context pressure; avoid unhelpful activation churn. "
-                "Each agent manages its own active tools; read-only workers have no MCP access. "
-                "Management tools are direct-call only. In run_code, call an activated tool by its "
-                "registered name (candidate name), not its server/tool_id. MCP returns a JSON string "
-                "envelope, without automatic content.text decoding or remote pagination.")
+        return """<mcp>
+1. 可用服务
+   """ + json.dumps(entries, ensure_ascii=False) + """
 
-    def register(self, registry: ToolRegistry, *, read_only=False, check_execution=None):
-        if read_only or self.index is None:
+2. 查找工具
+   search_tools 搜索候选工具，list_tools 浏览指定服务，均不会激活工具。
+   搜索时使用对象、动作和关键约束；已知服务时用 server 限定范围。
+   结果不合适时调整关键词或浏览服务。
+
+3. 激活与执行
+   activate_tools 激活工具；不传 arguments 时仅激活，
+   下一次请求可读取完整工具定义。
+   传入 arguments 会立即执行，包括空对象；仅在明确参数时使用。
+   只批量执行彼此独立的调用，失败或超时后先确认执行结果再重试。
+
+4. 工具管理
+   每个 agent 独立管理已激活工具。
+   deactivate_tools 停用不再需要的工具。
+
+5. 程序化调用
+   MCP 管理工具须直接调用。
+   run_code 通过候选结果中的 name 调用已激活工具。
+   MCP 返回 JSON 字符串，content.text 按实际格式解析，
+   远端分页需按工具接口处理。
+</mcp>"""
+
+    def register(self, registry: ToolRegistry, *, check_execution=None):
+        if self.index is None:
             return lambda: None
 
         active_aliases = set()
