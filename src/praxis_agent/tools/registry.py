@@ -178,6 +178,7 @@ class ToolContext:
     check_execution: Callable[[], None] | None = None
     invoke_programmatic_tool: Callable[[str, dict], ToolResult] | None = None
     programmatic_call: bool = False
+    on_command_output: Callable[[str, str], None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -425,7 +426,8 @@ def create_default_registry(policy: ContextPolicy | None = None, *,
     def command_with_control(context: ToolContext, argv: list[str], relative_path: str = ".",
                              timeout_seconds: int = 60) -> str:
         return run_command(context.workspace, argv, relative_path, timeout_seconds,
-                           check_execution=check_execution)
+                           check_execution=context.check_execution or check_execution,
+                           on_output=context.on_command_output)
     registry.register(
         Tool(
             name="read_file",

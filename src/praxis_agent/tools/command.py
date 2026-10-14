@@ -1,3 +1,4 @@
+import codecs
 import os
 import shutil
 import subprocess
@@ -11,6 +12,13 @@ from praxis_agent.tools.processes import CommandProcess
 
 _DEFAULT_TIMEOUT_SECONDS = 60
 _MAX_TIMEOUT_SECONDS = 120
+
+
+def _open_output_reader(path: str):
+    # On Windows the writer uses delete-on-close. Reopening must share delete
+    # access too; cleanup then remains safe while a killed descendant is exiting.
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_TEMPORARY", 0)
+    return os.fdopen(os.open(path, flags), "rb", buffering=0)
 
 
 def _resolve_command_argv(argv: list[str]) -> list[str]:
@@ -58,6 +66,7 @@ def run_command(
     timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS,
     *,
     check_execution: Callable[[], None] | None = None,
+    on_output: Callable[[str, str], None] | None = None,
 ) -> str:
     """在工作区内运行非交互式命令，并返回退出码和输出。"""
     if not isinstance(argv, list) or not argv:
@@ -80,12 +89,35 @@ def run_command(
         check_execution()
     # Disk-backed output also avoids hanging on inherited pipes after the direct
     # child exits. Commands are foreground jobs; detached descendants are cleaned up.
-    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+    with tempfile.NamedTemporaryFile(buffering=0) as out, \
+            tempfile.NamedTemporaryFile(buffering=0) as err, \
+            _open_output_reader(out.name) as out_reader, \
+            _open_output_reader(err.name) as err_reader:
+        # Separate open handles have independent offsets; seeking a duplicated
+        # child handle while it is writing could overwrite earlier output.
+        readers = (("stdout", out_reader), ("stderr", err_reader))
+        decoders = {name: codecs.getincrementaldecoder("utf-8")(errors="replace")
+                    for name, _ in readers}
+
+        def drain(*, final=False):
+            if on_output is None:
+                return
+            for name, reader in readers:
+                while True:
+                    chunk = reader.read(65536)
+                    text = decoders[name].decode(chunk, final=final and not chunk)
+                    if text:
+                        on_output(name, text)
+                    if not final or not chunk:
+                        break
+
         command = CommandProcess(_resolve_command_argv(argv), cwd=working_directory, stdin=subprocess.DEVNULL,
                                  stdout=out, stderr=err, shell=False)
+        failure = None
         try:
             deadline = monotonic() + timeout_seconds
             while command.process.poll() is None:
+                drain()
                 if check_execution is not None:
                     check_execution()
                 if monotonic() >= deadline:
@@ -95,12 +127,20 @@ def run_command(
                 except subprocess.TimeoutExpired:
                     pass
             returncode = command.process.returncode
+        except Exception as error:
+            failure = error
         finally:
-            command.close()
+            try:
+                command.close()
+            finally:
+                drain(final=True)
         out.seek(0)
         err.seek(0)
         stdout = out.read().decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
         stderr = err.read().decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+        if failure is not None:
+            failure.args = (f"{failure}\nstdout:\n{stdout or '<empty>'}\nstderr:\n{stderr or '<empty>'}",)
+            raise failure
     return "\n".join(
         (
             f"exit_code: {returncode}",

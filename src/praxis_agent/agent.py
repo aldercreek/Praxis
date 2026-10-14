@@ -318,6 +318,7 @@ class Agent:
                     turn_id,
                     request_number,
                     context_view.items,
+                    context_status=context_view.context_status,
                 )
             )
             response = self.model_client.create_response(
@@ -572,7 +573,7 @@ def create_default_agent(
         )
 
     collaboration = AgentRuntime(create_worker, MultiAgentConfig.from_env(), workspace=runtime_context.workspace_root,
-                                 approve_tool_call=approve_tool_call)
+                                 approve_tool_call=approve_tool_call, live_output_sink=event_sink)
     agent.collaboration = collaboration
     agent.receive_messages = lambda accept: collaboration.receive("parent", accept)
     register_parent_tools(agent.tool_registry, collaboration, agent._pump_worker_events)

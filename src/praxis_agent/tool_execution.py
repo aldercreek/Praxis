@@ -12,6 +12,7 @@ from praxis_agent.events import (
     ToolCallPrepared,
     ToolFinished,
     ToolStarted,
+    ToolOutputDelta,
 )
 from praxis_agent.model import FunctionCall
 from praxis_agent.tools import ToolContext, ToolRegistry, ToolResult
@@ -124,7 +125,12 @@ class ToolCallExecutor:
         if isinstance(prepared, ToolResult):
             return self._finish(turn_id, function_call, prepared)
         self._start(turn_id, function_call)
-        return self._finish(turn_id, function_call, self._result(prepared))
+        try:
+            result = self._result(prepared)
+        finally:
+            if function_call.name == "run_command":
+                self.publish_event(ToolOutputDelta(turn_id, function_call.call_id, "", "", finished=True))
+        return self._finish(turn_id, function_call, result)
 
     @staticmethod
     def _result(invoke: Callable[[], str]) -> ToolResult:
@@ -179,7 +185,11 @@ class ToolCallExecutor:
 
         context = replace(self.context, invoke_tool=invoke_tool,
                           invoke_programmatic_tool=invoke_programmatic_tool,
-                          check_execution=self.check_execution)
+                          check_execution=self.check_execution,
+                          on_command_output=lambda stream, text: self.publish_event(ToolOutputDelta(
+                              turn_id, function_call.call_id, stream, text,
+                              command=" ".join(str(part) for part in arguments.get("argv", [])),
+                          )))
         prepared = self.tool_registry.prepare(function_call.name, arguments, context=context)
         if isinstance(prepared, ToolResult):
             return prepared

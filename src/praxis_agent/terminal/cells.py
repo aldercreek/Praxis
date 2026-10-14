@@ -95,6 +95,7 @@ def command_cell(
     stdout: str = "",
     stderr: str = "",
     elapsed: float | None = None,
+    error: str = "",
 ) -> RenderableType:
     title = Text("Running " if active else "Ran ", style="bold")
     title.append(command if len(command) <= 120 else command[:117] + "…")
@@ -104,6 +105,8 @@ def command_cell(
         title.append(f" · {elapsed:.1f}s")
 
     details: list[Text] = []
+    if error:
+        details.append(Text("  └ " + error, style="red"))
     if not active:
         visible_lines = _command_output_lines(stdout, stderr)
         if not visible_lines:
@@ -119,12 +122,15 @@ def command_cell(
             details.append(line)
 
     marker_style = None
-    if exit_code is not None:
+    if error:
+        marker_style = "bold red"
+    elif exit_code is not None:
         marker_style = "bold green" if exit_code == 0 else "bold red"
     return _block(
         title,
         details,
         active=active,
+        marker="✗" if error else "•",
         marker_style=marker_style,
     )
 

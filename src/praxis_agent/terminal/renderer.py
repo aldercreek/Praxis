@@ -27,6 +27,7 @@ from praxis_agent.events import (
     ToolCallPrepared,
     ToolFinished,
     ToolStarted,
+    ToolOutputDelta,
     TurnCompleted,
     TurnFailed,
     TurnStarted,
@@ -48,6 +49,7 @@ from praxis_agent.terminal.context import (
     context_activity,
     context_completed,
 )
+from praxis_agent.terminal.command_output import CommandOutputPreview
 
 
 _EXPLORATION_TOOLS = frozenset(
@@ -83,10 +85,18 @@ class ConsoleRenderer:
         self._plan_seen = False
         self._streamed_length = 0
         self._fence: str | None = None
+        self._command_output = CommandOutputPreview()
 
     def emit(self, event: AgentEvent) -> None:
         """Update the transcript and active area for one agent event."""
+        if isinstance(event, ToolOutputDelta):
+            # May arrive on a worker thread: no terminal writes or Live mutations.
+            self._command_output.update(event)
+            return
         if isinstance(event, ChildAgentEvent):
+            if isinstance(event.event, ToolOutputDelta):
+                from dataclasses import replace
+                self._command_output.update(replace(event.event, agent_id=event.agent_id))
             # Detailed worker events belong to tracing, never to the root text buffer.
             return
         if isinstance(event, (ChildAgentStatus, ChildAgentMessage)):
@@ -141,7 +151,7 @@ class ConsoleRenderer:
             self._set_phase("等待模型响应")
             self._streamed_length = 0
             self._fence = None
-            self._capacity = capacity_footer(event.input_items)
+            self._capacity = capacity_footer(event.context_status)
             self._assistant_buffer = ""
             self._assistant_committed = False
             self._request_has_text = False
@@ -216,6 +226,7 @@ class ConsoleRenderer:
                 self._commit(self._capacity)
 
     def _begin_turn(self) -> None:
+        self._command_output.clear()
         self._turn_started = monotonic()
         self._plan_seen = False
         self._tool_started.clear()
@@ -384,6 +395,16 @@ class ConsoleRenderer:
         if call.name == "update_plan" and result.success:
             return
         if not result.success:
+            if call.name == "run_command" and "\nstdout:\n" in result.output:
+                error, _, captured = result.output.partition("\nstdout:\n")
+                stdout, _, stderr = captured.rpartition("\nstderr:\n")
+                self._commit(command_cell(
+                    _display_command(call.arguments), active=False, elapsed=elapsed,
+                    stdout="" if stdout == "<empty>" else stdout,
+                    stderr="" if stderr == "<empty>" else stderr, error=error,
+                ))
+                self._restore_active_state()
+                return
             title = (
                 "Command not run"
                 if call.name == "run_command"
@@ -466,7 +487,8 @@ class ConsoleRenderer:
     def _live_content(self) -> RenderableType:
         now = monotonic()
         status = Text(f"{self._phase} · 本次 {now - self._phase_started:.0f}s · 总耗时 {now - self._turn_started:.0f}s", style="dim")
-        return Group(self._active, status, *([self._capacity] if self._capacity is not None else []))
+        return Group(self._active, *self._command_output.render(), status,
+                     *([self._capacity] if self._capacity is not None else []))
 
     def _clear_active(self) -> None:
         self._active = ""
@@ -486,7 +508,7 @@ class ConsoleRenderer:
         self._live = Live(
             "",
             console=self._console,
-            refresh_per_second=10,
+            refresh_per_second=5,
             transient=True,
             get_renderable=self._live_content,
         )

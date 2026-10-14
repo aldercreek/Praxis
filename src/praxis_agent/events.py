@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from time import monotonic
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
+    from praxis_agent.context.capacity import ContextStatus
     from praxis_agent.model import ModelResponse
     from praxis_agent.planning.plan import PlanStep
     from praxis_agent.tools import ToolResult
@@ -49,6 +51,7 @@ class ModelRequestStarted(AgentEvent):
 
     request_number: int
     input_items: tuple[object, ...] = ()
+    context_status: ContextStatus | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +112,19 @@ class ToolFinished(AgentEvent):
     call_id: str
     tool_name: str
     result: ToolResult
+
+
+@dataclass(frozen=True, slots=True)
+class ToolOutputDelta(AgentEvent):
+    """Display-only command output; never appended to model history."""
+
+    call_id: str
+    stream: str
+    text: str
+    command: str = ""
+    agent_id: str = ""
+    finished: bool = False
+    occurred_at: float = field(default_factory=monotonic)
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,6 +210,7 @@ __all__ = [
     "PlanUpdated",
     "ToolCallPrepared",
     "ToolFinished",
+    "ToolOutputDelta",
     "ToolStarted",
     "TurnCompleted",
     "TurnFailed",
