@@ -1,12 +1,12 @@
 """上下文工具的终端摘要；只读取事件，不参与上下文管理。"""
 
 import json
-import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 
 from rich.console import Group, RenderableType
 from rich.text import Text
 
+from praxis_agent.context.capacity import ContextStatus
 from praxis_agent.terminal.cells import tool_activity_cell, tool_completed_cell
 
 
@@ -93,34 +93,11 @@ def context_completed(
     return Group(tool_completed_cell(title), *lines)
 
 
-def capacity_footer(items: Sequence[object]) -> Text | None:
-    """从现有开发者容量消息读取数据，不新增事件或重复估算。"""
-    prefix = "Current Praxis context capacity (estimated):\n"
-    for item in reversed(items):
-        if not isinstance(item, Mapping) or item.get("role") != "developer":
-            continue
-        content = item.get("content")
-        if not isinstance(content, str) or not content.startswith(prefix):
-            continue
-        status = _json_object(content[len(prefix):])
-        used = status.get("estimated_input_tokens")
-        limit = status.get("effective_input_limit_tokens")
-        percent = status.get("usage_percent")
-        if not isinstance(used, int) or not isinstance(limit, int) or limit <= 0:
-            return None
-        if not isinstance(percent, (int, float)) or not math.isfinite(percent):
-            return None
-        pressure = status.get("pressure")
-        label, color = {
-            "normal": ("Normal", "cyan"),
-            "soft": ("Elevated", "yellow"),
-            "hard": ("High", "bold yellow"),
-            "emergency": ("Critical", "bold red"),
-        }.get(pressure, ("Unknown", "dim"))
-        line = Text("  Context ≈ ", style="dim", no_wrap=True, overflow="ellipsis")
-        line.append(f"{percent:.0f}%", style=color)
-        line.append(f" · {used / 1000:.1f}k / {limit / 1000:.1f}k tokens · ")
-        line.append(label, style=color)
-        line.append(" · last request")
-        return line
-    return None
+def capacity_footer(status: ContextStatus | None) -> Text | None:
+    """展示本次请求已有的容量估算，不解析模型提示词或重复计算。"""
+    if status is None:
+        return None
+    line = Text("  上下文占用 ≈ ", style="dim", no_wrap=True, overflow="ellipsis")
+    line.append(f"{status.usage_percent:g}%", style="cyan")
+    line.append(" · 最近请求")
+    return line

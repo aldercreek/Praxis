@@ -9,12 +9,13 @@ from threading import Condition
 from time import monotonic
 from typing import TYPE_CHECKING
 from uuid import uuid4
+from dataclasses import replace
 from pathlib import Path
 
 
 from praxis_agent.events import (
     AgentEvent, AssistantTextDelta, ChildAgentEvent, ChildAgentStatus, ChildAgentMessage, EventSink,
-    ContextCompaction, ModelRequestStarted, ToolFinished,
+    ContextCompaction, ModelRequestStarted, ToolFinished, ToolOutputDelta,
 )
 from praxis_agent.multi_agent.models import (
     AgentHandle, AgentMessage, AgentStatus, ExecutionControl,
@@ -34,6 +35,11 @@ class _WorkerEvents:
         self.handle = handle
 
     def emit(self, event: AgentEvent) -> None:
+        if isinstance(event, ToolOutputDelta) and self.runtime.live_output_sink is not None:
+            # This channel only updates a bounded display buffer. Approvals,
+            # model history and lifecycle events remain owned by the parent.
+            self.runtime.live_output_sink.emit(replace(event, agent_id=self.handle.agent_id))
+            return
         # Streaming text is private and needs no coordination lock or queue entry.
         if isinstance(event, AssistantTextDelta):
             return
@@ -54,11 +60,13 @@ class AgentRuntime:
 
     def __init__(self, factory: WorkerFactory, config: MultiAgentConfig, *,
                  workspace: Path | None = None,
-                 approve_tool_call: Callable | None = None) -> None:
+                 approve_tool_call: Callable | None = None,
+                 live_output_sink: EventSink | None = None) -> None:
         self.factory = factory
         self.config = config
         self.workspace = (workspace or Path.cwd()).resolve()
         self.approve_tool_call = approve_tool_call
+        self.live_output_sink = live_output_sink
         self.approvals: SimpleQueue = SimpleQueue()
         self.condition = Condition()
         self.handles: dict[str, AgentHandle] = {}
