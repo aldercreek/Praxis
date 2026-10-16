@@ -20,7 +20,7 @@ def test_model_config_loads_environment_values() -> None:
 def test_model_config_uses_ada_defaults() -> None:
     config = ModelConfig.from_env({"ADA_API_KEY": "secret-key"})
 
-    assert config.model == "gpt-5.6-terra-2026-07-09"
+    assert config.model == "auto(free)"
     assert (
         config.base_url
         == "https://ada-cli-go.ctripcorp.com/coding-plan/openai/v1"
@@ -36,7 +36,7 @@ def test_model_config_uses_defaults_for_empty_overrides() -> None:
         }
     )
 
-    assert config.model == "gpt-5.6-terra-2026-07-09"
+    assert config.model == "auto(free)"
     assert (
         config.base_url
         == "https://ada-cli-go.ctripcorp.com/coding-plan/openai/v1"

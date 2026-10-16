@@ -1,3 +1,4 @@
+import asyncio
 import json
 import sys
 from io import StringIO
@@ -12,8 +13,10 @@ from praxis_agent.events import ToolOutputDelta, ToolCallPrepared, ToolStarted, 
 from praxis_agent.model import FunctionCall, ModelResponse
 from praxis_agent.multi_agent.models import MultiAgentConfig
 from praxis_agent.multi_agent.runtime import AgentRuntime
-from praxis_agent.terminal.command_output import CommandOutputPreview
-from praxis_agent.terminal.renderer import ConsoleRenderer
+from textual.widgets import Static
+
+from praxis_agent.terminal.app import PraxisApp
+from praxis_agent.terminal.views import ViewEventSink, ViewStore, ToolBlock
 from praxis_agent.tools import ToolResult, create_default_registry, run_command
 
 
@@ -124,24 +127,26 @@ def test_worker_output_reaches_display_without_parent_pumping(tmp_path):
         return SimpleNamespace(run=run, close=lambda: None)
 
     runtime = AgentRuntime(factory, MultiAgentConfig(), workspace=tmp_path,
-                           live_output_sink=SimpleNamespace(emit=receive))
+                           live_output_sink=SimpleNamespace(emit_live=lambda e: receive(e) if isinstance(getattr(e, "event", None), ToolOutputDelta) else None))
     try:
         info = runtime.spawn("work", working_directory=".")
         # No pump_events call: the parent's thread may be busy executing a command.
         assert arrived.wait(2)
         assert events[0].agent_id == info["agent_id"]
-        assert events[0].text == "child progress"
+        assert events[0].event.text == "child progress"
     finally:
         release.set()
         runtime.shutdown(lambda: runtime.pump_events(None))
 
 
 def test_preview_is_bounded_and_worker_updates_do_not_write_terminal():
-    preview = CommandOutputPreview()
-    worker = Thread(target=lambda: [preview.update(ToolOutputDelta(
+    sink, store = ViewEventSink(), ViewStore()
+    worker = Thread(target=lambda: [sink.emit(ToolOutputDelta(
         "turn", "cmd", "stdout", f"line {i}\n", agent_id="worker")) for i in range(1000)])
     worker.start()
     worker.join()
+    sink.drain(store)
+    preview = store.get("worker")._command_output
     output = StringIO()
     console = Console(file=output, color_system=None, width=100)
     for block in preview.render():
@@ -153,34 +158,62 @@ def test_preview_is_bounded_and_worker_updates_do_not_write_terminal():
     assert preview.render() == []
 
 
-def test_terminal_refreshes_before_command_ends_and_shows_timeout_logs(tmp_path, monkeypatch):
-    monkeypatch.setenv("TERM", "xterm-256color")
-    capture = StringIO()
-    renderer = ConsoleRenderer(Console(file=capture, force_terminal=True, width=90, color_system=None))
-    code = "import os,time; os.write(1,b'LIVE_PROGRESS\\n'); time.sleep(1.2); os.write(2,b'last diagnostic\\n')"
-    arguments = {"argv": [sys.executable, "-u", "-c", code], "relative_path": ".", "timeout_seconds": 5}
-    visible_before_end = []
+def test_page_refreshes_before_command_ends_and_keeps_failure_logs(tmp_path):
+    async def exercise():
+        sink = ViewEventSink()
+        app = PraxisApp(sink)
+        code = """
+import time
+from pathlib import Path
+print('LIVE_PROGRESS', flush=True)
+deadline = time.monotonic() + 5
+while not Path('ui-ack').exists():
+    if time.monotonic() > deadline:
+        raise RuntimeError('UI did not display progress')
+    time.sleep(.02)
+print('last diagnostic', flush=True)
+"""
+        arguments = {"argv": [sys.executable, "-u", "-c", code], "relative_path": ".", "timeout_seconds": 8}
 
-    def receive(stream, text):
-        if "last diagnostic" in text:
-            visible_before_end.append("LIVE_PROGRESS" in capture.getvalue())
-        renderer.emit(ToolOutputDelta("demo", "cmd", stream, text))
+        def execute():
+            sink.emit(TurnStarted("demo", "stream output"))
+            sink.emit(ToolCallPrepared("demo", "cmd", "run_command", arguments, False))
+            sink.emit(ToolStarted("demo", "cmd", "run_command"))
+            try:
+                result = run_command(tmp_path, **arguments, on_output=lambda stream, text:
+                                     sink.emit(ToolOutputDelta("demo", "cmd", stream, text)))
+                sink.emit(ToolFinished("demo", "cmd", "run_command", ToolResult(True, result)))
+            except Exception as error:
+                sink.emit(ToolFinished("demo", "cmd", "run_command", ToolResult(False, str(error))))
+            sink.emit(TurnCompleted("demo"))
 
-    renderer.emit(TurnStarted("demo", "stream output"))
-    try:
-        renderer.emit(ToolCallPrepared("demo", "cmd", "run_command", arguments, False))
-        renderer.emit(ToolStarted("demo", "cmd", "run_command"))
-        result = run_command(tmp_path, **arguments, on_output=receive)
-        renderer.emit(ToolOutputDelta("demo", "cmd", "", "", finished=True))
-        renderer.emit(ToolFinished("demo", "cmd", "run_command", ToolResult(True, result)))
-    finally:
-        renderer.emit(TurnCompleted("demo"))
-    assert visible_before_end == [True]
-    assert "last diagnostic" in capture.getvalue()
-
-    failure = StringIO()
-    renderer = ConsoleRenderer(Console(file=failure, width=100, color_system=None))
-    renderer.emit(ToolCallPrepared("x", "cmd", "run_command", arguments, False))
-    renderer.emit(ToolFinished("x", "cmd", "run_command", ToolResult(
-        False, "TimeoutError: command timed out\nstdout:\npartial progress\nstderr:\nlast error")))
-    assert all(text in failure.getvalue() for text in ("TimeoutError", "partial progress", "last error"))
+        async with app.run_test(size=(100, 30)) as pilot:
+            worker = Thread(target=execute)
+            worker.start()
+            try:
+                visible = ""
+                for _ in range(30):
+                    await pilot.pause(0.1)
+                    capture = StringIO()
+                    Console(file=capture, width=100).print(app.query_one("#active", Static).renderable)
+                    visible = capture.getvalue()
+                    if "LIVE_PROGRESS" in visible:
+                        break
+                assert "LIVE_PROGRESS" in visible
+                assert worker.is_alive()
+            finally:
+                (tmp_path / "ui-ack").touch()
+                await asyncio.to_thread(worker.join, 10)
+            assert not worker.is_alive()
+            await pilot.pause(0.2)
+            blocks = [b for b in app.store.views["main"].committed_blocks if isinstance(b, ToolBlock)]
+            assert len(blocks) == 1
+            assert "last diagnostic" in blocks[0].output
+            assert not blocks[0].failed
+            sink.emit(ToolFinished("demo", "failed", "run_command", ToolResult(
+                False, "TimeoutError: command timed out\nstdout:\npartial progress\nstderr:\nlast error")))
+            await pilot.pause(0.2)
+            failure = app.store.views["main"].committed_blocks[-1]
+            assert failure.failed
+            assert all(text in failure.output for text in ("TimeoutError", "partial progress", "last error"))
+    asyncio.run(exercise())

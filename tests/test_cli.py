@@ -1,4 +1,11 @@
+import asyncio
+
+import pytest
+from textual.widgets import Input
+
 from praxis_agent.cli import main
+from praxis_agent.terminal.app import PraxisApp
+from praxis_agent.terminal.views import ViewEventSink
 from praxis_agent.events import (
     AssistantTextCompleted,
     AssistantTextDelta,
@@ -39,7 +46,8 @@ class FakeAgent:
         self.clear_count += 1
 
     def close(self) -> None:
-        self.close_count += 1
+        if not self.close_count:
+            self.close_count += 1
 
 
 def test_cli_runs_a_task(capsys, monkeypatch) -> None:
@@ -51,29 +59,44 @@ def test_cli_runs_a_task(capsys, monkeypatch) -> None:
         ),
     )
 
+    def run(app):
+        async def exercise():
+            async with app.run_test() as pilot:
+                await pilot.pause(0.2)
+                assert isinstance(app.sink, ViewEventSink)
+                assert app.store.views["main"].committed_blocks
+                assert not app.busy
+        asyncio.run(exercise())
+        return 0
+
+    monkeypatch.setattr(PraxisApp, "run", run)
     exit_code = main(["inspect", "repository"])
 
     assert exit_code == 0
-    assert capsys.readouterr().out == "completed: inspect repository\n"
+    assert capsys.readouterr().out == ""
     assert agent.tasks == ["inspect repository"]
     assert agent.close_count == 1
 
 
 def test_cli_runs_an_interactive_session(capsys, monkeypatch) -> None:
     agent = FakeAgent()
-    entered_tasks = iter(
-        ["first task", "/clear", "follow-up task", "/exit"]
-    )
     monkeypatch.setattr(
         "praxis_agent.cli.create_default_agent",
         lambda workspace, **callbacks: agent.attach_event_sink(
             callbacks["event_sink"]
         ),
     )
-    monkeypatch.setattr(
-        "builtins.input",
-        lambda prompt: next(entered_tasks),
-    )
+    def run(app):
+        async def exercise():
+            async with app.run_test() as pilot:
+                for task in ["first task", "/clear", "follow-up task", "/exit"]:
+                    app.query_one("#task", Input).value = task
+                    await pilot.press("enter")
+                    await pilot.pause(0.2)
+        asyncio.run(exercise())
+        return 0
+
+    monkeypatch.setattr(PraxisApp, "run", run)
 
     exit_code = main([])
 
@@ -81,8 +104,11 @@ def test_cli_runs_an_interactive_session(capsys, monkeypatch) -> None:
     assert agent.tasks == ["first task", "follow-up task"]
     assert agent.clear_count == 1
     assert agent.close_count == 1
-    assert capsys.readouterr().out == (
-        "completed: first task\n"
-        "Conversation cleared.\n"
-        "completed: follow-up task\n"
-    )
+    assert capsys.readouterr().out == ""
+
+
+def test_cli_rejects_removed_plain_option(capsys):
+    with pytest.raises(SystemExit) as error:
+        main(["--plain"])
+    assert error.value.code == 2
+    assert "unrecognized arguments: --plain" in capsys.readouterr().err

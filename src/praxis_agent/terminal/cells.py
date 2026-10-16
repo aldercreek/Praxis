@@ -1,6 +1,11 @@
+"""Rich renderables used by the Textual agent pages."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
+import shlex
+import subprocess
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from rich.console import Group, RenderableType
@@ -10,30 +15,37 @@ from rich.table import Table
 from rich.text import Text
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
-
     from praxis_agent.planning import PlanStep
+    from praxis_agent.terminal.views import ToolBlock
 
 
-@dataclass(frozen=True, slots=True)
-class ExplorationItem:
-    action: str
-    detail: str
+@dataclass
+class MessageBlock:
+    """One source-backed message, shared by streaming and completed rendering."""
+
+    text: str
+    user: bool = False
+    revision: int = field(default=0, init=False)
+
+    def update(self, text: str) -> None:
+        if text != self.text:
+            self.text = text
+            self.revision += 1
+
+    def __rich_console__(self, console, options):
+        grid = Table.grid(padding=0, expand=True)
+        grid.add_column(width=2, no_wrap=True)
+        grid.add_column(ratio=1)
+        grid.add_row(
+            Text("›" if self.user else "•", style="dim"),
+            Text(self.text) if self.user else Markdown(self.text, code_theme="ansi_dark"),
+        )
+        # A message may be taller than the viewport; scrolling must retain every line.
+        yield from console.render(grid, options.update(height=None))
 
 
 def working_cell() -> RenderableType:
-    return _block("Working", active=True)
-
-
-def assistant_cell(markdown: str) -> RenderableType:
-    grid = Table.grid(padding=0, expand=True)
-    grid.add_column(width=2, no_wrap=True)
-    grid.add_column(ratio=1)
-    grid.add_row(
-        Text("•", style="dim"),
-        Markdown(markdown, code_theme="ansi_dark"),
-    )
-    return grid
+    return _block("处理中", active=True)
 
 
 def plan_cell(plan: Iterable[PlanStep], *, compact: bool = False) -> RenderableType:
@@ -59,136 +71,9 @@ def plan_cell(plan: Iterable[PlanStep], *, compact: bool = False) -> RenderableT
     return Group(*lines)
 
 
-def exploration_cell(
-    items: Iterable[ExplorationItem],
-    *,
-    active: bool,
-) -> RenderableType:
-    details: list[Text] = []
-    items = list(items)
-    paths = [item.detail for item in items if item.action in {"Read", "List"}]
-    prefix = ""
-    if len(paths) == len(items) and len(paths) > 1:
-        import posixpath
-        prefix = posixpath.commonpath([posixpath.dirname(path) for path in paths])
-        if prefix:
-            details.append(_detail_line(f"目录：{prefix}/"))
-    for index, item in enumerate(items):
-        line = Text("  └ " if index == 0 else "    ", style="dim")
-        line.append(item.action, style="cyan")
-        if item.detail:
-            line.append(" ")
-            line.append(item.detail.removeprefix(prefix + "/") if prefix else item.detail)
-        details.append(line)
-    return _block(
-        "Exploring" if active else "Explored",
-        details,
-        active=active,
-    )
-
-
-def command_cell(
-    command: str,
-    *,
-    active: bool,
-    exit_code: int | None = None,
-    stdout: str = "",
-    stderr: str = "",
-    elapsed: float | None = None,
-    error: str = "",
-) -> RenderableType:
-    title = Text("Running " if active else "Ran ", style="bold")
-    title.append(command if len(command) <= 120 else command[:117] + "…")
-    if exit_code is not None:
-        title.append(f" · exit {exit_code}")
-    if elapsed is not None:
-        title.append(f" · {elapsed:.1f}s")
-
-    details: list[Text] = []
-    if error:
-        details.append(Text("  └ " + error, style="red"))
-    if not active:
-        visible_lines = _command_output_lines(stdout, stderr)
-        if not visible_lines:
-            visible_lines = [("(no output)", "dim")]
-        for index, (content, style) in enumerate(visible_lines):
-            line = Text("  └ " if index == 0 else "    ", style="dim")
-            output = Text.from_ansi(content)
-            if style:
-                output.stylize(style)
-            else:
-                output.stylize("dim")
-            line.append_text(output)
-            details.append(line)
-
-    marker_style = None
-    if error:
-        marker_style = "bold red"
-    elif exit_code is not None:
-        marker_style = "bold green" if exit_code == 0 else "bold red"
-    return _block(
-        title,
-        details,
-        active=active,
-        marker="✗" if error else "•",
-        marker_style=marker_style,
-    )
-
-
-def file_change_cell(
-    path: str,
-    diff: str,
-    *,
-    created: bool,
-) -> RenderableType:
-    added, removed = _diff_counts(diff)
-    title = Text("Added " if created else "Edited ", style="bold")
-    title.append(path)
-    title.append(" (")
-    title.append(f"+{added}", style="green")
-    title.append(" ")
-    title.append(f"-{removed}", style="red")
-    title.append(")")
-
-    details: list[Text] = []
-    preview = _middle_truncate(diff.splitlines(), max_lines=7)
-    for index, content in enumerate(preview):
-        line = Text("  └ " if index == 0 else "    ", style="dim")
-        style = "dim"
-        if content.startswith("+") and not content.startswith("+++"):
-            style = "green"
-        elif content.startswith("-") and not content.startswith("---"):
-            style = "red"
-        elif content.startswith("@@"):
-            style = "cyan dim"
-        line.append(content, style=style)
-        details.append(line)
-
-    return _block(title, details)
-
-
 def tool_activity_cell(title: str, detail: str = "") -> RenderableType:
     details = [_detail_line(detail)] if detail else []
     return _block(title, details, active=True)
-
-
-def tool_completed_cell(title: str, detail: str = "") -> RenderableType:
-    details = [_detail_line(detail)] if detail else []
-    return _block(title, details)
-
-
-def error_cell(title: str, detail: str = "") -> RenderableType:
-    details: list[Text] = []
-    if detail:
-        for index, content in enumerate(
-            _middle_truncate(detail.split("\nCheck the arguments for", 1)[0].splitlines(), max_lines=3)
-        ):
-            line = Text("  └ " if index == 0 else "    ", style="dim")
-            line.append(content[:240] + ("…" if len(content) > 240 else ""), style="red")
-            details.append(line)
-        if "\nCheck the arguments for" in detail:
-            details.append(_detail_line("参数修正说明已返回模型；需按工具定义修正后重试。"))
-    return _block(title, details, marker="✗", marker_style="bold red")
 
 
 def _block(
@@ -196,8 +81,6 @@ def _block(
     details: Iterable[RenderableType] = (),
     *,
     active: bool = False,
-    marker: str = "•",
-    marker_style: str | None = "dim",
 ) -> RenderableType:
     header = Table.grid(padding=0)
     header.add_column(width=2, no_wrap=True)
@@ -206,7 +89,7 @@ def _block(
     if active:
         indicator = Spinner("dots", style="dim")
     else:
-        indicator = Text(marker, style=marker_style)
+        indicator = Text("•", style="dim")
     header.add_row(
         indicator,
         Text(title, style="bold") if isinstance(title, str) else title,
@@ -226,36 +109,112 @@ def _detail_line(detail: str) -> Text:
     return line
 
 
-def _command_output_lines(
-    stdout: str,
-    stderr: str,
-) -> list[tuple[str, str | None]]:
-    lines: list[tuple[str, str | None]] = []
-    lines.extend((line, None) for line in stdout.splitlines())
-    lines.extend((line, "red dim") for line in stderr.splitlines())
-    return _middle_truncate(lines, max_lines=5)
+def display_command(arguments: Mapping[str, object]) -> str:
+    argv = arguments.get("argv")
+    if not isinstance(argv, list) or not all(
+        isinstance(part, str) for part in argv
+    ):
+        return "command"
+    if not argv:
+        return "command"
+    executable = argv[0].replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
+    # Only simplify the display of known shell wrappers; execution keeps the original argv.
+    flags = {"powershell": "-command", "pwsh": "-command", "cmd": "/c"}
+    if executable in flags and len(argv) >= 3 and argv[-2].lower() == flags[executable]:
+        return argv[-1]
+    if executable in {"bash", "sh", "zsh"} and len(argv) == 3 and argv[1] in {"-c", "-lc"}:
+        return argv[2]
+    if os.name == "nt":
+        return subprocess.list2cmdline(argv)
+    return shlex.join(argv)
 
 
-def _middle_truncate[T](items: list[T], max_lines: int) -> list[T]:
-    if len(items) <= max_lines:
-        return items
-    head_count = max_lines // 2
-    tail_count = max_lines - head_count - 1
-    omitted = len(items) - head_count - tail_count
-    marker = f"… +{omitted} lines"
-    if items and isinstance(items[0], tuple):
-        ellipsis = (marker, "dim")
+_TOOL_LABELS = {
+    "read_file": "读取", "list_files": "列出", "find_files": "查找",
+    "search_text": "搜索", "edit_file": "修改", "write_file": "写入",
+    "run_command": "执行", "update_plan": "更新计划",
+}
+
+
+def tool_description(name: str, arguments: Mapping[str, object]) -> tuple[str, str]:
+    label = _TOOL_LABELS.get(name, name)
+    if name == "run_command":
+        return label, display_command(arguments)
+    path = str(arguments.get("relative_path", ""))
+    query = arguments.get("query") or arguments.get("file_pattern")
+    detail = f"{query} · {path}" if query and path else str(query or path)
+    return label, detail
+
+
+def tool_title(calls: tuple[ToolBlock, ...]) -> Text:
+    if len(calls) > 1:
+        return Text(f"已查看代码 · {len(calls)} 次操作", style="bold")
+    call = calls[0]
+    title = Text("失败 · " if call.failed else "已", style="bold red" if call.failed else "bold")
+    title.append(call.title)
+    if call.detail:
+        title.append(" " + " ".join(call.detail.split()), style="not bold")
+    return title
+
+
+def _preview_lines(output: str, *, command: bool) -> list[Text]:
+    if command:
+        # The tool's transport envelope is retained in details, not in the preview.
+        _, separator, streams = output.partition("\nstdout:\n")
+        if separator:
+            stdout, stderr_separator, stderr = streams.rpartition("\nstderr:\n")
+            if stderr_separator:
+                parts = [part for part in (stdout, stderr) if part.strip() != "<empty>"]
+                output = "\n".join(parts)
+    lines = [Text.from_ansi(line) for line in output.splitlines() if line.strip()]
+    return lines[-3:]
+
+
+def tool_preview(calls: tuple[ToolBlock, ...]) -> RenderableType:
+    if len(calls) > 1:
+        details = [Text(f"{call.title} {call.detail}".rstrip()) for call in calls[-3:]]
+        if len(calls) > 3:
+            details.insert(0, Text(f"… 另有 {len(calls) - 3} 次操作 · Ctrl+T 查看"))
     else:
-        ellipsis = marker
-    return [*items[:head_count], ellipsis, *items[-tail_count:]]  # type: ignore[list-item]
+        call = calls[0]
+        if not call.failed and call.name != "run_command":
+            return ""
+        details = _preview_lines(call.output, command=call.name == "run_command")
+    lines = []
+    for index, detail in enumerate(details):
+        line = Text(no_wrap=True, overflow="ellipsis")
+        line.append("  └ " if index == 0 else "    ", style="dim")
+        line.append_text(detail)
+        lines.append(line)
+    return Group(*lines)
 
 
-def _diff_counts(diff: str) -> tuple[int, int]:
-    added = 0
-    removed = 0
-    for line in diff.splitlines():
-        if line.startswith("+") and not line.startswith("+++"):
-            added += 1
-        elif line.startswith("-") and not line.startswith("---"):
-            removed += 1
-    return added, removed
+def tool_details(calls: tuple[ToolBlock, ...]) -> RenderableType:
+    lines = []
+    for index, call in enumerate(calls):
+        if index:
+            lines.append(Text(""))
+        if len(calls) > 1:
+            lines.append(Text(f"{call.title} {call.detail}".rstrip(), style="bold"))
+        lines.extend((Text("参数", style="dim"), Text(call.arguments),
+                      Text("输出", style="dim"), Text.from_ansi(call.output)))
+    return Group(*lines)
+
+
+def approval_content(name: str, arguments: Mapping[str, object]) -> RenderableType:
+    """Readable operation details; the separate parameter viewer retains the exact payload."""
+    lines = []
+    if name == "run_command":
+        lines.append(Text("$ " + display_command(arguments)))
+    else:
+        title, detail = tool_description(name, arguments)
+        lines.append(Text(f"{title} {detail}".rstrip()))
+    labels = {"relative_path": "目录", "workspace": "工作区", "timeout_seconds": "超时（秒）",
+              "old_string": "替换前", "new_string": "替换后", "content": "写入内容"}
+    for key, value in arguments.items():
+        if key in {"argv", "agent_id"}:
+            continue
+        line = Text(f"{labels.get(key, key)}：", style="dim")
+        line.append(str(value), style="not dim")
+        lines.append(line)
+    return Group(*lines)
