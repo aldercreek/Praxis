@@ -17,6 +17,7 @@ class AgentEvent:
     """所有 Agent 事件都携带当前任务的 turn_id。"""
 
     turn_id: str
+    occurred_at: float = field(default_factory=monotonic, kw_only=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,7 +125,6 @@ class ToolOutputDelta(AgentEvent):
     command: str = ""
     agent_id: str = ""
     finished: bool = False
-    occurred_at: float = field(default_factory=monotonic)
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,12 +166,21 @@ class ChildAgentEvent(AgentEvent):
 class ChildAgentStatus(AgentEvent):
     agent_id: str
     status: str
+    task_summary: str = ""
 
 
 @dataclass(frozen=True, slots=True)
 class ChildAgentMessage(AgentEvent):
     agent_id: str
     content: str
+
+
+@dataclass(frozen=True, slots=True)
+class MessagesReceived(AgentEvent):
+    """用户补充或协作消息已加入当前 Agent 的历史。"""
+
+    items: tuple[object, ...]
+    source: str = "agent"
 
 
 class EventSink(Protocol):
@@ -192,6 +201,18 @@ class CompositeEventSink:
         for sink in self.sinks:
             sink.emit(event)
 
+    def emit_live(self, event: AgentEvent) -> None:
+        """Only thread-safe display sinks accept events directly from workers."""
+        for sink in self.sinks:
+            if receive := getattr(sink, "emit_live", None):
+                receive(event)
+
+    def emit_deferred(self, event: AgentEvent) -> None:
+        """Deliver queued events to consumers not already served by emit_live."""
+        for sink in self.sinks:
+            if not hasattr(sink, "emit_live"):
+                sink.emit(event)
+
 
 __all__ = [
     "AgentEvent",
@@ -207,6 +228,7 @@ __all__ = [
     "EventSink",
     "ModelRequestCompleted",
     "ModelRequestStarted",
+    "MessagesReceived",
     "PlanUpdated",
     "ToolCallPrepared",
     "ToolFinished",

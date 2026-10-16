@@ -3,13 +3,12 @@ from __future__ import annotations
 import json
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from queue import Empty, SimpleQueue
 from threading import Condition
 from time import monotonic
 from typing import TYPE_CHECKING
 from uuid import uuid4
-from dataclasses import replace
 from pathlib import Path
 
 
@@ -35,13 +34,11 @@ class _WorkerEvents:
         self.handle = handle
 
     def emit(self, event: AgentEvent) -> None:
-        if isinstance(event, ToolOutputDelta) and self.runtime.live_output_sink is not None:
-            # This channel only updates a bounded display buffer. Approvals,
-            # model history and lifecycle events remain owned by the parent.
-            self.runtime.live_output_sink.emit(replace(event, agent_id=self.handle.agent_id))
-            return
-        # Streaming text is private and needs no coordination lock or queue entry.
-        if isinstance(event, AssistantTextDelta):
+        # Streaming display deltas never enter model history or deferred tracing.
+        if isinstance(event, (AssistantTextDelta, ToolOutputDelta)):
+            self.runtime._emit_live(ChildAgentEvent(
+                self.handle.parent_turn_id, self.handle.agent_id, event,
+            ))
             return
         with self.runtime.condition:
             if isinstance(event, ModelRequestStarted):
@@ -50,7 +47,7 @@ class _WorkerEvents:
                 self.handle.compaction_count += 1
             elif isinstance(event, ToolFinished) and event.tool_name == "compress" and event.result.success:
                 self.handle.compaction_count += 1
-        self.runtime.events.put(ChildAgentEvent(
+        self.runtime._publish(ChildAgentEvent(
             self.handle.parent_turn_id, self.handle.agent_id, event,
         ))
 
@@ -67,7 +64,6 @@ class AgentRuntime:
         self.workspace = (workspace or Path.cwd()).resolve()
         self.approve_tool_call = approve_tool_call
         self.live_output_sink = live_output_sink
-        self.approvals: SimpleQueue = SimpleQueue()
         self.condition = Condition()
         self.handles: dict[str, AgentHandle] = {}
         self.inbox: deque[AgentMessage] = deque()
@@ -96,10 +92,18 @@ class AgentRuntime:
 
     def _status(self, handle: AgentHandle, status: AgentStatus) -> None:
         handle.status = status
-        self.events.put(ChildAgentStatus(
-            handle.parent_turn_id, handle.agent_id, status.value,
+        self._publish(ChildAgentStatus(
+            handle.parent_turn_id, handle.agent_id, status.value, handle.task_summary,
         ))
         self.condition.notify_all()
+
+    def _emit_live(self, event: AgentEvent) -> None:
+        if receive := getattr(self.live_output_sink, "emit_live", None):
+            receive(event)
+
+    def _publish(self, event: AgentEvent) -> None:
+        self._emit_live(event)
+        self.events.put(event)
 
     @staticmethod
     def _task_summary(value: object) -> str:
@@ -187,7 +191,7 @@ class AgentRuntime:
     def _report(self, handle: AgentHandle, content: str) -> AgentMessage:
         message = AgentMessage(handle.agent_id, "parent", content)
         self.inbox.append(message)
-        self.events.put(ChildAgentMessage(handle.parent_turn_id, handle.agent_id, content))
+        self._publish(ChildAgentMessage(handle.parent_turn_id, handle.agent_id, content))
         self.condition.notify_all()
         return message
 
@@ -312,13 +316,10 @@ class AgentRuntime:
 
     def request_approval(self, agent_id: str, tool: str, arguments: Mapping[str, object]) -> bool:
         handle = self._handle(agent_id)
-        future: Future = Future()
-        self.approvals.put((handle, tool, dict(arguments), future))
-        # Only the parent thread invokes the interactive approval callback.
-        while not future.done():
-            handle.control.check()
-            handle.control.cancelled.wait(0.1)
-        return future.result()
+        handle.control.check()
+        return bool(self.approve_tool_call and self.approve_tool_call(
+            tool, {**arguments, "agent_id": agent_id, "workspace": str(handle.workspace)},
+        ))
 
     def _dispose(self, handle: AgentHandle) -> None:
         self._freeze_elapsed(handle)
@@ -366,24 +367,13 @@ class AgentRuntime:
     def pump_events(self, sink: EventSink | None) -> None:
         while True:
             try:
-                handle, tool, arguments, future = self.approvals.get_nowait()
-            except Empty:
-                break
-            try:
-                approved = (not handle.control.cancelled.is_set()
-                            and self.approve_tool_call is not None
-                            and self.approve_tool_call(tool, {**arguments,
-                                "agent_id": handle.agent_id, "workspace": str(handle.workspace)}))
-                future.set_result(bool(approved))
-            except Exception as error:
-                future.set_exception(error)
-        while True:
-            try:
                 event = self.events.get_nowait()
             except Empty:
                 return
             if sink is not None:
-                sink.emit(event)
+                receive = (getattr(sink, "emit_deferred", sink.emit)
+                           if sink is self.live_output_sink else sink.emit)
+                receive(event)
 
     def shutdown(self, pump: Callable[[], None]) -> None:
         with self.condition:

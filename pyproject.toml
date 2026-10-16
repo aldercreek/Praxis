@@ -18,6 +18,7 @@ dependencies = [
     "jieba>=0.42,<1",
     "pydantic-monty==1.1.0",
     "rich>=13.9,<15",
+    "textual>=1,<2",
     "truststore>=0.10,<1; sys_platform == 'win32'",
 ]
 

@@ -49,20 +49,6 @@ def print_session_list(
     output.print(table)
 
 
-def print_session_resumed(
-    session_id: str,
-    item_count: int,
-    *,
-    console: Console | None = None,
-) -> None:
-    """展示恢复结果，便于用户确认当前上下文来源。"""
-    output = console or Console()
-    line = Text("Resumed session ", style="dim")
-    line.append(session_id[:8], style="bold cyan")
-    line.append(f" ({item_count} context items).", style="dim")
-    output.print(line)
-
-
 def _display_status(status: RunStatus | None) -> tuple[str, str]:
     if status is RunStatus.COMPLETED:
         return status.value, "green"

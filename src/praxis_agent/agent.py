@@ -5,6 +5,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from queue import Empty, SimpleQueue
 from threading import Lock
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -24,6 +25,7 @@ from praxis_agent.events import (
     EventSink,
     ModelRequestCompleted,
     ModelRequestStarted,
+    MessagesReceived,
     PlanUpdated,
     TurnCompleted,
     TurnFailed,
@@ -82,6 +84,7 @@ class Agent:
     max_parallel_tools: int = DEFAULT_MAX_PARALLEL_TOOLS
     collaboration: AgentRuntime | None = None
     receive_messages: Callable[[Callable[[Sequence[object]], None]], bool] | None = None
+    user_input: SimpleQueue[str] | None = None
     execution_control: ExecutionControl | None = None
     close_callbacks: tuple[Callable[[], None], ...] = ()
     mcp_catalog: str = ""
@@ -248,10 +251,27 @@ class Agent:
 
         return self.receive_messages(lambda items: self._accept_messages(turn_id, items))
 
-    def _accept_messages(self, turn_id: str, items: Sequence[object]) -> None:
+    def _receive_user_input(self, turn_id: str) -> bool:
+        if self.user_input is None:
+            return False
+        items = []
+        while True:
+            try:
+                text = self.user_input.get_nowait()
+            except Empty:
+                break
+            items.append({"role": "user", "content": text})
+        if not items:
+            return False
+        self._accept_messages(turn_id, items, source="user")
+        return True
+
+    def _accept_messages(self, turn_id: str, items: Sequence[object], *, source: str = "agent") -> None:
         if self.session_store is not None:
             self.session_store.append_response_items(self._session_id(), turn_id, items)
         self._history.extend(items)
+        if self.event_sink is not None:
+            self.event_sink.emit(MessagesReceived(turn_id, tuple(items), source=source))
 
     @property
     def history_item_count(self) -> int:
@@ -298,6 +318,7 @@ class Agent:
                 self.execution_control.check()
             self._pump_worker_events()
             self._receive_messages(turn_id)
+            self._receive_user_input(turn_id)
             tool_definitions = self.tool_registry.definitions()
             request_number += 1
             transient_items = (build_run_state_context(run_state),)
@@ -362,6 +383,8 @@ class Agent:
                         ):
                             continue
                     elif self._receive_messages(turn_id):
+                        continue
+                    if self._receive_user_input(turn_id):
                         continue
                     return response.output_text
                 raise AgentError(
@@ -497,11 +520,13 @@ def create_default_agent(
         # 恢复的模型可能属于另一档；重新选默认值，同时保留环境中的显式覆盖。
         config = ModelConfig.from_env(model=session.model)
 
+    control = ExecutionControl()
     model_client = OpenAIModelClient(config, instructions=instructions)
     summary_client = OpenAIModelClient(config, instructions=SUMMARY_INSTRUCTIONS, reasoning_effort="none")
     agent = Agent(
         model_client=model_client,
-        tool_registry=create_default_registry(config.context_policy),
+        tool_registry=create_default_registry(config.context_policy, check_execution=control.check),
+        execution_control=control,
         workspace=runtime_context.workspace_root,
         event_sink=event_sink,
         approve_tool_call=approve_tool_call,
@@ -524,7 +549,7 @@ def create_default_agent(
     mcp = MCPConnections()
     try:
         mcp.start()
-        release_mcp_tools = mcp.register(agent.tool_registry)
+        release_mcp_tools = mcp.register(agent.tool_registry, check_execution=control.check)
         agent.mcp_catalog = mcp.catalog()
     except BaseException:
         mcp.close()

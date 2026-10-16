@@ -147,7 +147,7 @@ def test_close_running_worker_cancels_and_preserves_files(tmp_path):
         runtime.shutdown(lambda: None)
 
 
-def test_worker_approval_runs_on_parent_thread(tmp_path):
+def test_worker_approval_reaches_ui_callback_without_parent_pump(tmp_path):
     parent_thread = get_ident()
     observed = []
 
@@ -164,9 +164,8 @@ def test_worker_approval_runs_on_parent_thread(tmp_path):
     runtime = AgentRuntime(factory, MultiAgentConfig(), approve_tool_call=approve)
     try:
         agent_id = runtime.spawn("approval", working_directory=".")["agent_id"]
-        runtime.wait_agents([agent_id], 5, lambda: runtime.pump_events(None))
         wait_status(runtime, agent_id)
-        assert observed[0][0] == parent_thread
+        assert observed[0][0] != parent_thread
         assert observed[0][2]["agent_id"] == agent_id
     finally:
         runtime.shutdown(lambda: runtime.pump_events(None))
