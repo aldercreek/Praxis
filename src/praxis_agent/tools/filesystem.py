@@ -10,6 +10,7 @@ from difflib import unified_diff
 from pathlib import Path
 
 from praxis_agent.context.budgets import DEFAULT_BUDGETS
+from praxis_agent.tools.text_file import TextFile, normalize_newlines
 
 _SEARCH_TIMEOUT_SECONDS = 30
 
@@ -112,14 +113,14 @@ def read_file(
     *,
     character_limit: int | None = DEFAULT_BUDGETS["max_file_read_chars"],
 ) -> dict[str, object]:
-    """Read a half-open text range; offsets count characters including line endings.
+    """Read a half-open text range, clamping lines beyond EOF to the end of the file.
 
+    Offsets count decoded characters including line endings, excluding the BOM.
     A None limit is reserved for programmatic calls. A finite limit budgets the
     complete JSON result, so the model preview cannot cut off continuation data.
     """
     file_path = _require_workspace_file(workspace, relative_path)
-    with file_path.open(encoding="utf-8", newline="") as source:
-        text = source.read()
+    text = TextFile.read(file_path).content
     lines = text.splitlines(keepends=True) or [""]
     if lines[-1].endswith(("\n", "\r")):
         lines.append("")
@@ -128,9 +129,13 @@ def read_file(
         starts.append(starts[-1] + len(line))
 
     def position(line, offset):
-        if isinstance(line, bool) or not isinstance(line, int) or not 1 <= line <= len(lines):
-            raise ValueError(f"line must be between 1 and {len(lines)}")
-        if isinstance(offset, bool) or not isinstance(offset, int) or not 0 <= offset <= len(lines[line - 1]):
+        if isinstance(line, bool) or not isinstance(line, int) or line < 1:
+            raise ValueError("line must be a positive integer")
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise ValueError("offset must be a non-negative integer")
+        if line > len(lines):
+            return len(text)
+        if offset > len(lines[line - 1]):
             raise ValueError(f"offset for line {line} must be between 0 and {len(lines[line - 1])}")
         return starts[line - 1] + offset
 
@@ -140,11 +145,22 @@ def read_file(
     elif end_line is None:
         raise ValueError("end_line is required when end_offset is supplied")
     elif end_offset is None:
-        end = position(end_line, 0) + len(lines[end_line - 1])
+        end = position(end_line, 0)
+        if end_line <= len(lines):
+            end += len(lines[end_line - 1])
     else:
         end = position(end_line, end_offset)
-    if end < start:
+    if end < start or end_line is not None and (
+        end_line < start_line
+        or end_line == start_line and end_offset is not None and end_offset < start_offset
+    ):
         raise ValueError("end position must not precede start position")
+
+    range_note = ""
+    if start_line > len(lines):
+        range_note = "Start line is beyond EOF; no text remains."
+    elif end_line is not None and end_line > len(lines):
+        range_note = "Requested end line is beyond EOF; the range is limited to EOF."
 
     def render(stop):
         truncated = stop < end
@@ -153,8 +169,11 @@ def read_file(
             "text": text[start:stop],
             "truncated": truncated,
             "next_position": {"line": index + 1, "offset": stop - starts[index]} if truncated else None,
-            "note": ("Only part of the requested range is shown. Continue from next_position "
-                     "with the same end_line/end_offset; omitted end means end of file.") if truncated else "",
+            "note": " ".join(note for note in (
+                ("Only part of the requested range is shown. Continue from next_position "
+                 "with the same end_line/end_offset; omitted end means end of file.") if truncated else "",
+                range_note,
+            ) if note),
         }
 
     if character_limit is None:
@@ -187,7 +206,8 @@ def edit_file(
         raise ValueError("edits must be a non-empty list")
 
     file_path = _require_workspace_file(workspace, relative_path)
-    original_content = file_path.read_text(encoding="utf-8")
+    source = TextFile.read(file_path)
+    original_content = normalize_newlines(source.content)
     updated_content = original_content
 
     # 先在内存中完成全部校验，避免后续替换失败时留下部分修改。
@@ -205,6 +225,8 @@ def edit_file(
             raise TypeError(
                 f"edit {index} old_text and new_text must be strings"
             )
+        old_text = normalize_newlines(old_text)
+        new_text = normalize_newlines(new_text)
         if not old_text:
             raise ValueError(f"edit {index} old_text must not be empty")
         if old_text == new_text:
@@ -225,21 +247,17 @@ def edit_file(
     if updated_content == original_content:
         raise ValueError("edits must produce a file change")
 
-    file_path.write_text(updated_content, encoding="utf-8")
-    return FileChange.between(relative_path, original_content, updated_content)
+    saved = source.write(file_path, updated_content)
+    return FileChange.between(relative_path, source.content, saved)
 
 
 def write_file(workspace: Path, relative_path: str, content: str) -> FileChange:
-    """创建或完整重写 UTF-8 文本文件，返回实际修改的差异。"""
+    """保留已有文件的编码和换行；新文件使用无 BOM 的 UTF-8、LF。"""
     workspace_root = _resolve_workspace(workspace)
     file_path = _resolve_workspace_path(workspace_root, relative_path)
-    before = file_path.read_text(encoding="utf-8", errors="replace") if file_path.is_file() else ""
-
-    file_path.parent.mkdir(parents=True, exist_ok=True)
-    with file_path.open("w", encoding="utf-8") as new_file:
-        new_file.write(content)
-
-    return FileChange.between(relative_path, before, content)
+    source = TextFile.read(file_path) if file_path.exists() else TextFile()
+    saved = source.write(file_path, content)
+    return FileChange.between(relative_path, source.content, saved)
 
 
 def list_files(workspace: Path, relative_path: str = ".") -> dict[str, object]:

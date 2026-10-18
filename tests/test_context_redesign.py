@@ -84,14 +84,16 @@ def test_failed_compress_call_keeps_original_arguments_visible():
 
 
 def test_preview_notice_is_first_and_history_remains_fully_readable():
-    body = "exit_code: 1\n" + "abc\n" * 1000
+    body = "begin\n" + "abc\n" * 1000
     raw = json.dumps({"success": True, "output": body})
     history = ConversationHistory([{"type": "function_call_output", "call_id": "c", "output": raw}])
     messages = ContextOperations().project(history.snapshot())
     preview = preview_tool_outputs(messages, 100)[0]["payload"]["output"]
-    assert preview.startswith("[Tool result preview: success=true; exit_code: 1;")
+    assert preview.startswith("[Tool result preview: success=true;")
     assert "saved as m1." in preview
-    assert preview.endswith(body[:100])
+    assert body[:50] in preview
+    assert preview.endswith(body[-50:])
+    assert "characters omitted" in preview
     assert "Use read_history" not in preview and "Manage context" not in preview
     assert read_history(history, [], "m1", character_limit=None)["text"] == raw
 

@@ -40,12 +40,74 @@ def test_read_file_rejects_invalid_ranges(tmp_path: Path) -> None:
     source_file = tmp_path / "notes.txt"
     source_file.write_text("content\n", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="line must be between"):
-        read_file(tmp_path, "notes.txt", end_line=401)
+    with pytest.raises(ValueError, match="line must be a positive integer"):
+        read_file(tmp_path, "notes.txt", end_line=0)
     with pytest.raises(ValueError, match="end_line is required"):
         read_file(tmp_path, "notes.txt", end_offset=1)
     with pytest.raises(ValueError, match="must not precede"):
         read_file(tmp_path, "notes.txt", start_offset=3, end_line=1, end_offset=2)
+
+
+@pytest.mark.parametrize("text", ["", "one", "one\ntwo\n", "one\r\ntwo\r\n"])
+@pytest.mark.parametrize("end_offset", [None, 0, 1000])
+def test_read_file_limits_oversized_end_lines_to_eof(tmp_path, text, end_offset):
+    (tmp_path / "notes.txt").write_bytes(text.encode("utf-8"))
+
+    result = read_file(tmp_path, "notes.txt", end_line=401, end_offset=end_offset)
+
+    assert result["text"] == text
+    assert result["truncated"] is False
+    assert result["next_position"] is None
+    assert "EOF" in result["note"]
+
+
+def test_read_file_starting_past_eof_returns_an_explained_empty_result(tmp_path):
+    (tmp_path / "notes.txt").write_bytes(b"one\ntwo")
+
+    result = read_file(tmp_path, "notes.txt", start_line=30, end_line=40)
+
+    assert result["text"] == ""
+    assert result["truncated"] is False
+    assert result["next_position"] is None
+    assert "Start line is beyond EOF" in result["note"]
+
+
+@pytest.mark.parametrize("arguments", [
+    {"start_line": 0}, {"start_line": True}, {"end_line": -1}, {"end_line": 1.5},
+    {"end_line": False}, {"start_offset": -1}, {"end_line": 99, "end_offset": -1},
+    {"end_line": 99, "end_offset": True}, {"start_offset": 50},
+    {"end_line": 1, "end_offset": 50},
+    {"start_line": 30, "end_line": 20},
+    {"start_line": 30, "start_offset": 2, "end_line": 30, "end_offset": 1},
+])
+def test_read_file_still_rejects_invalid_positions_when_clamping(tmp_path, arguments):
+    (tmp_path / "notes.txt").write_bytes(b"one\ntwo")
+    with pytest.raises(ValueError):
+        read_file(tmp_path, "notes.txt", **arguments)
+
+
+def test_read_file_paginates_an_oversized_range_without_losing_characters(tmp_path):
+    text = "中文\\\"\t\r\n" * 120
+    (tmp_path / "notes.txt").write_bytes(text.encode("utf-8"))
+    position = {"line": 1, "offset": 0}
+    chunks = []
+
+    for _ in range(100):
+        result = read_file(tmp_path, "notes.txt", start_line=position["line"],
+                           start_offset=position["offset"], end_line=1000, character_limit=420)
+        assert len(json.dumps(result, ensure_ascii=False)) <= 420
+        assert "EOF" in result["note"]
+        chunks.append(result["text"])
+        if not result["truncated"]:
+            assert result["next_position"] is None
+            break
+        assert result["text"]
+        assert result["next_position"] != position
+        position = result["next_position"]
+    else:
+        pytest.fail("Read continuation did not reach EOF")
+
+    assert "".join(chunks) == text
 
 
 def test_read_file_limits_a_single_long_line(tmp_path: Path) -> None:

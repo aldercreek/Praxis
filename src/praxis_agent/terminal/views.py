@@ -60,10 +60,11 @@ class ToolBlock:
     name: str = ""
     detail: str = ""
     file_change: FileChange | None = None
+    structured_output: dict[str, object] | None = None
 
     @property
     def failed(self) -> bool:
-        return self.state == "failed"
+        return self.state in {"failed", "spawn_failed", "timed_out"}
 
     @property
     def exploration(self) -> bool:
@@ -245,8 +246,12 @@ class AgentView:
                     continue
                 self._prepared_calls[item["call_id"]] = ToolCallPrepared(
                     "", item["call_id"], call["name"], arguments, False)
+                output = result["output"]
+                structured = output if isinstance(output, dict) else None
                 self._on_tool_finished(ToolFinished(
-                    "", item["call_id"], call["name"], ToolResult(result["success"], result["output"])))
+                    "", item["call_id"], call["name"], ToolResult(
+                        result["success"], json.dumps(output, ensure_ascii=False) if structured is not None else output,
+                        structured_output=structured)))
                 if call["name"] == "update_plan" and result["success"]:
                     self._append_plan([PlanStep(step["step"], PlanStepStatus(step["status"]))
                                        for step in arguments["plan"]])
@@ -324,10 +329,7 @@ class AgentView:
         self._running_tools.pop(event.call_id, None)
         block = self.committed_blocks[index]
         name = block.name
-        failed = not event.result.success or (
-            name == "run_command" and event.result.output.startswith("exit_code: ")
-            and not event.result.output.startswith("exit_code: 0\n")
-        )
+        failed = not event.result.success
         if name == "send_messages" and event.result.success:
             try:
                 delivery = json.loads(event.result.output)
@@ -335,8 +337,12 @@ class AgentView:
                 delivery = None  # A truncated result must still remain readable.
             if isinstance(delivery, dict):
                 failed = any(not item["accepted"] for item in delivery.get("results", []))
+        state = "failed" if failed else "completed"
+        command_result = event.result.structured_output if name == "run_command" else None
+        if command_result is not None:
+            state = "completed" if command_result["status"] == "exited" else command_result["status"]
         self.committed_blocks[index] = replace(
-            block, output=event.result.output, state="failed" if failed else "completed",
+            block, output=event.result.output, state=state, structured_output=command_result,
             file_change=event.result.file_change,
         )
         if not self._running_tools:

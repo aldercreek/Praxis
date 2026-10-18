@@ -10,6 +10,7 @@ from inspect import Parameter, signature
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from praxis_agent.runtime import CommandShell, select_command_shell
 from praxis_agent.tools.command import run_command
 from praxis_agent.tools.filesystem import (
     FileChange,
@@ -36,9 +37,9 @@ _READ_FILE_PARAMETERS: dict[str, object] = {
     "type": "object",
     "properties": {
         "relative_path": {"type": "string", "description": "Relative workspace path or absolute file path."},
-        "start_line": {"type": "integer", "minimum": 1, "description": "One-based starting line, inclusive; defaults to 1."},
+        "start_line": {"type": "integer", "minimum": 1, "description": "One-based starting line, inclusive; defaults to 1. Beyond EOF returns empty text with a note."},
         "start_offset": {"type": "integer", "minimum": 0, "description": "Zero-based character offset within the starting line, including newline characters; defaults to 0."},
-        "end_line": {"type": ["integer", "null"], "minimum": 1, "description": "One-based last line to read. Without end_offset, include this entire line and its line ending. Omit both end fields for EOF."},
+        "end_line": {"type": ["integer", "null"], "minimum": 1, "description": "One-based last line to read. Without end_offset, include this entire line and its line ending. Beyond EOF is limited to EOF. Omit both end fields for EOF."},
         "end_offset": {"type": ["integer", "null"], "minimum": 0, "description": "Exclusive character offset within end_line. Requires end_line. Omit/null to include the entire ending line."},
     },
     "required": ["relative_path"],
@@ -140,11 +141,21 @@ _RUN_COMMAND_PARAMETERS: dict[str, object] = {
     "properties": {
         "argv": {
             "type": "array",
-            "items": {"type": "string", "minLength": 1},
+            "items": {"type": "string"},
             "minItems": 1,
             "description": (
                 "Command and arguments as separate strings. "
-                "No implicit shell expansion. For pipes or redirects explicitly invoke an available shell with its command argument."
+                "No implicit shell expansion. Use command for pipes, redirects or multiline shell scripts. "
+                "Provide exactly one of argv and command."
+            ),
+        },
+        "command": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Script body for the session's command shell, including real newlines. "
+                "Praxis supplies the shell and its startup flags; do not wrap the body in another shell command. "
+                "Provide exactly one of argv and command."
             ),
         },
         "workdir": {
@@ -163,7 +174,7 @@ _RUN_COMMAND_PARAMETERS: dict[str, object] = {
             "description": "Execution timeout in seconds, from 1 to 120; use 60 for ordinary commands.",
         },
     },
-    "required": ["argv", "workdir", "timeout_seconds"],
+    "oneOf": [{"required": ["argv"]}, {"required": ["command"]}],
     "additionalProperties": False,
 }
 
@@ -399,13 +410,15 @@ def _inject_workspace(handler: ToolHandler, *, external_reads: bool = False) -> 
 
 
 def create_default_registry(policy: ContextPolicy | None = None, *,
-                            check_execution: Callable[[], None] | None = None) -> ToolRegistry:
+                            check_execution: Callable[[], None] | None = None,
+                            command_shell: CommandShell | None = None) -> ToolRegistry:
     """创建包含全部内置工具的注册表。"""
     # planning.tool 依赖这里的 Tool 类型，因此等 Registry 初始化完成再导入。
     from praxis_agent.context.capacity import ContextPolicy
     from praxis_agent.planning.tool import create_update_plan_tool
 
     policy = policy or ContextPolicy()
+    command_shell = command_shell or select_command_shell()
     def read_with_limits(
         context: ToolContext, relative_path: str, start_line: int = 1,
         start_offset: int = 0, end_line: int | None = None, end_offset: int | None = None,
@@ -430,17 +443,20 @@ def create_default_registry(policy: ContextPolicy | None = None, *,
         return ToolResult(True, json.dumps(data, ensure_ascii=False), structured_output=data)
 
     registry = ToolRegistry()
-    def command_with_control(context: ToolContext, argv: list[str], workdir: str = ".",
-                             timeout_seconds: int = 60) -> str:
-        return run_command(context.workspace, argv, workdir, timeout_seconds,
-                           check_execution=context.check_execution or check_execution,
+    def command_with_control(context: ToolContext, argv: list[str] | None = None, workdir: str = ".",
+                             timeout_seconds: int = 60, command: str | None = None) -> ToolResult:
+        data = run_command(context.workspace, argv, workdir, timeout_seconds, command=command,
+                           command_shell=command_shell, check_execution=context.check_execution or check_execution,
                            on_output=context.on_command_output)
+        return ToolResult(data["status"] == "exited", json.dumps(data, ensure_ascii=False), structured_output=data)
     registry.register(
         Tool(
             name="read_file",
             programmatic=True,
-            description=("Read UTF-8 file text. Use start_line/end_line for an inclusive whole-line range; "
+            description=("Read file text with automatic encoding detection, excluding any BOM. "
+                         "Use start_line/end_line for an inclusive whole-line range; "
                          "offsets are optional for precise character ranges. Returns text, truncated, next_position and note. "
+                         "Ends beyond EOF stop at EOF; starts beyond EOF return empty text with a note. "
                          "Model previews have a character budget; continue from next_position with the same endpoint. "
                          "Programmatic calls receive the complete requested range. A complete range may be only part of a file."),
             parameters=_READ_FILE_PARAMETERS,
@@ -455,7 +471,9 @@ def create_default_registry(policy: ContextPolicy | None = None, *,
             programmatic=True,
             description=(
                 "Apply multiple exact text replacements to one existing "
-                "UTF-8 workspace file in a single all-or-nothing edit. Use the shortest old_text that matches uniquely; "
+                "workspace text file in a single all-or-nothing edit. Preserve detected encoding and BOM; "
+                "preserve pure CRLF, otherwise save LF. Matching treats CRLF and LF alike. "
+                "Use the shortest old_text that matches uniquely; "
                 "avoid unchanged surrounding blocks. Batch edits to the same file. Edits apply in order, each "
                 "matching the content after earlier replacements. Use write_file for complete rewrites. Returns the path."
             ),
@@ -467,7 +485,11 @@ def create_default_registry(policy: ContextPolicy | None = None, *,
         Tool(
             name="write_file",
             programmatic=True,
-            description="Create or completely overwrite a UTF-8 file, creating parent directories as needed. Inspect existing content before rewriting; use edit_file for local changes. Returns the path, without echoing file content.",
+            description=("Create or completely overwrite a text file, creating parent directories as needed. "
+                         "Existing files keep their detected encoding and BOM, and use CRLF only if originally pure CRLF; "
+                         "otherwise use LF. New files use UTF-8 without BOM and LF. "
+                         "Inspect existing content before rewriting; use edit_file for local changes. "
+                         "Returns the path, without echoing file content."),
             parameters=_WRITE_FILE_PARAMETERS,
             handler=_inject_workspace(write_file),
         )
@@ -521,13 +543,22 @@ def create_default_registry(policy: ContextPolicy | None = None, *,
         Tool(
             name="run_command",
             description=(
-                "Run a non-interactive command in workdir and "
-                "return its exit code, stdout, and stderr. Use for actual project execution, tests and full Python. "
+                "Run argv directly OR command as a non-interactive shell script in workdir. "
+                f"command shell: {command_shell.name if command_shell else 'unavailable'}. "
+                "Returns status, exit_code, stdout, stderr, error. "
+                "status: exited = process exited; spawn_failed = process could not start; "
+                "timed_out = time limit reached; cancelled = user stopped execution. "
+                "exit_code belongs to the started process (the shell for command), null if unavailable. "
+                "error explains nonzero exits and execution failures; null for exit 0. "
+                "Nonzero exit codes are program-specific, not necessarily tool failures. "
+                "In PowerShell, use exit $LASTEXITCODE to forward a native program's exit code; "
+                "check each dependent step explicitly. "
                 "Commands run in the foreground; descendant processes stop when the command ends or is cancelled."
             ),
             parameters=_RUN_COMMAND_PARAMETERS,
             handler=command_with_control,
             requires_approval=True,
+            strict=False,
         )
     )
     registry.register(create_update_plan_tool())

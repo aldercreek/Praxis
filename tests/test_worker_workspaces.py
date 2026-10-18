@@ -92,8 +92,8 @@ def test_git_commands_support_repeated_merges_and_report_real_conflicts(tmp_path
         }, context=context)
         assert result.success, result.output
         if success:
-            assert result.output.startswith("exit_code: 0\n"), result.output
-        return result.output
+            assert result.structured_output["exit_code"] == 0, result.output
+        return result.structured_output
 
     def commit(directory, message):
         git("-C", directory, "add", "settings.txt")
@@ -116,8 +116,8 @@ def test_git_commands_support_repeated_merges_and_report_real_conflicts(tmp_path
     (worker / "settings.txt").write_text("timeout=50\n")
     commit(worker, "worker change")
     conflict = git("merge", "--no-edit", "worker", success=False)
-    assert conflict.startswith("exit_code: 1\n")
-    assert "settings.txt" in git("diff", "--name-only", "--diff-filter=U")
+    assert conflict["exit_code"] == 1
+    assert "settings.txt" in git("diff", "--name-only", "--diff-filter=U")["stdout"]
     git("merge", "--abort")
     assert (tmp_path / "settings.txt").read_text() == "timeout=40\n"
     assert (worker / "settings.txt").read_text() == "timeout=50\n"

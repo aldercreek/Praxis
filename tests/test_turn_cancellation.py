@@ -16,7 +16,7 @@ from praxis_agent.multi_agent.runtime import AgentRuntime
 from praxis_agent.planning import RunStatus
 from praxis_agent.sessions import SQLiteSessionStore
 from praxis_agent.terminal.app import ApprovalPanel, PraxisApp
-from praxis_agent.terminal.views import ViewEventSink
+from praxis_agent.terminal.views import AgentView, ToolBlock, ViewEventSink
 from praxis_agent.tools import create_default_registry
 
 
@@ -107,16 +107,19 @@ def test_esc_cancels_tool_or_approval_repairs_history_and_preserves_session(tmp_
         "argv": [sys.executable, "-u", "-c",
                  "from pathlib import Path; import time; Path('started').write_text('yes'); print('partial', flush=True); time.sleep(60)"],
     }))
+    followup = FunctionCall("must-not-run", "run_command", json.dumps({
+        "argv": [sys.executable, "-c", "from pathlib import Path; Path('unexpected').touch()"],
+    }))
 
     class Client:
         calls = 0
         def create_response(self, *args, **kwargs):
             self.calls += 1
             if self.calls == 1:
-                return ModelResponse(({
-                    "type": "function_call", "call_id": call.call_id,
-                    "name": call.name, "arguments": call.arguments,
-                },), "", (call,))
+                return ModelResponse(tuple({
+                    "type": "function_call", "call_id": item.call_id,
+                    "name": item.name, "arguments": item.arguments,
+                } for item in (call, followup)), "", (call, followup))
             return answer()
 
     async def exercise():
@@ -141,9 +144,20 @@ def test_esc_cancels_tool_or_approval_repairs_history_and_preserves_session(tmp_
                 assert not (tmp_path / "started").exists()
             history = app.agent.session_store.load_conversation_items(session_id)
             outputs = [item for item in history if isinstance(item, dict) and item.get("type") == "function_call_output"]
-            assert [item["call_id"] for item in outputs] == ["command-1"]
+            assert [item["call_id"] for item in outputs] == ["command-1", "must-not-run"]
+            assert client.calls == 1
+            assert not (tmp_path / "unexpected").exists()
             if phase == "command":
                 assert "partial" in outputs[0]["output"]
+                saved = json.loads(outputs[0]["output"])
+                assert saved["success"] is False
+                assert saved["output"]["status"] == "cancelled"
+                assert "partial" in saved["output"]["stdout"]
+                restored = AgentView("main", "main")
+                restored.restore_history(history)
+                block = next(block for block in restored.committed_blocks if isinstance(block, ToolBlock))
+                assert block.state == "cancelled"
+                assert block.structured_output == saved["output"]
                 assert any("partial" in getattr(block, "output", "")
                            for block in app.store.views["main"].committed_blocks)
             app.query_one("#task", TextArea).text = "continue"

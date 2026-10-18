@@ -9,6 +9,7 @@ import pytest
 from rich.console import Console
 
 from praxis_agent.agent import Agent
+from praxis_agent.execution import ExecutionStopped
 from praxis_agent.events import (
     ToolCallPrepared,
     ToolFinished,
@@ -52,10 +53,10 @@ os.write(1, b'done\\n')
 
     result = run_command(tmp_path, [sys.executable, "-u", "-c", code],
                          timeout_seconds=8, on_output=receive)
-    assert "exit_code: 0" in result
+    assert result["exit_code"] == 0
     assert "".join(chunks["stdout"]) == "中文 ready\ndone\n"
     assert "".join(chunks["stderr"]) == "warning\n"
-    assert "中文 ready\ndone\n" in result
+    assert result["stdout"] == "中文 ready\ndone\n"
 
 
 def test_large_output_does_not_move_child_write_cursor_or_lose_final_bytes(tmp_path):
@@ -65,7 +66,8 @@ def test_large_output_does_not_move_child_write_cursor_or_lose_final_bytes(tmp_p
                          on_output=lambda stream, text: chunks.append(text))
     expected = "x" * 300000 + "END"
     assert "".join(chunks) == expected
-    assert f"stdout:\n{expected}\nstderr:\n<empty>" in result
+    assert result["stdout"] == expected
+    assert result["stderr"] == ""
 
 
 @pytest.mark.parametrize("cancel", [False, True])
@@ -77,14 +79,15 @@ def test_timeout_and_cancellation_preserve_partial_output(tmp_path, cancel):
 
     def check():
         if cancel and seen:
-            raise RuntimeError("cancel requested")
+            raise ExecutionStopped("cancel requested")
 
     code = "import os,time; os.write(1,b'partial out\\n'); os.write(2,b'partial error\\n'); time.sleep(20)"
-    with pytest.raises(RuntimeError if cancel else TimeoutError) as failure:
-        run_command(tmp_path, [sys.executable, "-u", "-c", code], timeout_seconds=1,
-                    on_output=receive, check_execution=check)
-    assert "partial out" in str(failure.value)
-    assert "partial error" in str(failure.value)
+    result = run_command(tmp_path, [sys.executable, "-u", "-c", code], timeout_seconds=1,
+                         on_output=receive, check_execution=check)
+    assert result["status"] == ("cancelled" if cancel else "timed_out")
+    assert "partial out" in result["stdout"]
+    assert "partial error" in result["stderr"]
+    assert result["error"]
     assert "partial out" in "".join(seen)
 
 
@@ -190,7 +193,8 @@ print('last diagnostic', flush=True)
             try:
                 result = run_command(tmp_path, **arguments, on_output=lambda stream, text:
                                      sink.emit(ToolOutputDelta("demo", "cmd", stream, text)))
-                sink.emit(ToolFinished("demo", "cmd", "run_command", ToolResult(True, result)))
+                sink.emit(ToolFinished("demo", "cmd", "run_command", ToolResult(
+                    result["status"] == "exited", json.dumps(result), structured_output=result)))
             except Exception as error:
                 sink.emit(ToolFinished("demo", "cmd", "run_command", ToolResult(False, str(error))))
             sink.emit(TurnCompleted("demo"))
@@ -219,10 +223,13 @@ print('last diagnostic', flush=True)
             assert len(blocks) == 1
             assert "last diagnostic" in blocks[0].output
             assert not blocks[0].failed
+            timed_out = {"status": "timed_out", "exit_code": 1, "stdout": "partial progress",
+                         "stderr": "last error", "error": "执行超时，命令已停止。"}
             sink.emit(ToolFinished("demo", "failed", "run_command", ToolResult(
-                False, "TimeoutError: command timed out\nstdout:\npartial progress\nstderr:\nlast error")))
+                False, json.dumps(timed_out, ensure_ascii=False), structured_output=timed_out)))
             await pilot.pause(0.2)
             failure = app.store.views["main"].committed_blocks[-1]
             assert failure.failed
-            assert all(text in failure.output for text in ("TimeoutError", "partial progress", "last error"))
+            assert all(text in failure.output for text in ("执行超时", "partial progress", "last error"))
+            assert failure.state == "timed_out"
     asyncio.run(exercise())

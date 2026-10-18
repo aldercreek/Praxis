@@ -1,4 +1,5 @@
 import asyncio
+import json
 from concurrent.futures import Future
 from io import StringIO
 
@@ -39,7 +40,8 @@ def render(content, width=80):
 
 def finish_tool(sink, call_id, name, arguments, output, success=True):
     sink.emit(ToolCallPrepared("turn", call_id, name, arguments, False))
-    sink.emit(ToolFinished("turn", call_id, name, ToolResult(success, output)))
+    result = ToolResult(success, json.dumps(output, ensure_ascii=False), structured_output=output) if isinstance(output, dict) else ToolResult(success, output)
+    sink.emit(ToolFinished("turn", call_id, name, result))
 
 
 @pytest.mark.parametrize("width", [48, 100])
@@ -109,7 +111,8 @@ def test_command_preview_is_bounded_and_full_output_is_in_transcript():
         sink = ViewEventSink()
         app = PraxisApp(sink)
         argv = ["powershell", "-NoProfile", "-Command", "python -m pytest tests -q"]
-        output = "exit_code: 0\nstdout:\n" + "\n".join(f"result {i}" for i in range(10)) + "\nstderr:\n<empty>"
+        output = {"status": "exited", "exit_code": 0, "stdout": "\n".join(f"result {i}" for i in range(10)),
+                  "stderr": "", "error": None}
         async with app.run_test(size=(70, 28)) as pilot:
             finish_tool(sink, "cmd", "run_command", {"argv": argv}, output)
             await pilot.pause(0.15)
@@ -127,13 +130,14 @@ def test_command_preview_is_bounded_and_full_output_is_in_transcript():
             full = render(app.screen.query_one("#details-content", Static).renderable)
             assert "-NoProfile" in full and "result 0" in full and "result 9" in full
             finish_tool(sink, "failed", "run_command", {"argv": ["pytest"]},
-                        "exit_code: 1\nstdout:\n<empty>\nstderr:\nAssertionError: expected 2, got 1")
+                        {"status": "exited", "exit_code": 1, "stdout": "", "stderr": "AssertionError: expected 2, got 1",
+                         "error": "命令已退出，退出码为 1。"})
             await pilot.pause(0.15)
             assert "AssertionError" in render(app.screen.query_one("#details-content", Static).renderable)
             await pilot.press("ctrl+t")
             await pilot.pause(0.1)
             failed = list(app.query(ToolRecord))[-1]
-            assert "失败" in render(failed.query_one(".tool-title", Static).renderable)
+            assert "已结束 · 退出码 1" in render(failed.query_one(".tool-title", Static).renderable)
             assert "AssertionError" in render(failed.query_one(".tool-preview", Static).renderable)
     asyncio.run(exercise())
 

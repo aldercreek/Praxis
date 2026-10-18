@@ -105,7 +105,8 @@ def test_command_workdir_reaches_the_process(tmp_path: Path, directory: str) -> 
     result = create_default_registry().execute("run_command", arguments, context=context)
 
     assert result.success, result.output
-    assert result.output.startswith(f"exit_code: 0\nstdout:\n{directory}\n")
+    assert result.structured_output["exit_code"] == 0
+    assert result.structured_output["stdout"] == directory + "\n"
     assert context.workspace == workspace
 
 
@@ -120,7 +121,19 @@ def test_command_schema_and_executor_accept_workdir_without_the_old_parameter(tm
         validate(arguments, definition["parameters"])
     result = registry.execute("run_command", arguments, context=_context(tmp_path))
     assert not result.success
-    assert "未知参数 relative_path" in result.output
+    assert "relative_path" in result.output
+
+
+@pytest.mark.parametrize("arguments", [{}, {"argv": ["unused"], "command": "unused"},
+                                       {"argv": None}, {"command": None}, {"argv": [42]}])
+def test_command_schema_rejects_invalid_choices_before_execution(tmp_path, arguments):
+    registry = create_default_registry()
+    definition = next(tool for tool in registry.definitions() if tool["name"] == "run_command")
+    with pytest.raises(ValidationError):
+        validate(arguments, definition["parameters"])
+    result = registry.execute("run_command", arguments, context=_context(tmp_path))
+    assert not result.success
+    assert "run_command 未执行" in result.output
 
 
 def test_registry_returns_an_error_for_unknown_tools(tmp_path: Path) -> None:

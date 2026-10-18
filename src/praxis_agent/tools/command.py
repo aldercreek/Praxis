@@ -8,7 +8,8 @@ from collections.abc import Callable
 from pathlib import Path
 from time import monotonic
 
-from praxis_agent.execution import current_handle
+from praxis_agent.execution import ExecutionStopped, current_handle
+from praxis_agent.runtime import CommandShell, select_command_shell
 from praxis_agent.tools.processes import CommandProcess
 
 _DEFAULT_TIMEOUT_SECONDS = 60
@@ -68,18 +69,25 @@ def _resolve_working_directory(
 
 def run_command(
     workspace: Path,
-    argv: list[str],
+    argv: list[str] | None = None,
     workdir: str = ".",
     timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS,
     *,
+    command: str | None = None,
+    command_shell: CommandShell | None = None,
     check_execution: Callable[[], None] | None = None,
     on_output: Callable[[str, str], None] | None = None,
-) -> str:
-    """在指定目录运行非交互式命令，并返回退出码和输出。"""
-    if not isinstance(argv, list) or not argv:
-        raise ValueError("argv must be a non-empty list")
-    if any(not isinstance(argument, str) or not argument for argument in argv):
-        raise ValueError("every argv item must be a non-empty string")
+) -> dict[str, object]:
+    """执行程序或 shell 正文，清理进程后返回同一份结构化结果。"""
+    if (argv is None) == (command is None):
+        raise ValueError("argv 和 command 必须且只能提供一个；命令未执行。")
+    if argv is not None:
+        if not isinstance(argv, list) or not argv or any(not isinstance(item, str) for item in argv):
+            raise ValueError("argv must be a non-empty list of strings")
+        if not argv[0]:
+            raise ValueError("argv[0] must be a non-empty executable name")
+    elif not isinstance(command, str) or not command.strip():
+        raise ValueError("command must be a non-empty string")
     if isinstance(timeout_seconds, bool) or not isinstance(
         timeout_seconds,
         int,
@@ -117,32 +125,54 @@ def run_command(
                     if not final or not chunk:
                         break
 
-        command = CommandProcess(_resolve_command_argv(argv), cwd=working_directory, stdin=subprocess.DEVNULL,
-                                 stdout=out, stderr=err, shell=False)
+        try:
+            if command is not None:
+                selected_shell = command_shell or select_command_shell()
+                if selected_shell is None:
+                    raise FileNotFoundError("未检测到可用的命令 shell")
+                argv = selected_shell.argv(command)
+            process = CommandProcess(_resolve_command_argv(argv), cwd=working_directory, stdin=subprocess.DEVNULL,
+                                     stdout=out, stderr=err, shell=False)
+        except OSError as error:
+            if isinstance(error, FileNotFoundError):
+                reason = "找不到可执行文件或可用的命令 shell。请检查命令名称、安装情况或程序路径。"
+            elif isinstance(error, PermissionError):
+                reason = "访问被拒绝。请检查执行权限。"
+            else:
+                reason = str(error)
+            return {"status": "spawn_failed", "exit_code": None, "stdout": "", "stderr": "",
+                    "error": f"无法启动命令：{reason}"}
         handle = current_handle()
-        unsubscribe = handle.on_cancel(command.request_stop) if handle is not None else lambda: None
+        unsubscribe = handle.on_cancel(process.request_stop) if handle is not None else lambda: None
+        status = "exited"
         failure = None
         try:
             deadline = monotonic() + timeout_seconds
-            while command.process.poll() is None:
+            while process.process.poll() is None:
                 drain()
                 if check_execution is not None:
                     check_execution()
                 if monotonic() >= deadline:
-                    raise TimeoutError(f"command timed out after {timeout_seconds} seconds")
+                    status = "timed_out"
+                    break
                 try:
-                    command.process.wait(timeout=min(0.1, max(0.001, deadline - monotonic())))
+                    process.process.wait(timeout=min(0.1, max(0.001, deadline - monotonic())))
                 except subprocess.TimeoutExpired:
                     pass
-            returncode = command.process.returncode
+            if check_execution is not None:
+                check_execution()
             if handle is not None:
                 handle.check()
+        except ExecutionStopped:
+            status = "cancelled"
         except Exception as error:
             failure = error
         finally:
             unsubscribe()
             try:
-                command.close()
+                process.close()
+            except Exception as error:
+                failure = error
             finally:
                 drain(final=True)
         out.seek(0)
@@ -152,10 +182,13 @@ def run_command(
         if failure is not None:
             failure.args = (f"{failure}\nstdout:\n{stdout or '<empty>'}\nstderr:\n{stderr or '<empty>'}",)
             raise failure
-    return "\n".join(
-        (
-            f"exit_code: {returncode}",
-            f"stdout:\n{stdout or '<empty>'}",
-            f"stderr:\n{stderr or '<empty>'}",
-        )
-    )
+        returncode = process.process.returncode
+    error = None
+    if status == "timed_out":
+        error = f"执行超过 {timeout_seconds} 秒，命令及其子进程已停止。已保留停止前的输出。"
+    elif status == "cancelled":
+        error = "用户取消了执行，命令及其子进程已停止。已保留停止前的输出。"
+    elif returncode != 0:
+        error = (f"命令已执行并退出，退出码为 {returncode}。请结合 stdout 和 stderr 判断具体原因；"
+                 "非零退出码的含义由具体程序决定。")
+    return {"status": status, "exit_code": returncode, "stdout": stdout, "stderr": stderr, "error": error}

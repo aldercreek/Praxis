@@ -102,8 +102,9 @@ def test_command_preview_is_removed_when_full_result_is_committed():
     store.accept(ToolOutputDelta("t", "cmd", "stdout", "partial", agent_id="a"))
     view = store.views["a"]
     assert "partial" in text_of(view)
+    result = {"status": "exited", "exit_code": 0, "stdout": "partial", "stderr": "", "error": None}
     store.accept(ChildAgentEvent("parent", "a", ToolFinished(
-        "t", "cmd", "run_command", ToolResult(True, "exit_code: 0\nstdout:\npartial\nstderr:\n<empty>"))))
+        "t", "cmd", "run_command", ToolResult(True, json.dumps(result), structured_output=result))))
     assert text_of(view).count("partial") == 1
 
 

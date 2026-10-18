@@ -10,7 +10,6 @@ import pytest
 
 from praxis_agent.agent import create_default_agent
 from praxis_agent.config import ModelConfig
-from praxis_agent.execution import ExecutionStopped
 from praxis_agent.model import FunctionCall, ModelResponse
 from praxis_agent.multi_agent.models import (
     AgentStatus,
@@ -238,9 +237,11 @@ def process_alive(pid):
 
 
 @pytest.mark.parametrize("ending", ["cancel", "timeout", "return"])
-def test_command_stops_descendants_on_every_exit(tmp_path, ending):
+@pytest.mark.parametrize("mode", ["argv", "command"])
+def test_command_stops_descendants_on_every_exit(tmp_path, ending, mode):
     control = ExecutionControl()
     errors = []
+    results = []
     child = "import os,time; from pathlib import Path; Path('child.pid').write_text(str(os.getpid())); time.sleep(120)"
     launcher = (
         "import subprocess,sys,time; from pathlib import Path; "
@@ -248,11 +249,25 @@ def test_command_stops_descendants_on_every_exit(tmp_path, ending):
         "\nwhile not Path('child.pid').exists(): time.sleep(0.01)\n"
         + ("" if ending == "return" else "time.sleep(120)")
     )
+    arguments = {"argv": [sys.executable, "-c", launcher]}
+    if mode == "command":
+        from praxis_agent.runtime import select_command_shell
+        shell = select_command_shell()
+        if shell is None:
+            pytest.skip("no supported shell installed")
+        (tmp_path / "launcher.py").write_text(launcher, encoding="utf-8")
+        if shell.name in {"pwsh", "powershell"}:
+            executable = sys.executable.replace("'", "''")
+            arguments = {"command": f"& '{executable}' launcher.py\nexit $LASTEXITCODE"}
+        else:
+            import shlex
+            arguments = {"command": f"{shlex.quote(sys.executable)} launcher.py"}
 
     def run():
         try:
-            run_command(tmp_path, [sys.executable, "-c", launcher], timeout_seconds=1 if ending == "timeout" else 10,
-                        check_execution=control.check)
+            results.append(run_command(tmp_path, **arguments,
+                                       timeout_seconds=1 if ending == "timeout" else 10,
+                                       check_execution=control.check))
         except Exception as error:
             errors.append(error)
 
@@ -272,12 +287,8 @@ def test_command_stops_descendants_on_every_exit(tmp_path, ending):
         while process_alive(pid) and monotonic() < deadline:
             sleep(0.02)
         assert not process_alive(pid)
-        if ending == "cancel":
-            assert isinstance(errors[0], ExecutionStopped)
-        elif ending == "timeout":
-            assert isinstance(errors[0], TimeoutError)
-        else:
-            assert not errors
+        assert not errors
+        assert results[0]["status"] == {"cancel": "cancelled", "timeout": "timed_out", "return": "exited"}[ending]
     finally:
         control.cancelled.set()
         thread.join(5)

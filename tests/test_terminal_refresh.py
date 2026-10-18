@@ -1,6 +1,7 @@
 """Verify submitted frames, not just the UI after it has settled."""
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -86,8 +87,9 @@ def test_tool_title_is_correct_in_first_frame_and_completion_keeps_widget(
             await wait_for_ui(pilot, lambda: record.query_one(".tool-preview").size.height == 2)
             before = record.region
             frames.clear()
+            result = {"status": "exited", "exit_code": 0, "stdout": "line-1\nline-2\n", "stderr": "", "error": None}
             app.sink.emit(ToolFinished("turn", "cmd", "run_command", ToolResult(
-                True, "exit_code: 0\nstdout:\nline-1\nline-2\nstderr:\n<empty>",
+                True, json.dumps(result), structured_output=result,
             )))
             await wait_for_ui(pilot, lambda: record.calls[0].state == "completed")
             assert app.query_one(ToolRecord) is record
@@ -96,7 +98,7 @@ def test_tool_title_is_correct_in_first_frame_and_completion_keeps_widget(
             assert frames
             for rows, _, _ in frames:
                 assert sum("python demo.py" in row for row in rows) == 1
-                assert any("已执行 python demo.py" in row for row in rows)
+                assert any("已完成 · 执行 python demo.py" in row for row in rows)
                 assert not any(row.strip() in {"•", "…"} for row in rows)
     asyncio.run(exercise())
 

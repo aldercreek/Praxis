@@ -213,6 +213,8 @@ def _detail_line(detail: str) -> Text:
 
 
 def display_command(arguments: Mapping[str, object]) -> str:
+    if isinstance(arguments.get("command"), str):
+        return arguments["command"]
     argv = arguments.get("argv")
     if not isinstance(argv, list) or not all(
         isinstance(part, str) for part in argv
@@ -272,10 +274,15 @@ def tool_title(calls: tuple[ToolBlock, ...]) -> Text:
             title.append(f" · {cancelled} 次已停止", style="dim")
         return title
     call = calls[0]
-    exit_code = re.match(r"exit_code: (-?\d+)", call.output) if call.name == "run_command" else None
     title = Text({"running": "正在", "cancelled": "已停止 · "}.get(call.state, "已"))
     if call.failed:
-        title = Text(f"失败 (exit {exit_code[1]}) · " if exit_code else "失败 · ")
+        title = Text("失败 · ")
+    if call.structured_output is not None:
+        result = call.structured_output
+        label = {"spawn_failed": "启动失败", "timed_out": "已超时", "cancelled": "已停止"}.get(result["status"])
+        if result["status"] == "exited":
+            label = "已完成" if result["exit_code"] == 0 else f"已结束 · 退出码 {result['exit_code']}"
+        title = Text(f"{label} · ")
     title.append(call.title)
     if call.detail:
         title.append(" ")
@@ -352,7 +359,7 @@ def tool_preview(calls: tuple[ToolBlock, ...]) -> RenderableType:
         if summary is not None:
             return OutputPreview(summary) if summary else ""
         details = change_lines(call.file_change) if call.file_change is not None else output_lines(
-            call.output, command=call.name == "run_command")
+            call.structured_output if call.structured_output is not None else call.output)
     return OutputPreview(details)
 
 
@@ -365,8 +372,12 @@ def tool_details(calls: tuple[ToolBlock, ...]) -> RenderableType:
             lines.append(Text(f"{call.title} {call.detail}".rstrip(), style="bold"))
         if call.file_change is not None:
             lines.extend(change_lines(call.file_change))
-        lines.extend((Text("参数", style="dim"), Text(call.arguments),
-                      Text("输出", style="dim"), Text.from_ansi(call.output)))
+        lines.extend((Text("参数", style="dim"), Text(call.arguments), Text("输出", style="dim")))
+        if call.structured_output is not None:
+            for field, value in call.structured_output.items():
+                lines.extend((Text(field, style="dim"), Text.from_ansi(str(value) if value is not None else "null")))
+        else:
+            lines.append(Text.from_ansi(call.output))
     return Group(*lines)
 
 
@@ -381,7 +392,7 @@ def approval_content(name: str, arguments: Mapping[str, object]) -> RenderableTy
     labels = {"relative_path": "目录", "workdir": "目录", "workspace": "工作区", "timeout_seconds": "超时（秒）", "reason": "原因",
               "old_string": "替换前", "new_string": "替换后", "content": "写入内容"}
     for key, value in arguments.items():
-        if key in {"argv", "agent_id"}:
+        if key in {"argv", "command", "agent_id"}:
             continue
         line = Text(f"{labels.get(key, key)}：", style="dim")
         line.append(str(value), style="not dim")

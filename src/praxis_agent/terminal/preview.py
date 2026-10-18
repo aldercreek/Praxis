@@ -30,14 +30,7 @@ class OutputPreview:
             yield Text.assemble((prefix, self.prefix_style), row, style=self.style)
 
 
-def output_lines(output: str, *, command: bool = False) -> list[Text]:
-    if command:
-        header, separator, streams = output.partition("\nstdout:\n")
-        if separator:
-            stdout, stderr_separator, stderr = streams.rpartition("\nstderr:\n")
-            if stderr_separator:
-                parts = [part for part in (stdout, stderr) if part.strip() != "<empty>"]
-                if not header.startswith("exit_code:"):
-                    parts.insert(0, header)
-                output = "\n".join(parts)
+def output_lines(output: str | dict[str, object]) -> list[Text]:
+    if isinstance(output, dict):
+        output = "\n".join(output[field] for field in ("error", "stdout", "stderr") if output[field])
     return [Text.from_ansi(line) for line in output.splitlines()]

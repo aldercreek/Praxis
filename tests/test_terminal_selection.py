@@ -1,6 +1,7 @@
 """Exercise real mouse/key events without touching the user's system clipboard."""
 
 import asyncio
+import json
 from concurrent.futures import Future
 from unittest.mock import Mock
 
@@ -165,7 +166,8 @@ def test_copy_feedback_is_inline_without_focus_or_layout_change(
             blocks.append(MessageBlock("```python\nprint('hello')\n```"))
             literal = "print('hello')"
         elif surface == "tool":
-            blocks.append(ToolBlock("执行命令", "{}", "exit_code: 0\nstdout:\ncopy output\nstderr:\n<empty>",
+            result = {"status": "exited", "exit_code": 0, "stdout": "copy output", "stderr": "", "error": None}
+            blocks.append(ToolBlock("执行命令", "{}", json.dumps(result), structured_output=result,
                                     name="run_command", detail="echo copy output"))
             literal = "copy output"
         else:

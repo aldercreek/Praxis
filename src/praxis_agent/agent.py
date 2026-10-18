@@ -477,7 +477,7 @@ def _build_function_call_output(
         "output": json.dumps(
             {
                 "success": result.success,
-                "output": result.output,
+                "output": result.structured_output if function_call.name == "run_command" and result.structured_output is not None else result.output,
             },
             ensure_ascii=False,
         ),
@@ -545,7 +545,8 @@ def create_default_agent(
                                        execution_control=control)
     agent = Agent(
         model_client=model_client,
-        tool_registry=create_default_registry(config.context_policy, check_execution=control.check),
+        tool_registry=create_default_registry(config.context_policy, check_execution=control.check,
+                                              command_shell=runtime_context.command_shell),
         execution_control=control,
         workspace=runtime_context.workspace_root,
         event_sink=event_sink,
@@ -584,12 +585,14 @@ def create_default_agent(
     def create_worker(agent_id: str, control: ExecutionControl, sink: EventSink) -> Agent:
         handle = collaboration.handles[agent_id]
         # Skill discovery belongs to the session project, not a worker's output directory.
+        worker_context = collect_runtime_context(handle.workspace)
         worker_instructions = build_instructions(
-            collect_runtime_context(handle.workspace), skills=skills,
+            worker_context, skills=skills,
             collaboration_instructions=WORKER_INSTRUCTIONS,
         )
         registry = ToolRegistry()
-        for tool in create_default_registry(config.context_policy, check_execution=control.check).tools:
+        for tool in create_default_registry(config.context_policy, check_execution=control.check,
+                                            command_shell=worker_context.command_shell).tools:
             registry.register(tool)
         registry.register(code_runtime.tool(agent_id))
         registry.register(create_skill_tool(skills, max_chars=config.context_policy.max_tool_output_chars))

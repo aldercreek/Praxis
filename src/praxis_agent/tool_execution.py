@@ -199,7 +199,7 @@ class ToolCallExecutor:
                           check_execution=self.check_execution,
                           on_command_output=lambda stream, text: self.publish_event(ToolOutputDelta(
                               turn_id, function_call.call_id, stream, text,
-                              command=" ".join(str(part) for part in arguments.get("argv", [])),
+                              command=arguments.get("command") or " ".join(str(part) for part in arguments.get("argv", [])),
                           )))
         prepared = self.tool_registry.prepare(function_call.name, arguments, context=context)
         if isinstance(prepared, ToolResult):

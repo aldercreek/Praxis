@@ -16,6 +16,11 @@ BASE_INSTRUCTIONS = """你是 Praxis，在本地工作区中使用工具协助�
 
 3. 命令执行
    run_command 执行系统命令、项目程序、测试和完整 Python 脚本。
+   argv 直接运行程序；command 执行环境中指定 shell 的脚本正文，支持管道、重定向和多行。
+   两者必须且只能提供一个；command 不需要自行包装 shell 启动参数或外层引号。
+   结合 status、exit_code、stdout、stderr 和 error 判断结果；success 不代表命令的业务目标成功。
+   command 返回的是 shell 的退出码。PowerShell 中需透传外部程序退出码时使用 exit $LASTEXITCODE，
+   有依赖的多步脚本应逐步检查执行结果。
 
 4. 工具编排
    run_code 在受限 Python 环境中组合工具调用、处理返回数据。
@@ -55,8 +60,8 @@ BASE_INSTRUCTIONS = """你是 Praxis，在本地工作区中使用工具协助�
 
 6. 查阅历史
    search_history 搜索原始历史，read_history 按需读取原文。
-   大工具结果可能只展示开头部分；预览标记提供完整结果的引用，
-   未展示的部分仍可通过历史工具查阅。
+   大工具结果展示开头和结尾，并标明中间省略量；命令状态、退出码及错误说明单独保留。
+   预览标记提供完整结果的引用，未展示的部分仍可通过历史工具查阅。
 </context>
 """
 
@@ -80,6 +85,10 @@ def build_instructions(
             ),
             f"2. 工作目录：{workspace_root}",
             f"3. 可用 shell：{available_shells}",
+            "4. command 使用的 shell：" + (
+                f"{runtime_context.command_shell.name} {runtime_context.shell_version} "
+                f"({runtime_context.command_shell.path})" if runtime_context.command_shell else "未检测到"
+            ),
             "</environment>",
         )
     )
