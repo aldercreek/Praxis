@@ -3,10 +3,8 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
-from uuid import uuid4
 from time import monotonic
-
-from praxis_agent.events import ContextCompaction, EventSink
+from uuid import uuid4
 
 from praxis_agent.context.capacity import (
     ContextPolicy,
@@ -29,6 +27,8 @@ from praxis_agent.context.operations import (
 )
 from praxis_agent.context.summarizer import ContextSummarizer
 from praxis_agent.context.tool_output import preview_tool_outputs
+from praxis_agent.events import ContextCompaction, EventSink
+from praxis_agent.execution import ExecutionStopped
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +165,9 @@ class ContextManager:
         emit("started")
         try:
             status = self._compact_overflow(transient_items, tool_definitions, progress)
+        except ExecutionStopped:
+            emit("cancelled")
+            raise
         except Exception as error:
             emit("failed", error=str(error))
             raise

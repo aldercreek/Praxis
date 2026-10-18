@@ -10,8 +10,13 @@ import pytest
 
 from praxis_agent.agent import create_default_agent
 from praxis_agent.config import ModelConfig
+from praxis_agent.execution import ExecutionStopped
 from praxis_agent.model import FunctionCall, ModelResponse
-from praxis_agent.multi_agent.models import AgentStatus, ExecutionControl, ExecutionStopped, MultiAgentConfig
+from praxis_agent.multi_agent.models import (
+    AgentStatus,
+    ExecutionControl,
+    MultiAgentConfig,
+)
 from praxis_agent.multi_agent.runtime import AgentRuntime
 from praxis_agent.planning import RunState
 from praxis_agent.tools import ToolContext
@@ -53,7 +58,7 @@ def test_default_agent_binds_directory_delivers_resumes_and_retains_files(tmp_pa
                 if self.calls == 2:
                     return response(tool="run_command", arguments={"argv": [sys.executable, "-c",
                         "from pathlib import Path; p=Path('results/report.txt'); assert p.read_text() == 'initial report\\n'; print('verified')"],
-                        "relative_path": ".", "timeout_seconds": 10})
+                        "workdir": ".", "timeout_seconds": 10})
                 return response("Report complete: results/report.txt; command verified.")
             return response("Reviewed worker deliveries.")
 

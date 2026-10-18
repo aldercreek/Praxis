@@ -6,21 +6,35 @@ from types import SimpleNamespace
 
 from rich.console import Console
 from rich.text import Text
-from textual.containers import VerticalScroll
-from textual.widgets import Input, Static
+from textual.containers import ScrollableContainer, VerticalScroll
+from textual.widgets import Static, TextArea
 
+from praxis_agent.context.capacity import ContextPressure, ContextStatus
 from praxis_agent.events import (
-    AssistantTextCompleted, AssistantTextDelta, ChildAgentEvent, ChildAgentMessage, ChildAgentStatus,
-    CompositeEventSink, ContextCompaction, MessagesReceived, ModelRequestCompleted,
-    ModelRequestStarted, PlanUpdated, ToolCallPrepared,
-    ToolFinished, ToolOutputDelta, ToolStarted, TurnCompleted, TurnFailed, TurnStarted,
+    AssistantTextCompleted,
+    AssistantTextDelta,
+    ChildAgentEvent,
+    ChildAgentMessage,
+    ChildAgentStatus,
+    CompositeEventSink,
+    ContextCompaction,
+    MessagesReceived,
+    ModelRequestCompleted,
+    ModelRequestStarted,
+    PlanUpdated,
+    ToolCallPrepared,
+    ToolFinished,
+    ToolOutputDelta,
+    ToolStarted,
+    TurnCompleted,
+    TurnFailed,
+    TurnStarted,
 )
 from praxis_agent.model import ModelResponse
-from praxis_agent.context.capacity import ContextPressure, ContextStatus
-from praxis_agent.planning.plan import PlanStep, PlanStepStatus
 from praxis_agent.multi_agent.models import MultiAgentConfig
 from praxis_agent.multi_agent.runtime import AgentRuntime
-from praxis_agent.terminal.app import AgentRow, ApprovalPanel, DetailsScreen, PraxisApp
+from praxis_agent.planning.plan import PlanStep, PlanStepStatus
+from praxis_agent.terminal.app import AgentTab, ApprovalPanel, DetailsScreen, PraxisApp
 from praxis_agent.terminal.views import AgentView, ToolBlock, ViewEventSink, ViewStore
 from praxis_agent.tools import ToolResult
 
@@ -36,7 +50,6 @@ def text_of(view):
     console = Console(file=capture, width=100, color_system=None)
     for block in view.committed_blocks:
         console.print(block.output if isinstance(block, ToolBlock) else block)
-    console.print(view.active_content())
     return capture.getvalue()
 
 
@@ -74,7 +87,8 @@ def test_parallel_tools_keep_remaining_activity_and_full_results():
     output = "full contents\n" * 100
     view.consume(ToolFinished("t", "one", "read_file", ToolResult(True, output)))
     assert view.phase == "读取文件"
-    assert view.committed_blocks[-1].output == output
+    assert view.committed_blocks[1].output == output
+    assert view.committed_blocks[2].state == "running"
     view.consume(ToolFinished("t", "two", "read_file", ToolResult(False, "missing file")))
     assert view.state == "running"  # A tool error is not an agent failure.
     view.consume(TurnFailed("t", "RuntimeError", "stopped", occurred_at=35))
@@ -213,11 +227,11 @@ def test_app_switches_live_pages_and_preserves_full_tool_results():
             await pilot.pause(0.1)
             assert "entire tool result" in widget_text(app.screen.query_one("#details-content", Static))
             await pilot.press("escape")
-            rows = list(app.query_one("#agents", VerticalScroll).query(AgentRow))
-            assert len({row.region.y for row in rows}) == len(rows)
+            rows = list(app.query_one("#agents", ScrollableContainer).query(AgentTab))
+            assert len({row.region.y for row in rows}) == 1
             assert all(row.size.height == 1 for row in rows)
-            assert widget_text(rows[1]).startswith("● ")
-            assert widget_text(rows[0]).startswith("  ")
+            assert rows[1].has_class("selected")
+            assert not rows[0].has_class("selected")
             rows[1].focus()
             await pilot.press("up")
             await pilot.pause()
@@ -225,17 +239,18 @@ def test_app_switches_live_pages_and_preserves_full_tool_results():
             await pilot.press("down")
             await pilot.pause()
             assert app.selected_agent_id == "b"
-            app.query_one("#task", Input).focus()
+            app.query_one("#task", TextArea).focus()
             await pilot.pause()
-            assert widget_text(rows[1]).startswith("● ")
+            assert rows[1].has_class("selected")
             for index in range(8):
                 sink.emit(ChildAgentStatus("main", f"extra-{index}", "running", "task"))
             await pilot.pause(0.2)
-            assert app.query_one("#agents", VerticalScroll).size.height == 6
+            assert app.query_one("#agents", ScrollableContainer).size.height == 1
+            await pilot.resize_terminal(80, 35)
             await pilot.press("alt+left", "alt+left")
             await pilot.pause()
             assert app.selected_agent_id == "extra-7"
-            assert app.query_one("#agents", VerticalScroll).scroll_y > 0
+            assert app.query_one("#agents", ScrollableContainer).scroll_x > 0
     asyncio.run(exercise())
 
 
@@ -246,7 +261,7 @@ def test_app_restores_scroll_and_does_not_follow_output_when_reading_history():
         for agent_id in ("main", "b"):
             view = app.store.get(agent_id)
             for i in range(60):
-                view._commit(Text(f"{agent_id}: saved line {i}"))
+                view.committed_blocks.append(Text(f"{agent_id}: saved line {i}"))
         async with app.run_test(size=(90, 25)) as pilot:
             await pilot.pause(0.2)
             pane = app.query_one("#transcript", VerticalScroll)
@@ -373,12 +388,13 @@ def test_app_clear_removes_background_pages_and_pending_old_events():
             assert app.selected_agent_id == "main"
             assert list(app.store.views) == ["main"]
             assert not app.store.views["main"].committed_blocks
-            assert not app.query_one("#agents", VerticalScroll).display
+            assert not app.query_one("#agent-bar").display
     asyncio.run(exercise())
 
 
 def test_app_quit_cancels_running_command(tmp_path):
     import sys
+
     from praxis_agent.agent import Agent
     from praxis_agent.model import FunctionCall
     from praxis_agent.multi_agent.models import ExecutionControl

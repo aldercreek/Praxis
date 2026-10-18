@@ -3,10 +3,15 @@ from queue import SimpleQueue
 from threading import Event
 
 import pytest
-from textual.widgets import Input
+from textual.widgets import TextArea
 
 from praxis_agent.agent import Agent
-from praxis_agent.events import MessagesReceived, ToolStarted, TurnCompleted, TurnStarted
+from praxis_agent.events import (
+    MessagesReceived,
+    ToolStarted,
+    TurnCompleted,
+    TurnStarted,
+)
 from praxis_agent.model import FunctionCall, ModelResponse
 from praxis_agent.sessions import SQLiteSessionStore
 from praxis_agent.terminal.app import PraxisApp
@@ -134,16 +139,16 @@ def test_cli_accepts_steer_and_keeps_late_input(tmp_path, arrival):
         async with app.run_test() as pilot:
             try:
                 assert await asyncio.to_thread(reached.wait, 5)
-                field = app.query_one("#task", Input)
+                field = app.query_one("#task", TextArea)
                 assert app.busy and not field.disabled
-                field.value = "/clear"
+                field.text = "/clear"
                 await pilot.press("enter")
                 assert app.user_input.empty()
-                assert field.value == "/clear"
+                assert field.text == "/clear"
                 for text in ("also check tests", "only change Python files"):
-                    field.value = text
+                    field.text = text
                     await pilot.press("enter")
-                    assert field.value == ""
+                    assert field.text == ""
                 assert app.user_input.qsize() == 2
                 release.set()
                 async with asyncio.timeout(10):

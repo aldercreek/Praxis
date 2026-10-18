@@ -1,11 +1,9 @@
 import asyncio
 
 import pytest
-from textual.widgets import Input
+from textual.widgets import TextArea
 
 from praxis_agent.cli import main
-from praxis_agent.terminal.app import PraxisApp
-from praxis_agent.terminal.views import ViewEventSink
 from praxis_agent.events import (
     AssistantTextCompleted,
     AssistantTextDelta,
@@ -13,6 +11,8 @@ from praxis_agent.events import (
     ModelRequestCompleted,
     ModelRequestStarted,
 )
+from praxis_agent.terminal.app import PraxisApp
+from praxis_agent.terminal.views import ViewEventSink
 
 
 class FakeAgent:
@@ -90,7 +90,7 @@ def test_cli_runs_an_interactive_session(capsys, monkeypatch) -> None:
         async def exercise():
             async with app.run_test() as pilot:
                 for task in ["first task", "/clear", "follow-up task", "/exit"]:
-                    app.query_one("#task", Input).value = task
+                    app.query_one("#task", TextArea).text = task
                     await pilot.press("enter")
                     await pilot.pause(0.2)
         asyncio.run(exercise())

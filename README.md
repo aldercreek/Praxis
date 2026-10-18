@@ -143,7 +143,7 @@ Agent 主循环
 - `list_files` 列出一层内容；`find_files` 与 `search_text` 包含隐藏和 gitignore 忽略的文件，不自动排除目录，也没有结果条数上限。用 `relative_path`、`file_pattern` 和 `ignore_patterns` 控制范围。
 - `search_text` 是区分大小写的单行字面搜索，返回文件、行号和字符偏移，不返回源码正文；再用 `read_file` 读取。
 - `edit_file` 的每个旧文本必须唯一匹配，多个替换按顺序应用，全部成功才写回文件。
-- `run_command` 接收 argv 数组，不隐式解析管道或 shell 语法。需要这些语法时显式调用 PowerShell、bash 等。工作目录必须位于 Agent 工作目录内；默认超时 60 秒，允许 1–120 秒。
+- `run_command` 接收 argv 数组，不隐式解析管道或 shell 语法。需要这些语法时显式调用 PowerShell、bash 等。`workdir` 接受已存在的绝对目录或相对于 Agent 工作目录的目录，可以位于工作区外；省略时使用 Agent 工作目录。默认超时 60 秒，允许 1–120 秒。
 - 命令以前台方式运行，stdin 不交互，输出可以实时显示。结束或取消时清理其后代进程，不适合作为后台常驻服务启动器。
 
 读文件、列目录、搜索和历史读取等标记为 `parallel_safe` 的连续调用可并行。默认每组最多 4 个处理函数，`PRAXIS_MAX_PARALLEL_TOOLS=1` 可关闭并行。其他调用是顺序屏障，不会跨过它们重排。

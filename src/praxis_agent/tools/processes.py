@@ -4,12 +4,14 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+from threading import Lock
 
 
 class CommandProcess:
     def __init__(self, argv: list[str], **kwargs: object) -> None:
         self.job = None
         self.process = None
+        self._lock = Lock()
         if os.name == "nt":
             self._start_windows(argv, kwargs)
         else:
@@ -40,6 +42,8 @@ class CommandProcess:
         kernel.AssignProcessToJobObject.restype = wintypes.BOOL
         kernel.CloseHandle.argtypes = [wintypes.HANDLE]
         kernel.CloseHandle.restype = wintypes.BOOL
+        kernel.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel.TerminateJobObject.restype = wintypes.BOOL
         self.kernel = kernel
         self.job = kernel.CreateJobObjectW(None, None)
         if not self.job:
@@ -69,15 +73,25 @@ class CommandProcess:
             self.close()
             raise
 
+    def request_stop(self) -> None:
+        """Signal the process tree without waiting on the UI/cancellation thread."""
+        with self._lock:
+            if os.name == "nt":
+                if self.job:
+                    if not self.kernel.TerminateJobObject(self.job, 1):
+                        import ctypes
+                        raise ctypes.WinError(ctypes.get_last_error())
+            elif self.process is not None:
+                try:
+                    os.killpg(self.process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
     def close(self) -> None:
-        if os.name == "nt":
-            if self.job:
+        self.request_stop()
+        with self._lock:
+            if os.name == "nt" and self.job:
                 self.kernel.CloseHandle(self.job)
                 self.job = None
-        elif self.process is not None:
-            try:
-                os.killpg(self.process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
         if self.process is not None:
             self.process.wait(timeout=10)

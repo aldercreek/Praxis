@@ -15,19 +15,19 @@ from langfuse import Langfuse, propagate_attributes
 from praxis_agent.config import LangfuseConfig
 from praxis_agent.events import (
     AgentEvent,
+    AssistantTextCompleted,
     ChildAgentEvent,
     ContextCompaction,
-    AssistantTextCompleted,
     ModelRequestCompleted,
     ModelRequestStarted,
     ToolCallPrepared,
     ToolFinished,
     ToolStarted,
+    TurnCancelled,
     TurnCompleted,
     TurnFailed,
     TurnStarted,
 )
-
 
 _LOGGER = logging.getLogger(__name__)
 _MAX_TASK_CHARS = 4_000
@@ -192,6 +192,8 @@ class LangfuseEventSink:
             self._set_turn_output(event)
         elif isinstance(event, TurnCompleted):
             self._finish_turn(event.turn_id)
+        elif isinstance(event, TurnCancelled):
+            self._finish_turn(event.turn_id)
         elif isinstance(event, TurnFailed):
             self._fail_turn(event)
 
@@ -241,7 +243,7 @@ class LangfuseEventSink:
                 observation.end()
         elif isinstance(event, AssistantTextCompleted):
             worker.update(output=_truncate_text(event.text, _MAX_MODEL_OUTPUT_CHARS))
-        elif isinstance(event, (TurnCompleted, TurnFailed)):
+        elif isinstance(event, (TurnCompleted, TurnFailed, TurnCancelled)):
             if isinstance(event, TurnFailed):
                 worker.update(level="ERROR", status_message=_truncate_text(event.message, _MAX_VALUE_CHARS))
             self._finish_worker(worker_id)
@@ -287,7 +289,7 @@ class LangfuseEventSink:
                     values["usage_details"] = {"input": event.input_tokens, "output": event.output_tokens}
                 generation.update(**values)
                 generation.end()
-        elif event.stage in {"completed", "failed"}:
+        elif event.stage in {"completed", "failed", "cancelled"}:
             error = metadata["error"] if event.stage == "failed" else ""
             self._close_summary_requests(event.turn_id, str(error))
             values = {"metadata": metadata, "output": {

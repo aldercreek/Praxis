@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from praxis_agent.agent import create_default_agent
 from praxis_agent.config import LangfuseConfig
 from praxis_agent.events import CompositeEventSink, EventSink
-from praxis_agent.sessions import SQLiteSessionStore, SessionStoreError
+from praxis_agent.sessions import SessionStoreError, SQLiteSessionStore
 from praxis_agent.terminal.sessions import print_session_list
 
 if TYPE_CHECKING:
@@ -115,14 +115,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     app.agent = agent
-    if args.resume_latest or args.resume is not None:
-        from rich.text import Text
-        app.store.views["main"]._commit(Text(
-            f"已恢复会话 {agent.session_id}，模型历史 {agent.history_item_count} 条。"
-            "执行页面记录从本次启动开始。", style="dim",
-        ))
-
     try:
+        if args.resume_latest or args.resume is not None:
+            app.store.views["main"].restore_history(agent.session_store.load_conversation_items(agent.session_id))
         return app.run() or 0
     finally:
         try:

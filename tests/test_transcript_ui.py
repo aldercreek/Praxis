@@ -8,11 +8,24 @@ from textual.containers import VerticalScroll
 from textual.widgets import OptionList, Static
 
 from praxis_agent.events import (
-    AssistantTextCompleted, AssistantTextDelta, ChildAgentMessage, ModelRequestCompleted,
-    ModelRequestStarted, ToolCallPrepared, ToolFinished, TurnCompleted, TurnStarted,
+    AssistantTextCompleted,
+    AssistantTextDelta,
+    ChildAgentMessage,
+    ModelRequestCompleted,
+    ModelRequestStarted,
+    ToolCallPrepared,
+    ToolFinished,
+    TurnCompleted,
+    TurnStarted,
 )
 from praxis_agent.model import ModelResponse
-from praxis_agent.terminal.app import Approval, ApprovalPanel, DetailsScreen, PraxisApp, ToolRecord
+from praxis_agent.terminal.app import (
+    Approval,
+    ApprovalPanel,
+    DetailsScreen,
+    PraxisApp,
+    ToolRecord,
+)
 from praxis_agent.terminal.cells import MessageBlock, display_command
 from praxis_agent.terminal.views import AgentView, ToolBlock, ViewEventSink
 from praxis_agent.tools import ToolResult
@@ -84,7 +97,10 @@ def test_grouped_reads_update_in_place_and_keep_full_details():
             assert record.query_one(".tool-preview", Static).display
             finish_tool(sink, "c", "read_file", {"relative_path": "missing.py"}, "file missing", success=False)
             await pilot.pause(0.15)
-            assert len(app.query(ToolRecord)) == 2  # Failures must remain visible outside successful groups.
+            # A failure updates its existing group without moving other records.
+            assert len(app.query(ToolRecord)) == 1
+            assert "1 次失败" in render(title.renderable)
+            assert "失败" in render(record.query_one(".tool-preview", Static).renderable)
     asyncio.run(exercise())
 
 
@@ -98,9 +114,10 @@ def test_command_preview_is_bounded_and_full_output_is_in_transcript():
             finish_tool(sink, "cmd", "run_command", {"argv": argv}, output)
             await pilot.pause(0.15)
             record = app.query_one(ToolRecord)
-            assert record.size.height == 4
+            assert record.size.height == 6
             preview = render(record.query_one(".tool-preview", Static).renderable)
-            assert all(f"result {i}" in preview for i in (7, 8, 9))
+            assert all(f"result {i}" in preview for i in (0, 1, 8, 9))
+            assert "省略 6 行" in preview
             assert "result 6" not in preview
             assert "stdout:" not in preview and "<empty>" not in preview
             assert "-NoProfile" not in render(record.query_one(".tool-title", Static).renderable)
@@ -168,7 +185,7 @@ def test_inline_approval_uses_existing_boolean_decision(keys, allowed):
     async def exercise():
         app = PraxisApp(ViewEventSink())
         request = Approval("run_command", {"argv": ["cmd", "/c", "echo hello"],
-                           "relative_path": ".", "timeout_seconds": 30}, Future())
+                           "workdir": ".", "timeout_seconds": 30}, Future())
         async with app.run_test(size=(70, 28)) as pilot:
             app._approvals.put(request)
             await pilot.pause(0.15)

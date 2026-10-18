@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
@@ -69,6 +70,14 @@ def test_absolute_deliveries_from_multiple_directories_remain_readable(tmp_path)
         assert read.success and name in read.output
         listing = registry.execute("list_files", {"relative_path": str(directory)}, context=context)
         assert listing.success and "report.txt" in listing.output
+        found = registry.execute("find_files", {
+            "relative_path": str(directory), "file_pattern": "*.txt",
+        }, context=context)
+        assert found.success and json.loads(found.output)["files"] == ["report.txt"]
+        searched = registry.execute("search_text", {
+            "relative_path": str(directory), "query": name,
+        }, context=context)
+        assert searched.success and json.loads(searched.output)["matches"][0]["path"] == "report.txt"
         write = registry.execute("write_file", {"relative_path": str(directory / "bad.txt"), "content": "bad"}, context=context)
         assert not write.success and not (directory / "bad.txt").exists()
 
@@ -79,7 +88,7 @@ def test_git_commands_support_repeated_merges_and_report_real_conflicts(tmp_path
 
     def git(*args, success=True):
         result = registry.execute("run_command", {
-            "argv": ["git", *map(str, args)], "relative_path": ".", "timeout_seconds": 30,
+            "argv": ["git", *map(str, args)], "workdir": ".", "timeout_seconds": 30,
         }, context=context)
         assert result.success, result.output
         if success:

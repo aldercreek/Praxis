@@ -1,16 +1,41 @@
-import os
-import json
 import base64
-from bisect import bisect_right
+import json
+import os
 import shutil
 import subprocess
+from bisect import bisect_right
 from collections.abc import Mapping
+from dataclasses import dataclass
+from difflib import unified_diff
 from pathlib import Path
 
 from praxis_agent.context.budgets import DEFAULT_BUDGETS
 
-
 _SEARCH_TIMEOUT_SECONDS = 30
+
+
+@dataclass(frozen=True)
+class FileChange:
+    """Actual before/after diff, retained for display rather than model context."""
+
+    path: str
+    diff: str
+    added: int
+    removed: int
+
+    @classmethod
+    def between(cls, path: str, before: str, after: str) -> "FileChange":
+        path = Path(path).as_posix()
+        lines = list(unified_diff(before.splitlines(keepends=True), after.splitlines(keepends=True),
+                                  fromfile=path, tofile=path, lineterm=""))
+        rendered = []
+        for index, line in enumerate(lines):
+            rendered.append(line.rstrip("\r\n"))
+            if index > 1 and line.startswith(("+", "-", " ")) and not line.endswith("\n"):
+                rendered.append("\\ 文件末尾无换行")
+        return cls(path, "\n".join(rendered),
+                   sum(line.startswith("+") for line in lines[2:]),
+                   sum(line.startswith("-") for line in lines[2:]))
 
 
 def _resolve_workspace(workspace: Path) -> Path:
@@ -156,7 +181,7 @@ def edit_file(
     workspace: Path,
     relative_path: str,
     edits: list[Mapping[str, object]],
-) -> dict[str, object]:
+) -> FileChange:
     """按顺序应用多个精确替换，并在全部成功后写入文件。"""
     if not isinstance(edits, list) or not edits:
         raise ValueError("edits must be a non-empty list")
@@ -201,19 +226,20 @@ def edit_file(
         raise ValueError("edits must produce a file change")
 
     file_path.write_text(updated_content, encoding="utf-8")
-    return {"path": Path(relative_path).as_posix()}
+    return FileChange.between(relative_path, original_content, updated_content)
 
 
-def write_file(workspace: Path, relative_path: str, content: str) -> dict[str, object]:
-    """创建或完整重写 UTF-8 文本文件，并返回文件路径。"""
+def write_file(workspace: Path, relative_path: str, content: str) -> FileChange:
+    """创建或完整重写 UTF-8 文本文件，返回实际修改的差异。"""
     workspace_root = _resolve_workspace(workspace)
     file_path = _resolve_workspace_path(workspace_root, relative_path)
+    before = file_path.read_text(encoding="utf-8", errors="replace") if file_path.is_file() else ""
 
     file_path.parent.mkdir(parents=True, exist_ok=True)
     with file_path.open("w", encoding="utf-8") as new_file:
         new_file.write(content)
 
-    return {"path": Path(relative_path).as_posix()}
+    return FileChange.between(relative_path, before, content)
 
 
 def list_files(workspace: Path, relative_path: str = ".") -> dict[str, object]:

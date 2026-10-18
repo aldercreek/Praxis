@@ -4,21 +4,34 @@ import json
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from queue import Empty, SimpleQueue
 from threading import Condition
 from time import monotonic
 from typing import TYPE_CHECKING
 from uuid import uuid4
-from pathlib import Path
-
 
 from praxis_agent.events import (
-    AgentEvent, AssistantTextDelta, ChildAgentEvent, ChildAgentStatus, ChildAgentMessage, EventSink,
-    ContextCompaction, ModelRequestStarted, ToolFinished, ToolOutputDelta,
+    AgentEvent,
+    AssistantTextDelta,
+    ChildAgentEvent,
+    ChildAgentMessage,
+    ChildAgentStatus,
+    ContextCompaction,
+    EventSink,
+    ModelRequestStarted,
+    ToolFinished,
+    ToolOutputDelta,
+    TurnCancelled,
 )
+from praxis_agent.execution import ExecutionStopped, Run, current_handle, current_run
 from praxis_agent.multi_agent.models import (
-    AgentHandle, AgentMessage, AgentStatus, ExecutionControl,
-    MultiAgentConfig, message_text,
+    AgentHandle,
+    AgentMessage,
+    AgentStatus,
+    ExecutionControl,
+    MultiAgentConfig,
+    message_text,
 )
 
 if TYPE_CHECKING:
@@ -69,6 +82,7 @@ class AgentRuntime:
         self.inbox: deque[AgentMessage] = deque()
         self.events: SimpleQueue[AgentEvent] = SimpleQueue()
         self.parent_turn_id = ""
+        self.run: Run | None = None
         self.accepting = True
         self.epoch = uuid4().hex
         self.pool = ThreadPoolExecutor(
@@ -78,6 +92,8 @@ class AgentRuntime:
     def _require_open(self) -> None:
         if not self.accepting:
             raise ValueError("agent runtime is closing")
+        if self.run is not None and not self.run.finished.done():
+            self.run.check()
 
     def _handle(self, agent_id: str) -> AgentHandle:
         if not isinstance(agent_id, str) or agent_id not in self.handles:
@@ -240,9 +256,22 @@ class AgentRuntime:
                 self._handle(agent_id)
         ids = set(agent_ids)
         deadline = monotonic() + timeout
+        def wake():
+            with self.condition:
+                self.condition.notify_all()
+        operation = current_handle()
+        unsubscribe = operation.on_cancel(wake) if operation is not None else lambda: None
+        try:
+            return self._wait_agents(ids, agent_ids, deadline, pump)
+        finally:
+            unsubscribe()
+
+    def _wait_agents(self, ids, agent_ids, deadline, pump):
         while True:
             pump()
             with self.condition:
+                if current_run() is not None:
+                    current_run().check()
                 matching = [m for m in self.inbox if m.sender_id in ids]
                 handles = [self.handles[agent_id] for agent_id in dict.fromkeys(agent_ids)]
                 terminal = all(h.status in (AgentStatus.IDLE, AgentStatus.CLOSED) for h in handles)
@@ -263,27 +292,49 @@ class AgentRuntime:
         handle.started_at = None
         handle.elapsed_seconds = 0.0
         handle.compaction_count = 0
+        scope = Run(handle.agent_id)
+        if self.run is not None and not self.run.finished.done():
+            self.run.add_child(scope)
+        handle.run = scope
+        handle.control.run = scope
         self._status(handle, AgentStatus.QUEUED)
-        handle.future = self.pool.submit(self._execute, handle)
-
-    def _execute(self, handle: AgentHandle) -> None:
-        with self.condition:
-            if not self.accepting or handle.control.cancelled.is_set():
-                self._dispose(handle)
-                return
-            handle.started_at = monotonic()
-            self._status(handle, AgentStatus.RUNNING)
-            messages = list(handle.inbox)
-            handle.inbox.clear()
-            self._update_task(handle, messages)
-        report = "[Worker run interrupted]"
         try:
+            handle.future = self.pool.submit(self._execute, handle, scope)
+        except BaseException as error:
+            scope.finished.set_exception(error)
+            raise
+
+    def _execute(self, handle: AgentHandle, scope: Run) -> None:
+        try:
+            scope.execute(lambda: self._execute_turn(handle, scope))
+        except Exception:
+            # The Run Future and parent report retain the actual result/error.
+            pass
+
+    def _execute_turn(self, handle: AgentHandle, scope: Run):
+        report = "[Worker run interrupted]"
+        entered_agent = False
+        try:
+            with self.condition:
+                handle.started_at = monotonic()
+                self._status(handle, AgentStatus.RUNNING)
+                messages = list(handle.inbox)
+                handle.inbox.clear()
+                self._update_task(handle, messages)
             handle.control.check()
+            entered_agent = True
             result = handle.agent.run(message_text(messages))
             report = ("[Worker run ended; this does not imply task completion. "
                       "Read the response for findings, blockers or requests for reassignment.]\n" + result)
+            return result
+        except ExecutionStopped:
+            report = "[Worker run cancelled by user; partial work may remain.]"
+            if not entered_agent:
+                self._publish(ChildAgentEvent(handle.parent_turn_id, handle.agent_id, TurnCancelled(scope.id)))
+            raise
         except Exception as error:
             report = f"[Worker run failed]\n{type(error).__name__}: {error}"
+            raise
         finally:
             # This finalization runs after Agent.run exits, including cancellation.
             with self.condition:
@@ -293,7 +344,9 @@ class AgentRuntime:
                 if not self.accepting or handle.control.cancelled.is_set():
                     self._dispose(handle)
                 else:
-                    if handle.inbox:
+                    if scope.cancelled.is_set() or (self.run is not None and self.run.cancelled.is_set()):
+                        handle.inbox.clear()
+                    if handle.inbox and (self.run is None or not self.run.cancelled.is_set()):
                         # A message may arrive between the last model boundary and return.
                         self._schedule(handle)
                     else:
@@ -304,10 +357,8 @@ class AgentRuntime:
         with self.condition:
             self._require_open()
             handle = self._handle(agent_id)
-            handle.control.cancelled.set()
-            if handle.status == AgentStatus.IDLE or (
-                handle.status == AgentStatus.QUEUED and handle.future.cancel()
-            ):
+            handle.control.cancel()
+            if handle.status == AgentStatus.IDLE:
                 self._dispose(handle)
             elif handle.status != AgentStatus.CLOSED:
                 self._status(handle, AgentStatus.CLOSING)
@@ -323,7 +374,7 @@ class AgentRuntime:
 
     def _dispose(self, handle: AgentHandle) -> None:
         self._freeze_elapsed(handle)
-        handle.control.cancelled.set()
+        handle.control.cancel()
         try:
             if handle.agent is not None:
                 handle.agent.close()
@@ -381,15 +432,13 @@ class AgentRuntime:
             for handle in self.handles.values():
                 if handle.status == AgentStatus.CLOSED:
                     continue
-                handle.control.cancelled.set()
-                if handle.status == AgentStatus.IDLE or (
-                    handle.status == AgentStatus.QUEUED and handle.future.cancel()
-                ):
+                handle.control.cancel()
+                if handle.status == AgentStatus.IDLE:
                     self._dispose(handle)
                 else:
                     self._status(handle, AgentStatus.CLOSING)
             self.condition.notify_all()
-        self.pool.shutdown(wait=False, cancel_futures=True)
+        self.pool.shutdown(wait=False)
         while True:
             pump()
             with self.condition:

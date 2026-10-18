@@ -8,7 +8,6 @@ from pathlib import Path
 from queue import Empty, SimpleQueue
 from threading import Lock
 from typing import TYPE_CHECKING
-from uuid import uuid4
 
 from praxis_agent.config import DEFAULT_MAX_PARALLEL_TOOLS, ModelConfig
 from praxis_agent.context import (
@@ -17,30 +16,40 @@ from praxis_agent.context import (
     ConversationHistory,
 )
 from praxis_agent.context.operations import ContextOperation
-from praxis_agent.context.summarizer import ModelContextSummarizer, SUMMARY_INSTRUCTIONS
+from praxis_agent.context.summarizer import SUMMARY_INSTRUCTIONS, ModelContextSummarizer
 from praxis_agent.events import (
     AgentEvent,
-    AssistantTextDelta,
     AssistantTextCompleted,
+    AssistantTextDelta,
     EventSink,
+    MessagesReceived,
     ModelRequestCompleted,
     ModelRequestStarted,
-    MessagesReceived,
     PlanUpdated,
+    TurnCancelled,
     TurnCompleted,
     TurnFailed,
     TurnStarted,
 )
+from praxis_agent.execution import ExecutionStopped, Run, current_run, run_operation
+from praxis_agent.mcp import MCPConnections
 from praxis_agent.model import (
     FunctionCall,
     ModelClient,
     OpenAIModelClient,
 )
+from praxis_agent.multi_agent.models import ExecutionControl, MultiAgentConfig
+from praxis_agent.multi_agent.runtime import AgentRuntime
+from praxis_agent.multi_agent.tools import (
+    PARENT_INSTRUCTIONS,
+    WORKER_INSTRUCTIONS,
+    register_parent_tools,
+    register_worker_tools,
+)
 from praxis_agent.planning import RunState, build_run_state_context
 from praxis_agent.prompts import build_instructions
-from praxis_agent.skills import discover_skills, create_skill_tool
-from praxis_agent.mcp import MCPConnections
 from praxis_agent.runtime import collect_runtime_context
+from praxis_agent.skills import create_skill_tool, discover_skills
 from praxis_agent.tool_execution import (
     ToolApprovalHandler,
     ToolCallExecutor,
@@ -50,12 +59,6 @@ from praxis_agent.tools import (
     ToolRegistry,
     ToolResult,
     create_default_registry,
-)
-from praxis_agent.multi_agent.models import ExecutionControl, MultiAgentConfig
-from praxis_agent.multi_agent.runtime import AgentRuntime
-from praxis_agent.multi_agent.tools import (
-    PARENT_INSTRUCTIONS, WORKER_INSTRUCTIONS,
-    register_parent_tools, register_worker_tools,
 )
 
 if TYPE_CHECKING:
@@ -128,11 +131,19 @@ class Agent:
 
     def run(self, task: str) -> str:
         """运行一轮任务，并保留内容供同一会话的后续任务使用。"""
+        scope = current_run()
+        if scope is None:
+            return Run(self.name).execute(lambda: self.run(task))
         if not self._run_lock.acquire(blocking=False):
             raise AgentError("this agent is already running")
         try:
             if self._closed:
                 raise AgentError("this agent is closed")
+            if self.execution_control is None:
+                self.execution_control = ExecutionControl()
+            self.execution_control.run = scope
+            if self.collaboration is not None:
+                self.collaboration.run = scope
             return self._run(task)
         finally:
             self._run_lock.release()
@@ -142,7 +153,7 @@ class Agent:
         if not normalized_task:
             raise ValueError("task must not be empty")
 
-        turn_id = uuid4().hex
+        turn_id = current_run().id
         if self.collaboration is not None:
             self.collaboration.parent_turn_id = turn_id
         self.context_manager.turn_id = turn_id
@@ -163,17 +174,24 @@ class Agent:
                 run_persisted = True
             self._history.append(user_item)
             self._emit(TurnStarted(turn_id, normalized_task))
+            current_run().check()
             output_text = self._run_model_loop(
                 turn_id,
                 run_state,
             )
+            current_run().settle()
             run_state.complete()
             self._finish_persisted_run(turn_id, run_state)
             self._emit(AssistantTextCompleted(turn_id, output_text))
             self._emit(TurnCompleted(turn_id))
             return output_text
         except (Exception, KeyboardInterrupt) as error:
-            run_state.fail(error)
+            current_run().settle(error)
+            self._pump_worker_events()
+            if isinstance(error, ExecutionStopped):
+                run_state.cancel()
+            else:
+                run_state.fail(error)
             # Interrupted batches must not leave unmatched tool calls on a follow-up.
             try:
                 for call in self._pending_calls:
@@ -186,25 +204,26 @@ class Agent:
                         )
                     self._history.append(item)
             except Exception as repair_error:
-                error.add_note(f"Could not repair interrupted tool results: {repair_error}")
+                repair_error.add_note(f"While finalizing {type(error).__name__}: {error}")
+                error = repair_error
+                run_state.fail(error)
             finally:
                 self._pending_calls.clear()
             if run_persisted:
                 try:
                     self._finish_persisted_run(turn_id, run_state)
                 except Exception as persistence_error:
-                    error.add_note(
-                        "Additionally failed to persist the failed Run: "
-                        f"{persistence_error}"
-                    )
+                    persistence_error.add_note(f"While finalizing {type(error).__name__}: {error}")
+                    error = persistence_error
+                    run_state.fail(error)
             self._emit(
-                TurnFailed(
+                TurnCancelled(turn_id) if isinstance(error, ExecutionStopped) else TurnFailed(
                     turn_id,
                     type(error).__name__,
                     str(error),
                 )
             )
-            raise
+            raise error
 
     def clear_history(self) -> None:
         """保留旧会话，并切换到一段新的空会话。"""
@@ -230,16 +249,17 @@ class Agent:
             return
         self._closed = True
         if self.execution_control is not None:
-            self.execution_control.cancelled.set()
+            self.execution_control.cancel()
         try:
             if self.collaboration is not None:
                 self.collaboration.shutdown(self._pump_worker_events)
         finally:
-            for close in self.close_callbacks:
-                try:
-                    close()
-                except Exception:
-                    logging.getLogger(__name__).warning("Could not close a model client", exc_info=True)
+            with self._run_lock:
+                for close in self.close_callbacks:
+                    try:
+                        close()
+                    except Exception:
+                        logging.getLogger(__name__).warning("Could not close a model client", exc_info=True)
 
     def _pump_worker_events(self) -> None:
         if self.collaboration is not None:
@@ -328,11 +348,9 @@ class Agent:
                 transient_items += ({"role": "developer", "content": self.mcp_catalog},)
             if self.collaboration is not None:
                 transient_items += (self.collaboration.context_item(),)
-            context_view = self.context_manager.build_view(
-                self._history,
-                transient_items=transient_items,
-                tool_definitions=tool_definitions,
-            )
+            context_view = run_operation("context", lambda handle: self.context_manager.build_view(
+                self._history, transient_items=transient_items, tool_definitions=tool_definitions,
+            ))
             self.context_status = context_view.context_status
             self._emit(
                 ModelRequestStarted(
@@ -342,7 +360,7 @@ class Agent:
                     context_status=context_view.context_status,
                 )
             )
-            response = self.model_client.create_response(
+            response = run_operation("model", lambda handle: self.model_client.create_response(
                 context_view.items,
                 tool_definitions,
                 on_text_delta=lambda text: self._emit(
@@ -352,7 +370,7 @@ class Agent:
                         text,
                     )
                 ),
-            )
+            ))
             self.context_manager.record_actual_input_tokens(
                 None
                 if response.usage is None
@@ -374,6 +392,7 @@ class Agent:
                     response,
                 )
             )
+            check_execution()
 
             if not response.function_calls:
                 if response.output_text:
@@ -483,8 +502,8 @@ def create_default_agent(
         )
 
     from praxis_agent.sessions import (
-        SQLiteSessionStore,
         SessionNotFoundError,
+        SQLiteSessionStore,
     )
 
     config = ModelConfig.from_env()
@@ -521,8 +540,9 @@ def create_default_agent(
         config = ModelConfig.from_env(model=session.model)
 
     control = ExecutionControl()
-    model_client = OpenAIModelClient(config, instructions=instructions)
-    summary_client = OpenAIModelClient(config, instructions=SUMMARY_INSTRUCTIONS, reasoning_effort="none")
+    model_client = OpenAIModelClient(config, instructions=instructions, execution_control=control)
+    summary_client = OpenAIModelClient(config, instructions=SUMMARY_INSTRUCTIONS, reasoning_effort="none",
+                                       execution_control=control)
     agent = Agent(
         model_client=model_client,
         tool_registry=create_default_registry(config.context_policy, check_execution=control.check),

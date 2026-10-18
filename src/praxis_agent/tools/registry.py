@@ -1,24 +1,24 @@
 from __future__ import annotations
 
 import json
-
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
+from difflib import get_close_matches
 from functools import partial, wraps
 from inspect import Parameter, signature
-from difflib import get_close_matches
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from praxis_agent.tools.command import run_command
 from praxis_agent.tools.filesystem import (
-    write_file,
+    FileChange,
     edit_file,
     find_files,
     list_files,
     read_file,
     search_text,
+    write_file,
 )
 
 if TYPE_CHECKING:
@@ -147,11 +147,13 @@ _RUN_COMMAND_PARAMETERS: dict[str, object] = {
                 "No implicit shell expansion. For pipes or redirects explicitly invoke an available shell with its command argument."
             ),
         },
-        "relative_path": {
+        "workdir": {
             "type": "string",
+            "minLength": 1,
             "description": (
-                "Working directory relative to the workspace root. "
-                "Use '.' for the workspace root."
+                "Existing working directory, absolute or relative to the agent workspace. "
+                "May be outside the workspace. Defaults to '.'. "
+                "After locating the target project, pass its directory here."
             ),
         },
         "timeout_seconds": {
@@ -161,7 +163,7 @@ _RUN_COMMAND_PARAMETERS: dict[str, object] = {
             "description": "Execution timeout in seconds, from 1 to 120; use 60 for ordinary commands.",
         },
     },
-    "required": ["argv", "relative_path", "timeout_seconds"],
+    "required": ["argv", "workdir", "timeout_seconds"],
     "additionalProperties": False,
 }
 
@@ -214,6 +216,7 @@ class ToolResult:
     success: bool
     output: str
     structured_output: dict[str, object] | None = None
+    file_change: FileChange | None = None
 
 
 class ToolRegistry:
@@ -384,6 +387,10 @@ def _inject_workspace(handler: ToolHandler, *, external_reads: bool = False) -> 
         if external_reads:
             workspace, arguments["relative_path"] = _read_location(context, arguments.get("relative_path", "."))
         data = handler(workspace, **arguments)
+        if isinstance(data, FileChange):
+            result = {"path": data.path}
+            return ToolResult(True, json.dumps(result, ensure_ascii=False),
+                              structured_output=result, file_change=data)
         if isinstance(data, dict):
             return ToolResult(True, json.dumps(data, ensure_ascii=False), structured_output=data)
         return data
@@ -395,8 +402,8 @@ def create_default_registry(policy: ContextPolicy | None = None, *,
                             check_execution: Callable[[], None] | None = None) -> ToolRegistry:
     """创建包含全部内置工具的注册表。"""
     # planning.tool 依赖这里的 Tool 类型，因此等 Registry 初始化完成再导入。
-    from praxis_agent.planning.tool import create_update_plan_tool
     from praxis_agent.context.capacity import ContextPolicy
+    from praxis_agent.planning.tool import create_update_plan_tool
 
     policy = policy or ContextPolicy()
     def read_with_limits(
@@ -423,9 +430,9 @@ def create_default_registry(policy: ContextPolicy | None = None, *,
         return ToolResult(True, json.dumps(data, ensure_ascii=False), structured_output=data)
 
     registry = ToolRegistry()
-    def command_with_control(context: ToolContext, argv: list[str], relative_path: str = ".",
+    def command_with_control(context: ToolContext, argv: list[str], workdir: str = ".",
                              timeout_seconds: int = 60) -> str:
-        return run_command(context.workspace, argv, relative_path, timeout_seconds,
+        return run_command(context.workspace, argv, workdir, timeout_seconds,
                            check_execution=context.check_execution or check_execution,
                            on_output=context.on_command_output)
     registry.register(
@@ -514,7 +521,7 @@ def create_default_registry(policy: ContextPolicy | None = None, *,
         Tool(
             name="run_command",
             description=(
-                "Run a non-interactive command inside the workspace and "
+                "Run a non-interactive command in workdir and "
                 "return its exit code, stdout, and stderr. Use for actual project execution, tests and full Python. "
                 "Commands run in the foreground; descendant processes stop when the command ends or is cancelled."
             ),

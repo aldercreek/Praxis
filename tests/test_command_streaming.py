@@ -9,14 +9,19 @@ import pytest
 from rich.console import Console
 
 from praxis_agent.agent import Agent
-from praxis_agent.events import ToolOutputDelta, ToolCallPrepared, ToolStarted, ToolFinished, TurnStarted, TurnCompleted
+from praxis_agent.events import (
+    ToolCallPrepared,
+    ToolFinished,
+    ToolOutputDelta,
+    ToolStarted,
+    TurnCompleted,
+    TurnStarted,
+)
 from praxis_agent.model import FunctionCall, ModelResponse
 from praxis_agent.multi_agent.models import MultiAgentConfig
 from praxis_agent.multi_agent.runtime import AgentRuntime
-from textual.widgets import Static
-
 from praxis_agent.terminal.app import PraxisApp
-from praxis_agent.terminal.views import ViewEventSink, ViewStore, ToolBlock
+from praxis_agent.terminal.views import ToolBlock, ViewEventSink, ViewStore
 from praxis_agent.tools import ToolResult, create_default_registry, run_command
 
 
@@ -86,7 +91,7 @@ def test_timeout_and_cancellation_preserve_partial_output(tmp_path, cancel):
 def test_streaming_events_do_not_add_model_requests_or_history_items(tmp_path):
     calls, events = [], []
     arguments = json.dumps({"argv": [sys.executable, "-u", "-c", "print('visible output')"],
-                            "relative_path": ".", "timeout_seconds": 5})
+                            "workdir": ".", "timeout_seconds": 5})
     call = FunctionCall("cmd", "run_command", arguments)
 
     def respond(items, tools, **kwargs):
@@ -149,13 +154,16 @@ def test_preview_is_bounded_and_worker_updates_do_not_write_terminal():
     preview = store.get("worker")._command_output
     output = StringIO()
     console = Console(file=output, color_system=None, width=100)
-    for block in preview.render():
-        console.print(block)
+    from praxis_agent.terminal.cells import tool_preview, tool_title
+    block, = store.get("worker").committed_blocks
+    console.print(tool_title((block,)))
+    console.print(tool_preview((block,)))
     text = output.getvalue()
-    assert "line 999" in text and "line 0\n" not in text
-    assert len(text.splitlines()) == 7  # Header plus six tail lines.
+    assert "line 999" in text and "line 0\n" in text
+    assert "省略" in text
+    assert len(text.splitlines()) == 6  # Header plus a bounded head/tail preview.
     preview.clear()
-    assert preview.render() == []
+    assert not preview.outputs
 
 
 def test_page_refreshes_before_command_ends_and_keeps_failure_logs(tmp_path):
@@ -173,7 +181,7 @@ while not Path('ui-ack').exists():
     time.sleep(.02)
 print('last diagnostic', flush=True)
 """
-        arguments = {"argv": [sys.executable, "-u", "-c", code], "relative_path": ".", "timeout_seconds": 8}
+        arguments = {"argv": [sys.executable, "-u", "-c", code], "workdir": ".", "timeout_seconds": 8}
 
         def execute():
             sink.emit(TurnStarted("demo", "stream output"))
@@ -195,7 +203,8 @@ print('last diagnostic', flush=True)
                 for _ in range(30):
                     await pilot.pause(0.1)
                     capture = StringIO()
-                    Console(file=capture, width=100).print(app.query_one("#active", Static).renderable)
+                    for widget in app.query("#blocks Static"):
+                        Console(file=capture, width=100).print(widget.renderable)
                     visible = capture.getvalue()
                     if "LIVE_PROGRESS" in visible:
                         break

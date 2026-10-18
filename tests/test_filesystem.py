@@ -4,12 +4,12 @@ from pathlib import Path
 import pytest
 
 from praxis_agent.tools import (
-    write_file,
     edit_file,
     find_files,
     list_files,
     read_file,
     search_text,
+    write_file,
 )
 
 
@@ -99,7 +99,9 @@ def test_edit_file_applies_multiple_replacements(tmp_path: Path) -> None:
     assert source_file.read_text(encoding="utf-8") == (
         "host=example.com\nport=443\n"
     )
-    assert result == {"path": "config.txt"}
+    assert result.path == "config.txt"
+    assert result.added == result.removed == 2
+    assert "-port=8080" in result.diff and "+port=443" in result.diff
 
 
 def test_edit_file_leaves_file_unchanged_when_a_later_edit_fails(
@@ -130,14 +132,15 @@ def test_write_file_creates_parent_directories(tmp_path: Path) -> None:
 
     created_file = tmp_path / "src" / "example.py"
     assert created_file.read_text(encoding="utf-8") == "value = 1\n"
-    assert result == {"path": "src/example.py"}
+    assert result.path == "src/example.py"
+    assert result.added > 0 and result.removed == 0
 
 
 def test_write_file_overwrites_an_existing_file(tmp_path: Path) -> None:
     existing_file = tmp_path / "example.py"
     existing_file.write_text("original\n", encoding="utf-8")
 
-    assert write_file(tmp_path, "example.py", "replacement\n") == {"path": "example.py"}
+    assert write_file(tmp_path, "example.py", "replacement\n").path == "example.py"
 
     assert existing_file.read_text(encoding="utf-8") == "replacement\n"
 

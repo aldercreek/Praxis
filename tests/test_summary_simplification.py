@@ -1,14 +1,17 @@
 import json
 from copy import deepcopy
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from openai.types.responses import ResponseIncompleteEvent
 
+from praxis_agent.config import ModelConfig
 from praxis_agent.context.manager import ContextManager
 from praxis_agent.context.model_catalog import ModelLimits
 from praxis_agent.context.models import ConversationHistory
 from praxis_agent.context.summarizer import ModelContextSummarizer
-from praxis_agent.model import ModelClientError, ModelResponse, _consume_stream
+from praxis_agent.model import ModelClientError, ModelResponse, OpenAIModelClient
 
 
 class Client:
@@ -111,7 +114,7 @@ def test_automatic_overflow_calls_summary_once_and_preserves_history_on_failure(
     assert history.snapshot() == original
 
 
-def test_incomplete_generation_is_not_accepted_as_summary():
+def test_incomplete_generation_is_not_accepted_as_summary(monkeypatch):
     event = ResponseIncompleteEvent.model_validate({
         "type": "response.incomplete", "sequence_number": 1,
         "response": {
@@ -120,5 +123,18 @@ def test_incomplete_generation_is_not_accepted_as_summary():
             "status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"},
         },
     })
-    with pytest.raises(ModelClientError, match="incomplete"):
-        _consume_stream(iter([event]), None)
+    class Stream:
+        async def __aiter__(self):
+            yield event
+
+        async def close(self):
+            pass
+
+    sdk = SimpleNamespace(responses=SimpleNamespace(create=AsyncMock(return_value=Stream())), close=AsyncMock())
+    monkeypatch.setattr("praxis_agent.model.AsyncOpenAI", lambda **kwargs: sdk)
+    client = OpenAIModelClient(ModelConfig(api_key="test", model="test"))
+    try:
+        with pytest.raises(ModelClientError, match="incomplete"):
+            client.create_response([], [])
+    finally:
+        client.close()

@@ -7,9 +7,10 @@ from concurrent.futures import Future
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from threading import Event
 from typing import TYPE_CHECKING
 from uuid import uuid4
+
+from praxis_agent.execution import ExecutionControl, Run
 
 if TYPE_CHECKING:
     from praxis_agent.agent import Agent
@@ -50,19 +51,6 @@ def message_text(messages: list[AgentMessage]) -> str:
     )
 
 
-class ExecutionStopped(RuntimeError):
-    """A worker was cancelled."""
-
-
-@dataclass(slots=True)
-class ExecutionControl:
-    cancelled: Event = field(default_factory=Event)
-
-    def check(self) -> None:
-        if self.cancelled.is_set():
-            raise ExecutionStopped("worker cancelled")
-
-
 @dataclass(frozen=True, slots=True)
 class MultiAgentConfig:
     max_workers: int = 8
@@ -84,6 +72,7 @@ class AgentHandle:
     status: AgentStatus = AgentStatus.IDLE
     inbox: deque[AgentMessage] = field(default_factory=deque)
     future: Future[None] | None = None
+    run: Run | None = None
     task_summary: str = ""
     context_status: ContextStatus | None = None
     compaction_count: int = 0

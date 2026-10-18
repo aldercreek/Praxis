@@ -54,6 +54,8 @@ def _display_status(status: RunStatus | None) -> tuple[str, str]:
         return status.value, "green"
     if status is RunStatus.FAILED:
         return status.value, "red"
+    if status is RunStatus.CANCELLED:
+        return status.value, "dim"
     if status is RunStatus.RUNNING:
         return status.value, "yellow"
     return "new", "dim"

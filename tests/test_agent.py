@@ -341,7 +341,7 @@ def test_agent_asks_for_approval_and_respects_a_decline(
                         "call-1",
                         "run_command",
                         '{"argv":["not-a-real-command"],'
-                        '"relative_path":".","timeout_seconds":10}',
+                        '"workdir":".","timeout_seconds":10}',
                     ),
                 ),
             ),

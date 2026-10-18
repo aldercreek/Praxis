@@ -1,5 +1,8 @@
+import asyncio
 from collections.abc import Iterator
+from threading import Event, Thread
 
+import pytest
 from openai.types.responses import (
     Response,
     ResponseCompletedEvent,
@@ -16,6 +19,7 @@ from openai.types.responses.response_usage import (
 )
 
 from praxis_agent.config import ModelConfig
+from praxis_agent.execution import ExecutionStopped, Run
 from praxis_agent.model import OpenAIModelClient
 
 
@@ -23,7 +27,7 @@ class FakeResponses:
     def __init__(self) -> None:
         self.arguments: dict[str, object] = {}
 
-    def create(
+    async def create(
         self,
         **arguments: object,
     ) -> Iterator[ResponseStreamEvent]:
@@ -69,7 +73,7 @@ class FakeResponses:
                 total_tokens=15,
             ),
         )
-        return iter(
+        return FakeStream(
             [
                 ResponseTextDeltaEvent(
                     content_index=0,
@@ -103,11 +107,31 @@ class FakeOpenAI:
         self.options = options
         self.responses = FakeResponses()
 
+    async def close(self):
+        pass
+
+
+class FakeStream:
+    def __init__(self, events):
+        self.events = iter(events)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self.events)
+        except StopIteration:
+            raise StopAsyncIteration
+
+    async def close(self):
+        pass
+
 
 def test_openai_model_client_builds_and_parses_a_response(monkeypatch) -> None:
     sdk_client = FakeOpenAI()
     monkeypatch.setattr(
-        "praxis_agent.model.OpenAI",
+        "praxis_agent.model.AsyncOpenAI",
         lambda **options: _capture_options(sdk_client, options),
     )
     client = OpenAIModelClient(
@@ -125,6 +149,7 @@ def test_openai_model_client_builds_and_parses_a_response(monkeypatch) -> None:
         [{"type": "function", "name": "read_file"}],
         on_text_delta=text_deltas.append,
     )
+    client.close()
 
     assert sdk_client.options == {
         "api_key": "secret-key",
@@ -154,3 +179,119 @@ def _capture_options(
 ) -> FakeOpenAI:
     client.options = options
     return client
+
+
+@pytest.mark.parametrize("phase", ["headers", "stream"])
+def test_cancel_network_wait_acknowledges_cleanup_before_future(monkeypatch, phase):
+    entered, cleaning, release = Event(), Event(), Event()
+
+    async def blocked():
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaning.set()
+            await asyncio.to_thread(release.wait, 5)
+
+    class Stream:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await blocked()
+
+        async def close(self):
+            pass
+
+    class Responses:
+        async def create(self, **kwargs):
+            if phase == "headers":
+                await blocked()
+            return Stream()
+
+    sdk = FakeOpenAI()
+    sdk.responses = Responses()
+    monkeypatch.setattr("praxis_agent.model.AsyncOpenAI", lambda **kwargs: sdk)
+    client = OpenAIModelClient(ModelConfig(api_key="test", model="test"))
+    scope = Run()
+    def execute():
+        try:
+            scope.execute(lambda: client.create_response([], []))
+        except ExecutionStopped:
+            pass
+    thread = Thread(target=execute, daemon=True)
+    thread.start()
+    try:
+        assert entered.wait(3)
+        scope.cancel()
+        assert cleaning.wait(3)
+        assert not scope.finished.done()
+        assert not scope.handles[0].future.done()
+        scope.cancel()
+        release.set()
+        with pytest.raises(ExecutionStopped):
+            scope.finished.result(timeout=3)
+        thread.join(3)
+        assert not thread.is_alive()
+        sdk.responses = FakeResponses()
+        assert Run().execute(lambda: client.create_response([], [])).output_text == "Reading README"
+    finally:
+        release.set()
+        thread.join(3)
+        client.close()
+
+
+def test_cancel_real_http_request_before_headers_and_reuse_client():
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    entered, release = Event(), Event()
+    events = asyncio.run(FakeResponses().create())
+    body = "".join("data: " + event.model_dump_json() + "\n\n" for event in events.events).encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        calls = 0
+
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            Handler.calls += 1
+            if Handler.calls == 1:
+                entered.set()
+                release.wait(5)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    serving = Thread(target=server.serve_forever, daemon=True)
+    serving.start()
+    client = OpenAIModelClient(ModelConfig(
+        api_key="test", model="test", base_url=f"http://127.0.0.1:{server.server_port}/v1",
+    ))
+    scope = Run()
+    def execute():
+        try:
+            scope.execute(lambda: client.create_response([], []))
+        except ExecutionStopped:
+            pass
+    thread = Thread(target=execute, daemon=True)
+    thread.start()
+    try:
+        assert entered.wait(5)
+        scope.cancel()
+        with pytest.raises(ExecutionStopped):
+            scope.finished.result(timeout=3)
+        assert not release.is_set()  # Cancellation did not depend on a server response.
+        assert Run().execute(lambda: client.create_response([], [])).output_text == "Reading README"
+    finally:
+        release.set()
+        thread.join(3)
+        client.close()
+        server.shutdown()
+        server.server_close()
+        serving.join(3)

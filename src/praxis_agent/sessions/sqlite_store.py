@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from sqlite3 import Connection, Row
 
 
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 _INTERRUPTED_RUN_ERROR = "Praxis stopped before this run completed."
 _INTERRUPTED_TOOL_OUTPUT = (
     "Tool execution was interrupted. Its completion is unknown.\n"
@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS runs (
     session_id TEXT NOT NULL,
     original_task TEXT NOT NULL,
     status TEXT NOT NULL CHECK (
-        status IN ('running', 'completed', 'failed')
+        status IN ('running', 'completed', 'failed', 'cancelled')
     ),
     error TEXT,
     plan_json TEXT NOT NULL,

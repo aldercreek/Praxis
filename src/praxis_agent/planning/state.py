@@ -11,6 +11,7 @@ class RunStatus(StrEnum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 @dataclass(slots=True)
@@ -37,3 +38,7 @@ class RunState:
         """把当前任务标记为失败并保存简短原因。"""
         self.status = RunStatus.FAILED
         self.error = f"{type(error).__name__}: {error}"
+
+    def cancel(self) -> None:
+        self.status = RunStatus.CANCELLED
+        self.error = "Stopped by user"

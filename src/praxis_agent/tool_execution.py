@@ -1,6 +1,7 @@
 import json
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from contextvars import copy_context
 from dataclasses import dataclass, replace
 from uuid import uuid4
 
@@ -11,12 +12,12 @@ from praxis_agent.events import (
     ApprovalResolved,
     ToolCallPrepared,
     ToolFinished,
-    ToolStarted,
     ToolOutputDelta,
+    ToolStarted,
 )
+from praxis_agent.execution import current_run, run_operation
 from praxis_agent.model import FunctionCall
 from praxis_agent.tools import ToolContext, ToolRegistry, ToolResult
-
 
 ToolApprovalHandler = Callable[[str, Mapping[str, object]], bool]
 EventPublisher = Callable[[AgentEvent], None]
@@ -97,22 +98,34 @@ class ToolCallExecutor:
                 pending = {}
 
                 def fill_slots() -> None:
+                    if current_run() is not None and current_run().cancelled.is_set():
+                        return
                     while len(pending) < self.max_parallel_tools:
                         item = next(waiting, None)
                         if item is None:
                             break
                         index, handler = item
                         self._start(turn_id, calls[index])
-                        pending[pool.submit(handler)] = index
+                        pending[pool.submit(copy_context().run, handler)] = index
 
-                fill_slots()
-                while pending:
-                    completed, _ = wait(pending, return_when=FIRST_COMPLETED)
-                    for future in completed:
-                        index = pending.pop(future)
-                        result = self._result(future.result)
-                        results[index] = self._finish(turn_id, calls[index], result)
+                try:
                     fill_slots()
+                    while pending:
+                        completed, _ = wait(pending, return_when=FIRST_COMPLETED)
+                        for future in completed:
+                            index = pending.pop(future)
+                            result = self._result(future.result)
+                            results[index] = self._finish(turn_id, calls[index], result)
+                        fill_slots()
+                except BaseException:
+                    if current_run() is not None:
+                        current_run().cancel()
+                    raise
+            for index, call in enumerate(calls):
+                if index not in results:
+                    results[index] = self._finish(
+                        turn_id, call, ToolResult(False, "Not executed: run cancelled"),
+                    )
         return [results[index] for index in range(len(calls))]
 
     def execute(
@@ -139,17 +152,15 @@ class ToolCallExecutor:
             result = invoke()
             return result if isinstance(result, ToolResult) else ToolResult(True, result)
         except Exception as error:
+            # Preserve a cancelled tool's partial output in the transcript/history.
+            # The next dispatch or model-loop checkpoint propagates cancellation.
             return ToolResult(False, f"{type(error).__name__}: {error}")
 
     def _prepare(
         self, turn_id: str, function_call: FunctionCall,
     ) -> Callable[[], str] | ToolResult:
         if self.check_execution is not None:
-            try:
-                self.check_execution()
-            except RuntimeError as error:
-                # Still return a result for every model call so history stays paired.
-                return ToolResult(False, f"Not executed: {error}")
+            self.check_execution()
         try:
             arguments = _parse_arguments(function_call.arguments)
         except _InvalidToolArgumentsError as error:
@@ -199,13 +210,11 @@ class ToolCallExecutor:
             arguments,
         ):
             return self._approval_failure()
-        if self.check_execution is None:
-            return prepared
-
         def invoke() -> str:
             # A parallel handler may have waited for a slot since preparation.
-            self.check_execution()
-            return prepared()
+            if self.check_execution is not None:
+                self.check_execution()
+            return run_operation(function_call.name, lambda handle: prepared())
 
         return invoke
 
@@ -232,18 +241,15 @@ class ToolCallExecutor:
                 function_call.name,
             )
         )
-        approved = (
-            self.approve_tool_call is not None
-            and self.approve_tool_call(function_call.name, arguments)
-        )
-        self.publish_event(
-            ApprovalResolved(
-                turn_id,
-                function_call.call_id,
-                function_call.name,
-                approved,
-            )
-        )
+        approved = False
+        try:
+            approved = bool(self.approve_tool_call and run_operation(
+                "approval", lambda handle: self.approve_tool_call(function_call.name, arguments),
+            ))
+        finally:
+            self.publish_event(ApprovalResolved(
+                turn_id, function_call.call_id, function_call.name, approved,
+            ))
         return approved
 
     def _approval_failure(self) -> ToolResult:

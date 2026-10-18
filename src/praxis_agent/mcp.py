@@ -8,16 +8,14 @@ import json
 import logging
 import os
 import re
-from concurrent.futures import TimeoutError as FutureTimeout
 from contextlib import AsyncExitStack
 from pathlib import Path
 from threading import Event, Thread
 from uuid import uuid4
 
+from praxis_agent.execution import await_cancellable, run_operation
 from praxis_agent.tool_search import ToolSearchIndex, parameter_text
-
 from praxis_agent.tools.registry import Tool, ToolContext, ToolRegistry, ToolResult
-
 
 logger = logging.getLogger(__name__)
 
@@ -81,10 +79,10 @@ class MCPConnections:
             self.ready.set()
 
     async def _server(self, name, config, initialized):
+        import httpx2
         from mcp import Client
         from mcp.client.stdio import StdioServerParameters
         from mcp.client.streamable_http import streamable_http_client
-        import httpx2
 
         if not config.get("enabled", True):
             self.status[name] = {"state": "disabled"}
@@ -325,19 +323,14 @@ class MCPConnections:
     def call(self, server, tool, arguments, *, check_execution=None):
         if self.closed or self.loop is None:
             return ToolResult(False, "MCP connections are closed")
-        future = asyncio.run_coroutine_threadsafe(self._call(server, tool, arguments), self.loop)
-        try:
-            while True:
-                if check_execution:
-                    check_execution()
-                try:
-                    return future.result(timeout=0.1)
-                except FutureTimeout:
-                    if future.done():
-                        return future.result()
-        except BaseException:
-            future.cancel()
-            raise
+        if check_execution:
+            check_execution()
+        def invoke(handle):
+            async def owned_call():
+                return await await_cancellable(self._call(server, tool, arguments), handle)
+            # Never cancel this proxy: its completion must acknowledge coroutine cleanup.
+            return asyncio.run_coroutine_threadsafe(owned_call(), self.loop).result()
+        return run_operation(f"MCP {server}/{tool}", invoke)
 
     async def _call(self, server, tool, arguments):
         try:

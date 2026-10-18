@@ -155,6 +155,11 @@ class TurnFailed(AgentEvent):
 
 
 @dataclass(frozen=True, slots=True)
+class TurnCancelled(AgentEvent):
+    """The turn and its children have finished cancellation cleanup."""
+
+
+@dataclass(frozen=True, slots=True)
 class ChildAgentEvent(AgentEvent):
     """A worker event routed on the parent thread, isolated from its transcript."""
 
@@ -236,5 +241,6 @@ __all__ = [
     "ToolStarted",
     "TurnCompleted",
     "TurnFailed",
+    "TurnCancelled",
     "TurnStarted",
 ]

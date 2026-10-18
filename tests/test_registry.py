@@ -1,4 +1,5 @@
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -86,6 +87,40 @@ def test_registry_executes_a_tool_with_its_workspace(tmp_path: Path) -> None:
     expected = {"text": "hello\n", "truncated": False, "next_position": None, "note": ""}
     assert json.loads(result.output) == expected
     assert result.structured_output == expected
+
+
+@pytest.mark.parametrize("directory", ["default", "nested", "absolute"])
+def test_command_workdir_reaches_the_process(tmp_path: Path, directory: str) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = {"default": workspace, "nested": workspace / "nested",
+              "absolute": tmp_path / "外部 project"}[directory]
+    target.mkdir(exist_ok=True)
+    (target / "input.txt").write_text(directory, encoding="utf-8")
+    arguments = {"argv": [sys.executable, "-c", "from pathlib import Path; print(Path('input.txt').read_text())"]}
+    if directory != "default":
+        arguments["workdir"] = "nested" if directory == "nested" else str(target)
+    context = _context(workspace)
+
+    result = create_default_registry().execute("run_command", arguments, context=context)
+
+    assert result.success, result.output
+    assert result.output.startswith(f"exit_code: 0\nstdout:\n{directory}\n")
+    assert context.workspace == workspace
+
+
+def test_command_schema_and_executor_accept_workdir_without_the_old_parameter(tmp_path: Path) -> None:
+    registry = create_default_registry()
+    definition = next(tool for tool in registry.definitions() if tool["name"] == "run_command")
+    arguments = {"argv": [sys.executable, "--version"], "workdir": str(tmp_path), "timeout_seconds": 10}
+    validate(arguments, definition["parameters"])
+    arguments["relative_path"] = arguments.pop("workdir")
+
+    with pytest.raises(ValidationError):
+        validate(arguments, definition["parameters"])
+    result = registry.execute("run_command", arguments, context=_context(tmp_path))
+    assert not result.success
+    assert "未知参数 relative_path" in result.output
 
 
 def test_registry_returns_an_error_for_unknown_tools(tmp_path: Path) -> None:
