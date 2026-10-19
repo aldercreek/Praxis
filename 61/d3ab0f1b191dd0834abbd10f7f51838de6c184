@@ -1,0 +1,81 @@
+experiments/analyze_agent_comparison.py
+  s_4bf82b2a3ae435::t_5465753fd74a25 1-12,21-85,87-150
+  s_4bf82b2a3ae435::t_2cb023c93f5cea 13-20,86
+experiments/test_tool_design_benchmark.py
+  s_4bf82b2a3ae435::t_a845940d72fc29 1-66
+experiments/agent_comparison.py
+  s_4bf82b2a3ae435::t_9fd88316987a74 1-4,6-24,26-33,35-80,96-106,109-181,184-277,281-284,286-307,309-402,409-410,412-422
+  s_4bf82b2a3ae435::t_31e6fc64fb7490 34
+  s_4bf82b2a3ae435::t_848c0f6d053156 81-95,107-108
+  s_d46bbdef14c6cd::t_928ce6c2c1e534 278-280,285
+  s_4bf82b2a3ae435::t_15fe172d1b94c7 25,182-183,308
+  s_4bf82b2a3ae435::t_b8b44cf09b34bb 5,403-408,411
+experiments/test_agent_comparison.py
+  s_4bf82b2a3ae435::t_848c0f6d053156 27-29
+  s_4bf82b2a3ae435::t_15fe172d1b94c7 1-26,30-63
+pyproject.toml
+  s_c9c2cadba1b5ab::t_13f8585d25536e 20
+experiments/tool_design_contract_probe.py
+  s_d46bbdef14c6cd::t_928ce6c2c1e534 36,67-70
+  s_4bf82b2a3ae435::t_b597cce554c556 20,49,52,57-58
+  s_4bf82b2a3ae435::t_7542e9292efba7 1-19,21-35,37-48,50-51,53-56,59-66,71-79
+experiments/tool_design_benchmark.py
+  s_d46bbdef14c6cd::t_928ce6c2c1e534 248-250,252-254
+  s_4bf82b2a3ae435::t_c9158375a4b457 30,33,123,204-209,216,218,223-231,238,255,274-275,289
+  s_4bf82b2a3ae435::t_a5f3c80758088e 1-29,31-32,34-122,124-203,210-215,217,219-222,232-237,239-247,251,256-273,276-288,290-448
+src/praxis_agent/tools/code.py
+  s_c9c2cadba1b5ab::t_ba8a43a51cf6e5 152-153
+  s_4ba125a7f49e3b::t_b155bfe775b63e 86-87,158,193,229,277,292-293
+  s_4ba125a7f49e3b::t_5aa73f4df3809c 4,12,61-65,67-68,72,75-85,88-104,108-129,190-192,196,198,228,247-250,252-276,278-291,294-299,305-307,324,329-331
+README.md
+  s_c9c2cadba1b5ab::t_ba8a43a51cf6e5 216-217,220-222,229
+tests/test_code_runtime.py
+  s_c9c2cadba1b5ab::t_9c4e94e1e2cf80 39-40,42-44,68
+  s_c9c2cadba1b5ab::t_cd044c7b15474b 1-38,41,45-67,69-210
+tests/test_code_cancellation.py
+  s_4ba125a7f49e3b::t_aa36943bca48b5 76
+  s_4ba125a7f49e3b::t_787afa5bce28fe 1-66,68-75,77-183
+  s_4ba125a7f49e3b::t_d620b4ff7aeeee 67
+src/praxis_agent/prompts.py
+  s_c9c2cadba1b5ab::t_ba8a43a51cf6e5 26-30
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.50-trip",
+  "base_commit_sha": "61d3ab0f1b191dd0834abbd10f7f51838de6c184",
+  "prompts": {},
+  "sessions": {
+    "s_4ba125a7f49e3b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a151e3-d7b7-73a2-b708-defcb707b7b2",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "wanjl <wanjl@trip.com>"
+    },
+    "s_4bf82b2a3ae435": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a147ae-7e40-7010-8769-b36e72e9c630",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "wanjl <wanjl@trip.com>"
+    },
+    "s_c9c2cadba1b5ab": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a15218-4818-78f1-b9cc-5aadc75da0d8",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "wanjl <wanjl@trip.com>"
+    },
+    "s_d46bbdef14c6cd": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a14e30-63b6-70f0-8896-cd593812f63a",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "wanjl <wanjl@trip.com>"
+    }
+  }
+}
