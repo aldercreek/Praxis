@@ -1,0 +1,32 @@
+src/praxis_agent/sessions/__init__.py
+  s_05f61ff3cbe74f::t_ef8e6581469a7d 1-21
+src/praxis_agent/cli.py
+  s_05f61ff3cbe74f::t_8521426578de76 72-76
+  s_05f61ff3cbe74f::t_ef8e6581469a7d 13,28-40,49-54,122-123,125
+src/praxis_agent/sessions/models.py
+  s_05f61ff3cbe74f::t_ef8e6581469a7d 1-27
+src/praxis_agent/sessions/sqlite_store.py
+  s_05f61ff3cbe74f::t_f92d98495765c2 13
+  s_05f61ff3cbe74f::t_8521426578de76 93-98,179,382,388-393,664
+  s_05f61ff3cbe74f::t_ef8e6581469a7d 1-12,14-92,99-178,180-381,383-387,394-663,665-668
+README.md
+  s_05f61ff3cbe74f::t_ef8e6581469a7d 91-103,105-106,116-119,140
+src/praxis_agent/agent.py
+  s_05f61ff3cbe74f::t_ef8e6581469a7d 1-2,4,6,41-45,60-62,81-90,100-101,104-112,119,125-132,143-149,151-157,196-203,223-234,245-266,314-316,319-328,331-356,365-367,369-370
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.44-trip",
+  "base_commit_sha": "519ece08f326913976b852e0424d7952543fc1ca",
+  "prompts": {},
+  "sessions": {
+    "s_05f61ff3cbe74f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08165-7b07-7723-9093-a5397df3abb9",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "wanjl <wanjl@trip.com>"
+    }
+  }
+}

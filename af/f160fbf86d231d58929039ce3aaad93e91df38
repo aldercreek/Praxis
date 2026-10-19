@@ -1,0 +1,31 @@
+tests/test_registry.py
+  s_05f61ff3cbe74f::t_9441575139ed60 25-26
+src/praxis_agent/agent.py
+  s_05f61ff3cbe74f::t_9441575139ed60 193
+src/praxis_agent/context/tools.py
+  s_05f61ff3cbe74f::t_9441575139ed60 3-5,88-147,149
+README.md
+  s_05f61ff3cbe74f::t_5b51d5b92f4d59 85-98
+src/praxis_agent/tools/registry.py
+  s_05f61ff3cbe74f::t_9441575139ed60 23,233
+src/praxis_agent/context/retrieval.py
+  s_05f61ff3cbe74f::t_9441575139ed60 1-94
+tests/test_agent.py
+  s_05f61ff3cbe74f::t_9441575139ed60 112
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.44-trip",
+  "base_commit_sha": "722b53d86cb54efff560355a5e3bf37a72e3fece",
+  "prompts": {},
+  "sessions": {
+    "s_05f61ff3cbe74f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08165-7b07-7723-9093-a5397df3abb9",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "wanjl <wanjl@trip.com>"
+    }
+  }
+}

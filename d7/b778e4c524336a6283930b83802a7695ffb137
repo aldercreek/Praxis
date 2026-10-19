@@ -1,0 +1,45 @@
+tests/test_registry.py
+  s_d3f33895a95bef::t_15ec3cd72da048 15,18
+tests/test_agent.py
+  s_d3f33895a95bef::t_15ec3cd72da048 55,163-208
+src/praxis_agent/tools/command.py
+  s_d3f33895a95bef::t_38880f218aec8e 1-95
+src/praxis_agent/tools/__init__.py
+  s_d3f33895a95bef::t_38880f218aec8e 3,28
+README.md
+  s_d3f33895a95bef::t_73cf593e050ea9 19-21,24-28,30-32
+  s_d3f33895a95bef::t_38880f218aec8e 38-39,45-52
+src/praxis_agent/config.py
+  s_d3f33895a95bef::t_73cf593e050ea9 6-11,29,32,34-38
+src/praxis_agent/agent.py
+  s_d3f33895a95bef::t_38880f218aec8e 2,12-17,30-32,92-118,130-136,142-144
+src/praxis_agent/cli.py
+  s_d3f33895a95bef::t_38880f218aec8e 2-3,8-63,83-88
+src/praxis_agent/model.py
+  s_d3f33895a95bef::t_38880f218aec8e 13-14
+src/praxis_agent/tools/registry.py
+  s_d3f33895a95bef::t_38880f218aec8e 7,108-137,147,200-204,272-281
+tests/test_config.py
+  s_d3f33895a95bef::t_73cf593e050ea9 9-11,20-30,33-35,39-43,46,48
+  s_d3f33895a95bef::t_a4095e56ebe9f4 47
+tests/test_command.py
+  s_d3f33895a95bef::t_15ec3cd72da048 1-52
+tests/test_cli.py
+  s_d3f33895a95bef::t_15ec3cd72da048 12
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.43-trip",
+  "base_commit_sha": "1dbcf621e4e6e13a85c865c941253aef670051a4",
+  "prompts": {},
+  "sessions": {
+    "s_d3f33895a95bef": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a05b00-f287-7dc2-a544-481b2ffd2946",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "wanjl <wanjl@trip.com>"
+    }
+  }
+}

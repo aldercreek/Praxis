@@ -1,0 +1,27 @@
+src/praxis_agent/builtin_skills/monty/SKILL.md
+  s_01c1b2890a376a::t_d9131516ec6f97 1-50
+pyproject.toml
+  s_01c1b2890a376a::t_d9131516ec6f97 33-35
+src/praxis_agent/skills.py
+  s_01c1b2890a376a::t_d9131516ec6f97 56,58
+src/praxis_agent/tools/code.py
+  s_01c1b2890a376a::t_e68e30bde4ad45 21,23,37-41,43-47
+  s_01c1b2890a376a::t_c3fc6f3af837b1 225-226
+  s_01c1b2890a376a::t_1165454e839525 1,14-18,26,32-33,52,60-61,81-82,86-106,110-115,118-121,124-127,129-139,143,152,155,161-163,165-167,171-172,179-187,199-208,210-211,213-218,220-224,227-239,243-244
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.45-trip",
+  "base_commit_sha": "2b315e48435ec98bb9e8bd98977d92d3a73bf5dd",
+  "prompts": {},
+  "sessions": {
+    "s_01c1b2890a376a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0d343-93a7-74f3-aaff-07a436d25308",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "wanjl <wanjl@trip.com>"
+    }
+  }
+}

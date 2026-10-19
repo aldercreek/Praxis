@@ -1,0 +1,37 @@
+README.md
+  s_d3f33895a95bef::t_026eeeedb7c794 1-46
+src/praxis_agent/__main__.py
+  s_d3f33895a95bef::t_026eeeedb7c794 1-6
+src/praxis_agent/agent.py
+  s_d3f33895a95bef::t_026eeeedb7c794 1-16
+tests/test_agent.py
+  s_d3f33895a95bef::t_026eeeedb7c794 1-15
+pyproject.toml
+  s_d3f33895a95bef::t_026eeeedb7c794 1-24
+tests/test_cli.py
+  s_d3f33895a95bef::t_026eeeedb7c794 1-9
+src/praxis_agent/cli.py
+  s_d3f33895a95bef::t_026eeeedb7c794 1-30
+.gitignore
+  s_d3f33895a95bef::t_026eeeedb7c794 1-14
+src/praxis_agent/tools/__init__.py
+  s_d3f33895a95bef::t_026eeeedb7c794 1-2
+src/praxis_agent/__init__.py
+  s_d3f33895a95bef::t_026eeeedb7c794 1-4
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.43-trip",
+  "base_commit_sha": "ee4aebc28ad839a0fd9b75246abdcc83f5dbdfbd",
+  "prompts": {},
+  "sessions": {
+    "s_d3f33895a95bef": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a05b00-f287-7dc2-a544-481b2ffd2946",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "wanjl <wanjl@trip.com>"
+    }
+  }
+}
