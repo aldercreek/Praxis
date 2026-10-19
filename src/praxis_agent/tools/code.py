@@ -1,6 +1,7 @@
 """Python composition of the current agent's tools using Monty."""
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import os
@@ -8,6 +9,7 @@ import threading
 import time
 from dataclasses import dataclass
 
+from praxis_agent.execution import ExecutionStopped, Run, await_cancellable, current_handle, current_run
 from praxis_agent.tools.registry import Tool, ToolContext, ToolResult
 
 
@@ -56,32 +58,75 @@ class CodeRuntime:
         self._slots = threading.BoundedSemaphore(self.config.max_processes)
         self._lock = threading.Lock()
         self._pool = None
+        self._loop = None
+        self._thread = None
+        self._ready = threading.Event()
+        self._stopping = None
+        self._startup_error = None
         self._closed = threading.Event()
+        self._close_done = threading.Event()
+        self._active: dict[Run, threading.Event] = {}
         self._sessions: dict[tuple[str, str], bytes] = {}
         self._agent_locks: dict[str, threading.Lock] = {}
 
-    def _get_pool(self):
-        from pydantic_monty import Monty
+    def _ensure_loop(self):
         with self._lock:
             if self._closed.is_set():
-                raise RuntimeError("Code runtime is closed")
-            if self._pool is None:
-                pool = Monty(
-                    max_processes=self.config.max_processes,
-                    checkout_timeout=self.config.queue_seconds,
-                    request_timeout=self.config.compute_seconds + 1,
-                )
-                self._pool = pool.__enter__()
-            return self._pool
+                raise ExecutionStopped("Code runtime is closed")
+            if self._thread is None:
+                self._thread = threading.Thread(target=self._serve, name="praxis-code", daemon=True)
+                self._thread.start()
+        self._ready.wait()
+        if self._startup_error is not None:
+            raise RuntimeError("Could not start code runtime") from self._startup_error
+        return self._loop
+
+    def _serve(self):
+        async def serve():
+            from pydantic_monty import AsyncMonty
+
+            async with AsyncMonty(
+                max_processes=self.config.max_processes,
+                checkout_timeout=self.config.queue_seconds,
+                request_timeout=self.config.compute_seconds + 1,
+            ) as pool:
+                self._pool = pool
+                self._loop = asyncio.get_running_loop()
+                self._stopping = asyncio.Event()
+                self._ready.set()
+                await self._stopping.wait()
+
+        try:
+            asyncio.run(serve())
+        except BaseException as error:
+            self._startup_error = error
+        finally:
+            self._ready.set()
 
     def close(self):
-        self._closed.set()
         with self._lock:
-            pool, self._pool = self._pool, None
-            self._sessions.clear()
-            self._agent_locks.clear()
-        if pool is not None:
-            pool.__exit__(None, None, None)
+            closing = self._closed.is_set()
+            self._closed.set()
+            active = tuple(self._active.items())
+        if closing:
+            self._close_done.wait()
+            return
+        try:
+            for scope, _ in active:
+                scope.cancel()
+            for _, done in active:
+                done.wait()
+            if self._thread is not None:
+                self._ready.wait()
+                if self._loop is not None and not self._loop.is_closed():
+                    self._loop.call_soon_threadsafe(self._stopping.set)
+                self._thread.join()
+            with self._lock:
+                self._pool = None
+                self._sessions.clear()
+                self._agent_locks.clear()
+        finally:
+            self._close_done.set()
 
     def release_agent(self, agent_id: str) -> None:
         with self._lock:
@@ -104,11 +149,13 @@ class CodeRuntime:
         return Tool(
             name="run_code",
             description=(
-                "Compose allowed tools and process returned data in a private Monty Python-subset session. "
+                "Compose allowed tools and process returned data in a private official Monty 1.2.0 Python-subset session. "
+                "Built-in json, csv and tomllib can parse text returned by tools. "
                 "For project imports/tests, installed libraries or subprocesses use run_command if available; "
                 "otherwise report the capability gap. Monty cannot execute host project modules. "
                 "Use call_tool for file tools, active MCP tools and history within the current role; "
                 "commands, management tools and nested run_code are unavailable. "
+                "Tool calls are synchronous; no host filesystem mounts or external modules are configured. "
                 "Successful calls save session state. Failure preserves the last saved state but does not "
                 "undo external effects. Returns the final expression, stdout, tool-call records and session status; "
                 "keep outputs concise. See the monty skill for compatibility and recovery details."
@@ -140,10 +187,15 @@ class CodeRuntime:
         printed = []
         acquired = False
         phase = "queue"
+        scope = Run("run_code")
+        done = threading.Event()
+        unsubscribe = lambda: None
+        pending = None
 
         def check():
+            scope.check()
             if self._closed.is_set():
-                raise RuntimeError("Code runtime is closed")
+                raise ExecutionStopped("Code runtime is closed")
             if context.check_execution:
                 context.check_execution()
 
@@ -173,7 +225,8 @@ class CodeRuntime:
                 "effects": "Completed operations are not rolled back; do not replay blindly.",
             }, ensure_ascii=False, default=str))
 
-        try:
+        def execute():
+            nonlocal agent_acquired, acquired, session_created, pending
             deadline = time.monotonic() + self.config.queue_seconds
             while not agent_acquired:
                 check()
@@ -191,36 +244,67 @@ class CodeRuntime:
                     raise TimeoutError("Timed out waiting for a Monty worker; script not executed")
                 acquired = self._slots.acquire(timeout=min(0.1, remaining))
             check()
-            pool = self._get_pool()
-            with pool.checkout(script_name="praxis_run_code.py", limits={
-                "max_feed_duration_secs": self.config.compute_seconds,
-                "max_memory": self.config.memory_bytes,
-                "max_suspensions": self.config.max_suspensions,
-            }, type_check=True, type_check_stubs=_TOOL_STUBS,
-                    type_check_format="concise") as session:
+            loop = self._ensure_loop()
+
+            async def execute_session():
+                nonlocal phase
                 check()
-                phase = "restore"
-                if saved is not None:
-                    session.load_session(saved)
-                phase = "execute"
-                result = session.feed_run(code, external_lookup={"call_tool": call_tool},
-                                          print_callback=capture)
-                check()
-                phase = "save"
-                state = session.dump()
-                check()
-                with self._lock:
-                    if self._closed.is_set():
-                        raise RuntimeError("Code runtime is closed")
-                    self._sessions[key] = state
-                state_saved = True
-                return response(True, result=result)
+                async with self._pool.checkout(script_name="praxis_run_code.py", limits={
+                    "max_feed_duration_secs": self.config.compute_seconds,
+                    "max_memory": self.config.memory_bytes,
+                    "max_suspensions": self.config.max_suspensions,
+                }, type_check=True, type_check_stubs=_TOOL_STUBS,
+                        type_check_format="concise") as session:
+                    check()
+                    phase = "restore"
+                    if saved is not None:
+                        await session.load_session(saved)
+                    check()
+                    phase = "execute"
+                    result = await session.feed_run(code, external_lookup={"call_tool": call_tool},
+                                                    print_callback=capture)
+                    check()
+                    phase = "save"
+                    state = await session.dump()
+                    check()
+                    return result, state
+
+            async def owned_call():
+                return await await_cancellable(execute_session(), scope)
+
+            # Cancel the owned asyncio task, never this proxy: its completion
+            # must acknowledge the session's asynchronous cleanup.
+            pending = asyncio.run_coroutine_threadsafe(owned_call(), loop).result()
+
+        try:
+            parent = current_run()
+            if parent is not None:
+                parent.add_child(scope)
+            handle = current_handle()
+            if handle is not None:
+                unsubscribe = handle.on_cancel(scope.cancel)
+            with self._lock:
+                if self._closed.is_set():
+                    scope.cancel()
+                self._active[scope] = done
+            # Run.settle drains tool callbacks and freezes cancellation before
+            # success is chosen. Only that successful outcome may be committed.
+            scope.execute(execute)
+            result, state = pending
+            with self._lock:
+                if self._closed.is_set():
+                    raise ExecutionStopped("Code runtime is closed")
+                self._sessions[key] = state
+            state_saved = True
+            return response(True, result=result)
         except Exception as error:
             inner = error.exception() if isinstance(error, MontyError) else error
             detail = (error.display() if isinstance(error, (MontyRuntimeError, MontySyntaxError, MontyTypingError))
                       else f"{type(error).__name__}: {error}")
             kind = "runtime" if phase == "execute" else phase
-            if isinstance(error, MontyTypingError):
+            if isinstance(error, ExecutionStopped):
+                kind = "cancelled"
+            elif isinstance(error, MontyTypingError):
                 kind = "syntax" if "[invalid-syntax]" in detail else "type_check"
                 phase = "preflight"
             elif isinstance(error, MontySyntaxError):
@@ -237,7 +321,11 @@ class CodeRuntime:
             return response(False, error=detail, error_kind=kind,
                             error_type=type(inner).__name__, phase=phase)
         finally:
+            unsubscribe()
             if acquired:
                 self._slots.release()
             if agent_acquired:
                 agent_lock.release()
+            with self._lock:
+                self._active.pop(scope, None)
+                done.set()

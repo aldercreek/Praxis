@@ -213,16 +213,20 @@ Agent 主循环
 
 ## Monty 程序化工具调用
 
+Praxis 使用 PyPI 官方 `pydantic-monty==1.2.0`，其 client/runtime 配套包也由官方依赖安装，不需要本地 Monty 源码或定制构建。运行环境不要用 `MONTY_BIN` 指向旧的本地二进制。
+
 `run_code(session_id, code)` 提供私有、具名的 Python 子集会话，用于循环、过滤、汇总和组合工具调用。代码通过 `call_tool(name, arguments)` 使用文件工具、历史读取和已激活的 MCP 工具；不能调用命令、管理工具或嵌套 `run_code`。
 
-它不执行宿主项目模块，也不是完整 Python 环境。运行项目导入、第三方库或测试时使用 `run_command`。内置 `monty` 技能说明支持的语法和恢复方式。
+内置 `json`、`csv`、`tomllib` 可解析文件工具取得的文本，例如 `tomllib.loads(call_tool("read_file", {"relative_path": "pyproject.toml"})["text"])`。Praxis 没有配置 Monty 文件系统挂载或 `external_modules`；项目导入、第三方库和测试通过独立的 `run_command` 执行。内置 `monty` 技能提供官方能力边界、完整示例、返回值处理和恢复说明。
+
+旧本地补丁中的 `del`、`json.dumps(default=...)` 和捕获内置方法（如 `append = items.append`）不属于官方 1.2.0 能力；分别使用重新绑定/容器方法、显式转换 JSON 数据、直接调用方法或纯 lambda。
 
 成功执行会保存变量/函数，下次使用同名会话继续；失败保留上次成功状态，但已经完成的文件或外部工具操作不会回滚。会话状态仅在当前进程内保留，关闭 Agent、`/clear` 或重启后不恢复。
 
 | 环境变量 | 默认值 | 含义 |
 | --- | ---: | --- |
 | `PRAXIS_CODE_COMPUTE_SECONDS` | 5 | 每次解释器推进的计算秒数，不包含宿主工具等待 |
-| `PRAXIS_CODE_MEMORY_BYTES` | 536870912 | 内存预算，512 MiB |
+| `PRAXIS_CODE_MEMORY_BYTES` | 536870912 | Monty worker 的分配内存预算，512 MiB；不是整个 Praxis 进程或 RSS 上限 |
 | `PRAXIS_CODE_MAX_PROCESSES` | 8 | 共享 Monty 进程池上限 |
 | `PRAXIS_CODE_QUEUE_SECONDS` | 30 | 等待可用执行槽的秒数 |
 | `PRAXIS_CODE_MAX_SUSPENSIONS` | 5000 | 单次执行允许的挂起次数 |

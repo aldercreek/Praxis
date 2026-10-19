@@ -173,7 +173,7 @@ def run_operation(name, operation):
 
 
 async def await_cancellable(awaitable, handle):
-    """Cancel on the owning loop; await task cleanup, not a cancelled proxy Future."""
+    """Cancel on the owning loop; await task cleanup, not a canceled proxy Future."""
     loop = asyncio.get_running_loop()
     task = asyncio.create_task(awaitable)
     unsubscribe = handle.on_cancel(lambda: loop.call_soon_threadsafe(task.cancel))
