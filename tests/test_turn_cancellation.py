@@ -5,6 +5,7 @@ from threading import Event, Thread
 from types import SimpleNamespace
 
 import pytest
+from mcp.types import CallToolResult
 from textual.widgets import TextArea
 
 from praxis_agent.agent import Agent
@@ -268,7 +269,7 @@ def test_mcp_cancel_waits_for_coroutine_cleanup_and_keeps_connection(tmp_path):
         async def call_tool(self, tool, arguments):
             self.calls += 1
             if self.calls > 1:
-                return SimpleNamespace(content=[], is_error=False, model_dump=lambda **kw: {"ok": True})
+                return CallToolResult(content=[])
             entered.set()
             try:
                 await asyncio.Event().wait()

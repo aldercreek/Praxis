@@ -8,7 +8,7 @@ import json
 import logging
 import os
 import re
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, nullcontext
 from pathlib import Path
 from threading import Event, Thread
 from uuid import uuid4
@@ -229,7 +229,7 @@ class MCPConnections:
         def load(record):
             def invoke(context: ToolContext, **arguments):
                 return self.call(record["server"], record["original"], arguments,
-                                 check_execution=lambda: check(context))
+                                 check_execution=lambda: check(context), parallel=context.parallel_tool_call)
             if record["alias"] in registry.names:
                 return "already_active"
             registry.register(Tool(name=record["alias"], description=record["description"],
@@ -320,22 +320,23 @@ class MCPConnections:
 
         return release
 
-    def call(self, server, tool, arguments, *, check_execution=None):
+    def call(self, server, tool, arguments, *, check_execution=None, parallel=False):
         if self.closed or self.loop is None:
             return ToolResult(False, "MCP connections are closed")
         if check_execution:
             check_execution()
         def invoke(handle):
             async def owned_call():
-                return await await_cancellable(self._call(server, tool, arguments), handle)
+                return await await_cancellable(self._call(server, tool, arguments, parallel=parallel), handle)
             # Never cancel this proxy: its completion must acknowledge coroutine cleanup.
             return asyncio.run_coroutine_threadsafe(owned_call(), self.loop).result()
         return run_operation(f"MCP {server}/{tool}", invoke)
 
-    async def _call(self, server, tool, arguments):
+    async def _call(self, server, tool, arguments, *, parallel=False):
         try:
             async with asyncio.timeout(self.servers[server].get("tool_timeout_sec", 60)):
-                async with self.locks[server]:
+                # Explicit parallel batches opt out of the ordinary per-server queue.
+                async with nullcontext() if parallel else self.locks[server]:
                     if server not in self.clients:
                         return ToolResult(False, "MCP server disconnected; no automatic retry was attempted")
                     result = await self.clients[server].call_tool(tool, arguments)
@@ -344,7 +345,8 @@ class MCPConnections:
             if unsupported:
                 return ToolResult(False, "MCP returned unsupported content types: " + ", ".join(unsupported)
                                   + ". No automatic retry; the remote operation may already have completed.")
-            return ToolResult(not result.is_error, json.dumps(data, ensure_ascii=False))
+            return ToolResult(not result.is_error, json.dumps(data, ensure_ascii=False),
+                              structured_output=result.structured_content)
         except asyncio.CancelledError:
             raise
         except Exception as error:

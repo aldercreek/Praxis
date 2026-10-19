@@ -190,7 +190,9 @@ class ToolContext:
     invoke_tool: Callable[[str, dict], ToolResult] | None = None
     check_execution: Callable[[], None] | None = None
     invoke_programmatic_tool: Callable[[str, dict], ToolResult] | None = None
+    invoke_parallel_tools: Callable[[list[dict], int], list[ToolResult]] | None = None
     programmatic_call: bool = False
+    parallel_tool_call: bool = False
     on_command_output: Callable[[str, str], None] | None = None
 
 

@@ -7,14 +7,22 @@ import math
 import os
 import threading
 import time
-from dataclasses import dataclass
+from contextlib import AsyncExitStack
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING
 
-from praxis_agent.execution import ExecutionStopped, Run, await_cancellable, current_handle, current_run
+from praxis_agent.execution import ExecutionStopped, Run, await_cancellable, current_handle, current_run, run_operation
+from praxis_agent.tools.code_output import CodeOutput
 from praxis_agent.tools.registry import Tool, ToolContext, ToolResult
+
+if TYPE_CHECKING:
+    from pydantic_monty import AsyncMontySession
 
 
 _TOOL_STUBS = """from typing import Any
 def call_tool(name: str, arguments: dict[str, Any]) -> Any: ...
+def call_parallel_tools(requests: list[dict[str, Any]]) -> list[dict[str, Any]]: ...
 """
 
 
@@ -22,17 +30,15 @@ def call_tool(name: str, arguments: dict[str, Any]) -> Any: ...
 class CodeConfig:
     # Per-feed interpreter compute time; host/tool waiting is excluded.
     compute_seconds: float = 5.0
-    memory_bytes: int = 512 * 1024 * 1024
-    max_processes: int = 8
     queue_seconds: float = 30.0
-    max_suspensions: int = 5000
+    max_parallel_tools: int = 16
 
     def __post_init__(self):
-        for value in (self.compute_seconds, self.memory_bytes, self.max_processes, self.queue_seconds):
+        for value in (self.compute_seconds, self.queue_seconds):
             if not math.isfinite(value) or value <= 0:
                 raise ValueError("Monty limits must be finite positive numbers")
-        if type(self.max_suspensions) is not int or not 0 < self.max_suspensions < 2**64:
-            raise ValueError("max_suspensions must be a positive 64-bit integer")
+        if type(self.max_parallel_tools) is not int or self.max_parallel_tools < 1:
+            raise ValueError("max_parallel_tools must be a positive integer")
 
     @classmethod
     def from_env(cls):
@@ -43,21 +49,61 @@ class CodeConfig:
 
         return cls(
             compute_seconds=float(value("PRAXIS_CODE_COMPUTE_SECONDS", defaults.compute_seconds)),
-            memory_bytes=int(value("PRAXIS_CODE_MEMORY_BYTES", defaults.memory_bytes)),
-            max_processes=int(value("PRAXIS_CODE_MAX_PROCESSES", defaults.max_processes)),
             queue_seconds=float(value("PRAXIS_CODE_QUEUE_SECONDS", defaults.queue_seconds)),
-            max_suspensions=int(value("PRAXIS_CODE_MAX_SUSPENSIONS", defaults.max_suspensions)),
+            max_parallel_tools=int(value("PRAXIS_CODE_MAX_PARALLEL_TOOLS", defaults.max_parallel_tools)),
         )
 
 
-class CodeRuntime:
-    """Shared Monty pool with private, named, serialized sessions for each agent."""
+@dataclass(eq=False)
+class _AgentWorker:
+    """One agent's execution lock and lazily opened Monty subprocess."""
 
-    def __init__(self, config: CodeConfig | None = None):
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    released: threading.Event = field(default_factory=threading.Event)
+    closed: threading.Event = field(default_factory=threading.Event)
+    resources: AsyncExitStack | None = None
+    session: AsyncMontySession | None = None
+
+    async def open(self, config: CodeConfig) -> None:
+        from pydantic_monty import AsyncMonty
+
+        resources = AsyncExitStack()
+        try:
+            pool = await resources.enter_async_context(AsyncMonty(
+                min_processes=0, max_processes=1,
+                request_timeout=config.compute_seconds + 1,
+            ))
+            session = await resources.enter_async_context(pool.checkout(
+                script_name="praxis_run_code.py",
+                limits={
+                    "max_feed_duration_secs": config.compute_seconds,
+                    # Omission/None restores Monty's 1000 suspension default.
+                    "max_suspensions": 2**64 - 1,
+                },
+                type_check=True, type_check_stubs=_TOOL_STUBS,
+                type_check_format="concise",
+            ))
+        except BaseException:
+            await resources.aclose()
+            raise
+        self.resources, self.session = resources, session
+
+    async def close(self) -> None:
+        resources, self.resources = self.resources, None
+        self.session = None
+        if resources is not None:
+            # Exit the checkout before its pool so the process is reaped.
+            await resources.aclose()
+
+
+class CodeRuntime:
+    """One resident worker per agent, sharing only the host event loop."""
+
+    def __init__(self, config: CodeConfig | None = None, *, output_dir: Path | None = None):
         self.config = config or CodeConfig.from_env()
-        self._slots = threading.BoundedSemaphore(self.config.max_processes)
+        self._output_dir = (output_dir if output_dir is not None else
+                            Path.home() / ".praxis" / "outputs" / "code").resolve()
         self._lock = threading.Lock()
-        self._pool = None
         self._loop = None
         self._thread = None
         self._ready = threading.Event()
@@ -65,9 +111,8 @@ class CodeRuntime:
         self._startup_error = None
         self._closed = threading.Event()
         self._close_done = threading.Event()
-        self._active: dict[Run, threading.Event] = {}
-        self._sessions: dict[tuple[str, str], bytes] = {}
-        self._agent_locks: dict[str, threading.Lock] = {}
+        self._active: dict[Run, tuple[_AgentWorker | None, threading.Event]] = {}
+        self._workers: dict[str, _AgentWorker] = {}
 
     def _ensure_loop(self):
         with self._lock:
@@ -83,18 +128,10 @@ class CodeRuntime:
 
     def _serve(self):
         async def serve():
-            from pydantic_monty import AsyncMonty
-
-            async with AsyncMonty(
-                max_processes=self.config.max_processes,
-                checkout_timeout=self.config.queue_seconds,
-                request_timeout=self.config.compute_seconds + 1,
-            ) as pool:
-                self._pool = pool
-                self._loop = asyncio.get_running_loop()
-                self._stopping = asyncio.Event()
-                self._ready.set()
-                await self._stopping.wait()
+            self._loop = asyncio.get_running_loop()
+            self._stopping = asyncio.Event()
+            self._ready.set()
+            await self._stopping.wait()
 
         try:
             asyncio.run(serve())
@@ -114,37 +151,48 @@ class CodeRuntime:
         try:
             for scope, _ in active:
                 scope.cancel()
-            for _, done in active:
+            for _, (_, done) in active:
                 done.wait()
+            with self._lock:
+                agents = tuple(self._workers)
+            for agent_id in agents:
+                self.release_agent(agent_id)
             if self._thread is not None:
                 self._ready.wait()
                 if self._loop is not None and not self._loop.is_closed():
                     self._loop.call_soon_threadsafe(self._stopping.set)
                 self._thread.join()
-            with self._lock:
-                self._pool = None
-                self._sessions.clear()
-                self._agent_locks.clear()
         finally:
             self._close_done.set()
 
     def release_agent(self, agent_id: str) -> None:
         with self._lock:
-            for key in [key for key in self._sessions if key[0] == agent_id]:
-                del self._sessions[key]
-            self._agent_locks.pop(agent_id, None)
-
-    def context_item(self, agent_id: str) -> dict[str, str]:
-        with self._lock:
-            names = sorted(name for owner, name in self._sessions if owner == agent_id)
-        return {"role": "developer", "content": (
-            "当前 agent 可用的 run_code 会话：\n"
-            + json.dumps(names, ensure_ascii=False)
-        )}
+            worker = self._workers.get(agent_id)
+            if worker is None:
+                return
+            releasing = worker.released.is_set()
+            worker.released.set()
+            active = [(scope, done) for scope, (owner, done) in self._active.items()
+                      if owner is worker]
+        if releasing:
+            worker.closed.wait()
+            return
+        try:
+            for scope, _ in active:
+                scope.cancel()
+            for _, done in active:
+                done.wait()
+            if worker.resources is not None:
+                asyncio.run_coroutine_threadsafe(worker.close(), self._loop).result()
+        finally:
+            with self._lock:
+                if self._workers.get(agent_id) is worker:
+                    del self._workers[agent_id]
+            worker.closed.set()
 
     def tool(self, agent_id: str = "parent") -> Tool:
-        def execute(context: ToolContext, session_id: str, code: str) -> ToolResult:
-            return self.run(context, code, session_id=session_id, agent_id=agent_id)
+        def execute(context: ToolContext, code: str) -> ToolResult:
+            return self.run(context, code, agent_id=agent_id)
 
         return Tool(
             name="run_code",
@@ -155,37 +203,37 @@ class CodeRuntime:
                 "otherwise report the capability gap. Monty cannot execute host project modules. "
                 "Use call_tool for file tools, active MCP tools and history within the current role; "
                 "commands, management tools and nested run_code are unavailable. "
-                "Tool calls are synchronous; no host filesystem mounts or external modules are configured. "
-                "Successful calls save session state. Failure preserves the last saved state but does not "
-                "undo external effects. Returns the final expression, stdout, tool-call records and session status; "
-                "keep outputs concise. See the monty skill for compatibility and recovery details."
+                "Use call_parallel_tools([{name, arguments}, ...]) for caller-selected independent calls: "
+                "the host runs them concurrently without checking parallel_safe and returns ordered "
+                "{success, output} or {success, error} entries; individual failures do not stop the batch. "
+                "No host filesystem mounts or external modules are configured. "
+                "This agent owns one resident worker: variables/functions persist across calls, including "
+                "changes made before ordinary errors. There are no snapshots or rollback. Cancellation during "
+                "execution, resource exhaustion or worker failure discards this agent's environment; "
+                "state_lost=true means its variables must be rebuilt. External effects are never undone. "
+                "Idle agents retain their workers; closing an agent, clearing the conversation or restarting "
+                "discards its variables. Returns the final expression, stdout/stderr previews and tool-call records. "
+                "Each stream retains 30000 characters (first 6000, last 24000); "
+                "overflow logs are saved in full at output_files paths, readable with read_file. "
+                "See the monty skill for usage and recovery details."
             ),
             parameters={"type": "object", "properties": {
-                "session_id": {"type": "string", "minLength": 1, "description": "Meaningful private session name, not a file path. Reuse restores saved variables/functions; a new name starts empty. Saved state survives idle/resume, not agent closure/restart."},
-                "code": {"type": "string", "minLength": 1, "description": "Monty-compatible Python, type-checked before execution. Call tools via call_tool(name, arguments). The final expression is returned; print only needed output."}},
-                "required": ["session_id", "code"], "additionalProperties": False},
+                "code": {"type": "string", "minLength": 1, "description": "Python for Monty 1.2.0, type-checked before execution. Use call_tool(name, arguments) or call_parallel_tools([{name, arguments}, ...]). The final expression is returned; print only needed output."}},
+                "required": ["code"], "additionalProperties": False},
             handler=execute,
         )
 
-    def run(self, context: ToolContext, code: str, *, session_id: str, agent_id: str = "parent") -> ToolResult:
+    def run(self, context: ToolContext, code: str, *, agent_id: str = "parent") -> ToolResult:
         from pydantic_monty import (
             MontyCrashedError, MontyError, MontyRuntimeError, MontySyntaxError, MontyTypingError,
         )
 
-        if not isinstance(session_id, str) or not session_id.strip():
-            return ToolResult(False, json.dumps({
-                "error_kind": "input", "error_type": "ValueError", "phase": "input",
-                "error": "session_id must be a non-empty meaningful name", "state_saved": False,
-            }))
-        key = (agent_id, session_id)
-        with self._lock:
-            agent_lock = self._agent_locks.setdefault(agent_id, threading.Lock())
+        worker = None
         agent_acquired = False
-        session_created = False
-        state_saved = False
+        worker_created = False
+        state_lost = False
         calls = []
-        printed = []
-        acquired = False
+        output = CodeOutput(self._output_dir)
         phase = "queue"
         scope = Run("run_code")
         done = threading.Event()
@@ -196,11 +244,13 @@ class CodeRuntime:
             scope.check()
             if self._closed.is_set():
                 raise ExecutionStopped("Code runtime is closed")
+            if worker is not None and worker.released.is_set():
+                raise ExecutionStopped("Agent code worker is closed")
             if context.check_execution:
                 context.check_execution()
 
         def capture(stream, text):
-            printed.append(text)
+            output.append(stream, text)
 
         def call_tool(name, arguments):
             check()
@@ -218,63 +268,96 @@ class CodeRuntime:
             return result.structured_output if result.structured_output is not None else result.output
 
         def response(success, **values):
+            output.close()
             return ToolResult(success, json.dumps({
-                **values, "session_id": session_id, "session_created": session_created,
-                "state_saved": state_saved, "stdout": "".join(printed),
+                **values, "worker_created": worker_created, "state_lost": state_lost,
                 "calls": calls,
                 "effects": "Completed operations are not rolled back; do not replay blindly.",
-            }, ensure_ascii=False, default=str))
+                **output.fields(),
+            }, ensure_ascii=False))
+
+        def execute_parallel_tools(requests):
+            check()
+            if not isinstance(requests, list) or any(
+                not isinstance(item, dict) or set(item) != {"name", "arguments"}
+                or not isinstance(item["name"], str) or not item["name"].strip()
+                or not isinstance(item["arguments"], dict) for item in requests
+            ):
+                raise TypeError("call_parallel_tools expects a list of {name: str, arguments: dict}")
+            if not requests:
+                return []
+            if context.invoke_parallel_tools is None:
+                raise RuntimeError("Parallel tool executor is unavailable")
+            results = context.invoke_parallel_tools(requests, self.config.max_parallel_tools)
+            entries = []
+            for item, result in zip(requests, results):
+                record = {"tool": item["name"], "success": result.success}
+                entry = {"success": result.success}
+                if result.success:
+                    entry["output"] = (result.structured_output if result.structured_output is not None
+                                       else result.output)
+                else:
+                    record["error"] = entry["error"] = result.output
+                calls.append(record)
+                entries.append(entry)
+            check()
+            return entries
+
+        def call_parallel_tools(requests):
+            # Own the scheduler as well as its tools, so cancellation drains
+            # result/event collection before run_code returns.
+            return run_operation("parallel tools", lambda handle: execute_parallel_tools(requests))
 
         def execute():
-            nonlocal agent_acquired, acquired, session_created, pending
+            nonlocal agent_acquired, pending, phase
             deadline = time.monotonic() + self.config.queue_seconds
             while not agent_acquired:
                 check()
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError("Timed out waiting for this agent code execution; script not executed")
-                agent_acquired = agent_lock.acquire(timeout=min(0.1, remaining))
-            with self._lock:
-                saved = self._sessions.get(key)
-            session_created = saved is None
-            while not acquired:
-                check()
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError("Timed out waiting for a Monty worker; script not executed")
-                acquired = self._slots.acquire(timeout=min(0.1, remaining))
+                agent_acquired = worker.lock.acquire(timeout=min(0.1, remaining))
             check()
             loop = self._ensure_loop()
 
             async def execute_session():
-                nonlocal phase
+                nonlocal phase, worker_created, state_lost
                 check()
-                async with self._pool.checkout(script_name="praxis_run_code.py", limits={
-                    "max_feed_duration_secs": self.config.compute_seconds,
-                    "max_memory": self.config.memory_bytes,
-                    "max_suspensions": self.config.max_suspensions,
-                }, type_check=True, type_check_stubs=_TOOL_STUBS,
-                        type_check_format="concise") as session:
-                    check()
-                    phase = "restore"
-                    if saved is not None:
-                        await session.load_session(saved)
+                if worker.session is None:
+                    phase = "startup"
+                    await worker.open(self.config)
+                    worker_created = True
+                try:
                     check()
                     phase = "execute"
-                    result = await session.feed_run(code, external_lookup={"call_tool": call_tool},
-                                                    print_callback=capture)
-                    check()
-                    phase = "save"
-                    state = await session.dump()
-                    check()
-                    return result, state
+                    return await worker.session.feed_run(code, external_lookup={
+                        "call_tool": call_tool, "call_parallel_tools": call_parallel_tools},
+                                                         print_callback=capture)
+                except (MontySyntaxError, MontyTypingError):
+                    raise
+                except BaseException as error:
+                    inner = error.exception() if isinstance(error, MontyError) else error
+                    recoverable = (isinstance(error, MontyRuntimeError)
+                                   and not isinstance(inner, (MemoryError, TimeoutError))
+                                   and not str(inner).startswith("suspension limit "))
+                    if not recoverable:
+                        state_lost = True
+                        await worker.close()
+                    raise
 
             async def owned_call():
                 return await await_cancellable(execute_session(), scope)
 
             # Cancel the owned asyncio task, never this proxy: its completion
             # must acknowledge the session's asynchronous cleanup.
-            pending = asyncio.run_coroutine_threadsafe(owned_call(), loop).result()
+            result = asyncio.run_coroutine_threadsafe(owned_call(), loop).result()
+            check()
+            output.close()
+            if output.errors:
+                raise OSError("Could not save complete code output: " + str(output.errors))
+            phase = "serialize"
+            pending = response(True, result=result)
+            check()
 
         try:
             parent = current_run()
@@ -286,24 +369,24 @@ class CodeRuntime:
             with self._lock:
                 if self._closed.is_set():
                     scope.cancel()
-                self._active[scope] = done
-            # Run.settle drains tool callbacks and freezes cancellation before
-            # success is chosen. Only that successful outcome may be committed.
+                else:
+                    worker = self._workers.setdefault(agent_id, _AgentWorker())
+                    if worker.released.is_set():
+                        scope.cancel()
+                self._active[scope] = worker, done
+            # Drain host callbacks before releasing this agent's execution lock.
             scope.execute(execute)
-            result, state = pending
-            with self._lock:
-                if self._closed.is_set():
-                    raise ExecutionStopped("Code runtime is closed")
-                self._sessions[key] = state
-            state_saved = True
-            return response(True, result=result)
+            return pending
         except Exception as error:
+            output.close()
             inner = error.exception() if isinstance(error, MontyError) else error
             detail = (error.display() if isinstance(error, (MontyRuntimeError, MontySyntaxError, MontyTypingError))
                       else f"{type(error).__name__}: {error}")
             kind = "runtime" if phase == "execute" else phase
             if isinstance(error, ExecutionStopped):
                 kind = "cancelled"
+            elif output.errors:
+                kind = "output"
             elif isinstance(error, MontyTypingError):
                 kind = "syntax" if "[invalid-syntax]" in detail else "type_check"
                 phase = "preflight"
@@ -321,11 +404,10 @@ class CodeRuntime:
             return response(False, error=detail, error_kind=kind,
                             error_type=type(inner).__name__, phase=phase)
         finally:
+            output.close()
             unsubscribe()
-            if acquired:
-                self._slots.release()
             if agent_acquired:
-                agent_lock.release()
+                worker.lock.release()
             with self._lock:
                 self._active.pop(scope, None)
                 done.set()

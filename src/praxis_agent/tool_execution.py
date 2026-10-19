@@ -194,13 +194,51 @@ class ToolCallExecutor:
             return executor.execute(turn_id, FunctionCall(
                 f"{function_call.call_id}:{uuid4().hex}", name, json.dumps(values)))
 
+        def invoke_parallel_tools(requests: list[dict], max_workers: int) -> list[ToolResult]:
+            registry = (self.live_registry or self.tool_registry).snapshot()
+            scope = current_run()
+
+            def check():
+                if scope is not None:
+                    scope.check()
+                if self.check_execution is not None:
+                    self.check_execution()
+
+            executor = replace(
+                self, tool_registry=registry, live_registry=None,
+                context=replace(self.context, programmatic_call=True, parallel_tool_call=True),
+                max_parallel_tools=max_workers, check_execution=check,
+            )
+            calls, positions, results = [], [], {}
+            for index, item in enumerate(requests):
+                check()
+                call_id = f"{function_call.call_id}:{uuid4().hex}"
+                try:
+                    arguments = json.dumps(item["arguments"])
+                except (TypeError, ValueError, RecursionError) as error:
+                    # No JSON arguments exist for this item; finish it without
+                    # submitting it for approval or executing its handler.
+                    call = FunctionCall(call_id, item["name"], "")
+                    failure = registry.argument_error(item["name"],
+                        f"Arguments cannot be encoded as JSON: {error}")
+                    results[index] = executor._finish(turn_id, call, failure)
+                else:
+                    calls.append(FunctionCall(call_id, item["name"], arguments))
+                    positions.append(index)
+            # Explicit caller-selected concurrency; do not consult parallel_safe.
+            results.update(zip(positions, executor._execute_parallel(turn_id, calls)))
+            return [results[index] for index in range(len(requests))]
+
         context = replace(self.context, invoke_tool=invoke_tool,
                           invoke_programmatic_tool=invoke_programmatic_tool,
+                          invoke_parallel_tools=invoke_parallel_tools,
                           check_execution=self.check_execution,
                           on_command_output=lambda stream, text: self.publish_event(ToolOutputDelta(
                               turn_id, function_call.call_id, stream, text,
                               command=arguments.get("command") or " ".join(str(part) for part in arguments.get("argv", [])),
                           )))
+        if context.programmatic_call and not self.tool_registry.allows_programmatic(function_call.name):
+            return ToolResult(False, f"Tool unavailable for programmatic calls: {function_call.name}")
         prepared = self.tool_registry.prepare(function_call.name, arguments, context=context)
         if isinstance(prepared, ToolResult):
             return prepared

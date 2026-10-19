@@ -1,8 +1,9 @@
-"""Cancellation through the real tool executor and Monty subprocess pool."""
+"""Cancellation through the real tool executor and dedicated Monty workers."""
 import json
 import threading
 import time
 from concurrent.futures import Future
+from pathlib import Path
 
 import pytest
 
@@ -15,8 +16,8 @@ from praxis_agent.tools.code import CodeConfig, CodeRuntime
 
 
 @pytest.fixture
-def code_runtime():
-    runtime = CodeRuntime(CodeConfig(max_processes=2, compute_seconds=8))
+def code_runtime(tmp_path):
+    runtime = CodeRuntime(CodeConfig(compute_seconds=8), output_dir=tmp_path / "code-logs")
     try:
         yield runtime
     finally:
@@ -34,7 +35,7 @@ def executor_for(runtime, tmp_path, agent_id="parent"):
 
 def execute(executor, code):
     return executor.execute("turn", FunctionCall(
-        "code", "run_code", json.dumps({"session_id": "test", "code": code}),
+        "code", "run_code", json.dumps({"code": code}),
     ))
 
 
@@ -61,14 +62,16 @@ def add_signal(executor, name="ready"):
 
 
 @pytest.mark.parametrize("body", ["while True:\n    pass", "import time\ntime.sleep(20)"])
-def test_cancel_running_code_restores_snapshot_and_keeps_other_agent(code_runtime, tmp_path, body):
+def test_cancel_running_code_loses_only_its_own_worker(code_runtime, tmp_path, body):
     executor = executor_for(code_runtime, tmp_path)
     other = executor_for(code_runtime, tmp_path, "other")
     assert execute(executor, "x: int = 1").success
     assert execute(other, "x = 99").success
     ready = add_signal(executor)
     other_ready = add_signal(other)
-    scope, finished, thread = start(executor, "x = 2\ncall_tool('ready', {})\n" + body)
+    scope, finished, thread = start(
+        executor, "x = 2\nprint('before cancel' * 3000, end='')\ncall_tool('ready', {})\n" + body,
+    )
     other_scope, other_finished, other_thread = start(
         other, "call_tool('ready', {})\nimport time\ntime.sleep(0.5)\nx",
     )
@@ -83,9 +86,12 @@ def test_cancel_running_code_restores_snapshot_and_keeps_other_agent(code_runtim
         payload = json.loads(result.output)
         assert not result.success
         assert payload["error_kind"] == "cancelled"
-        assert payload["state_saved"] is False
+        assert payload["state_lost"] is True
+        reference = payload["output_files"]["stdout"]
+        assert reference["complete"] is True
+        assert Path(reference["path"]).read_text(encoding="utf-8") == "before cancel" * 3000
         assert json.loads(other_finished.result(timeout=2).output)["result"] == 99
-        assert json.loads(execute(executor, "x").output)["result"] == 1
+        assert json.loads(execute(executor, "'x' in locals()").output)["result"] is False
     finally:
         scope.cancel()
         other_scope.cancel()
@@ -127,13 +133,44 @@ def test_cancel_waits_for_nested_tool_cleanup(code_runtime, tmp_path):
         release_cleanup.set()
         payload = json.loads(finished.result(timeout=2).output)
         assert payload["error_kind"] == "cancelled"
-        assert payload["state_saved"] is False
+        assert payload["state_lost"] is True
         assert observed == ["run_code"]
         assert execute(executor, "42").success
     finally:
         release_cleanup.set()
         scope.cancel()
         thread.join(10)
+
+
+def test_cancel_after_execution_keeps_completed_mutations(code_runtime, tmp_path, monkeypatch):
+    executor = executor_for(code_runtime, tmp_path)
+    assert execute(executor, "saved: int = 1").success
+    encoding, release = threading.Event(), threading.Event()
+    original_dumps = json.dumps
+
+    def encode(value, *args, **kwargs):
+        if isinstance(value, dict) and value.get("result") == "encoding-marker":
+            encoding.set()
+            assert release.wait(5)
+        return original_dumps(value, *args, **kwargs)
+
+    monkeypatch.setattr(json, "dumps", encode)
+    scope, finished, thread = start(executor, 'saved = 2\n"encoding-marker"')
+    try:
+        assert encoding.wait(5)
+        scope.handles[0].cancel()
+        release.set()
+        result = finished.result(timeout=3)
+        payload = json.loads(result.output)
+        assert not result.success
+        assert payload["error_kind"] == "cancelled"
+        assert payload["state_lost"] is False
+        assert json.loads(execute(executor, "saved").output)["result"] == 2
+    finally:
+        release.set()
+        scope.cancel()
+        thread.join(10)
+    assert not thread.is_alive()
 
 
 def test_cancel_queued_call_does_not_execute(code_runtime, tmp_path):
@@ -174,7 +211,7 @@ def test_close_cancels_active_code_and_joins_event_loop(code_runtime, tmp_path):
         assert closed.wait(2)
         assert json.loads(finished.result(timeout=1).output)["error_kind"] == "cancelled"
         assert not code_runtime._thread.is_alive()
-        assert code_runtime._sessions == {}
+        assert code_runtime._workers == {}
         assert code_runtime._active == {}
     finally:
         scope.cancel()

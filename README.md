@@ -121,7 +121,7 @@ Agent 主循环
 
 `Agent.run()` 用锁防止同一个 Agent 同时执行两轮。Textual UI 线程负责输入、显示和审批；主 Agent 的后台线程负责模型循环和历史写入。工具执行器只把允许并行的处理函数交给线程池，结果仍按原调用顺序加入历史，保持工具调用与结果的配对。
 
-每次请求还会附带当前计划、文件工具记录的已修改文件、协作状态和当前 Agent 可用的 Monty 会话名。这些运行状态用于当前请求，不是对历史消息的替换。
+每次请求还会附带当前计划、文件工具记录的已修改文件和协作状态。这些运行状态用于当前请求，不是对历史消息的替换。
 
 ## 内置工具
 
@@ -215,21 +215,23 @@ Agent 主循环
 
 Praxis 使用 PyPI 官方 `pydantic-monty==1.2.0`，其 client/runtime 配套包也由官方依赖安装，不需要本地 Monty 源码或定制构建。运行环境不要用 `MONTY_BIN` 指向旧的本地二进制。
 
-`run_code(session_id, code)` 提供私有、具名的 Python 子集会话，用于循环、过滤、汇总和组合工具调用。代码通过 `call_tool(name, arguments)` 使用文件工具、历史读取和已激活的 MCP 工具；不能调用命令、管理工具或嵌套 `run_code`。
+`run_code(code)` 使用当前 Agent 的专属 Monty worker，用于循环、过滤、汇总和组合工具调用。首次使用时创建独立子进程，后续直接复用其中的变量和函数，不加载或保存快照。主 Agent 和各子 Agent 分别持有一个 worker，共用宿主事件循环；没有共享进程池名额或全局代码执行信号量。同一 Agent 内代码仍串行执行。代码通过 `call_tool(name, arguments)` 使用文件工具、历史读取和已激活的 MCP 工具；不能调用命令、管理工具或嵌套 `run_code`。
+
+独立操作可以用 `call_parallel_tools([{"name": "工具名", "arguments": {...}}, ...])` 显式并发执行；工具和数量可动态组合，不检查 `parallel_safe`，但仍执行原有权限、参数检查和审批。每批默认最多同时执行 16 项，多余项排队，总项数不设业务上限。结果按输入顺序返回，每项为 `{"success": true, "output": ...}` 或 `{"success": false, "error": "..."}`；结构化输出优先，单项失败不终止其他项，不自动重试。空列表返回 `[]`。取消时停止派发并等待已启动操作清理；已完成的外部操作不会回滚。显式并发的 MCP 请求跳过普通调用的服务级串行锁，实际吞吐仍取决于远端服务。
 
 内置 `json`、`csv`、`tomllib` 可解析文件工具取得的文本，例如 `tomllib.loads(call_tool("read_file", {"relative_path": "pyproject.toml"})["text"])`。Praxis 没有配置 Monty 文件系统挂载或 `external_modules`；项目导入、第三方库和测试通过独立的 `run_command` 执行。内置 `monty` 技能提供官方能力边界、完整示例、返回值处理和恢复说明。
 
-旧本地补丁中的 `del`、`json.dumps(default=...)` 和捕获内置方法（如 `append = items.append`）不属于官方 1.2.0 能力；分别使用重新绑定/容器方法、显式转换 JSON 数据、直接调用方法或纯 lambda。
+变量修改立即生效，普通运行异常、返回结果编码失败或输出日志保存失败都不会回滚已执行的修改；外部工具操作也不会撤销。返回结果无法编码时标记 `error_kind=serialize`。执行中取消、资源耗尽或 worker 故障会释放该 Agent 的执行环境，并返回 `state_lost=true`；下一次调用创建空环境，不自动重放代码。响应中的 `worker_created` 表示本次是否创建新环境。空闲保留 worker；关闭 Agent、`/clear` 或退出时释放对应子进程，重启或恢复对话历史不会恢复变量。
 
-成功执行会保存变量/函数，下次使用同名会话继续；失败保留上次成功状态，但已经完成的文件或外部工具操作不会回滚。会话状态仅在当前进程内保留，关闭 Agent、`/clear` 或重启后不恢复。
+`stdout` 和 `stderr` 分别保留最多 30,000 个 Python 字符的预览：开头 6,000、结尾 24,000，省略提示不计入额度。超限后继续执行，并将该输出流的完整原文保存到 `~/.praxis/outputs/code/` 下的 UTF-8 日志；未超限时不创建文件。响应的 `output_files` 提供绝对路径、字符数和完整性状态，可通过 `read_file` 按需读取。失败或取消时同样保留已收到的输出；文件不会随会话关闭删除，以便历史引用继续有效。最后一个表达式的 `result` 仍走通用工具结果预览。
 
 | 环境变量 | 默认值 | 含义 |
 | --- | ---: | --- |
 | `PRAXIS_CODE_COMPUTE_SECONDS` | 5 | 每次解释器推进的计算秒数，不包含宿主工具等待 |
-| `PRAXIS_CODE_MEMORY_BYTES` | 536870912 | Monty worker 的分配内存预算，512 MiB；不是整个 Praxis 进程或 RSS 上限 |
-| `PRAXIS_CODE_MAX_PROCESSES` | 8 | 共享 Monty 进程池上限 |
-| `PRAXIS_CODE_QUEUE_SECONDS` | 30 | 等待可用执行槽的秒数 |
-| `PRAXIS_CODE_MAX_SUSPENSIONS` | 5000 | 单次执行允许的挂起次数 |
+| `PRAXIS_CODE_QUEUE_SECONDS` | 30 | 等待同一 Agent 前一次代码调用结束的秒数 |
+| `PRAXIS_CODE_MAX_PARALLEL_TOOLS` | 16 | 每次 `call_parallel_tools` 同时执行的工具数，正整数；剩余项排队 |
+
+Praxis 不设置 Monty 内存预算。Monty 1.2.0 无法关闭挂起次数计数，因此使用其支持的最大值 `2^64 - 1`，不再设置实际业务次数上限。
 
 ## 上下文与历史管理
 
