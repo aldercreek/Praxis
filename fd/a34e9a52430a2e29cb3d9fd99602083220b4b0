@@ -1,0 +1,48 @@
+tests/test_model.py
+  s_d0b4ccb90bd8ee::t_50dfd9f478590b 6-7,24-25,159,187-322
+src/praxis_agent/terminal/cells.py
+  s_d0b4ccb90bd8ee::t_2c3d7baec4193d 266-271,328
+  s_d0b4ccb90bd8ee::t_f868ada11a4a28 265,272-274,277,279,329-330
+  s_d0b4ccb90bd8ee::t_6f6d0bcf708c7e 10,291-327,332
+src/praxis_agent/terminal/app.py
+  s_d0b4ccb90bd8ee::t_2c3d7baec4193d 263,663-665,667
+  s_d0b4ccb90bd8ee::t_6f6d0bcf708c7e 5,33,261,432-433,488-489,557-559,935-949
+src/praxis_agent/terminal/views.py
+  s_d0b4ccb90bd8ee::t_f868ada11a4a28 192
+tests/test_transcript_ui.py
+  s_d0b4ccb90bd8ee::t_a6dc432e51852e 14,27,110-125,127-129,136-148,151-159,161-163,166-179
+  s_d0b4ccb90bd8ee::t_45e383090c7a47 130
+  s_d0b4ccb90bd8ee::t_1f3b2805417938 126,132-135,149-150,160,164-165
+  s_d0b4ccb90bd8ee::t_9d687c8b056d3f 106,109,131,214-215
+  s_d0b4ccb90bd8ee::t_f868ada11a4a28 107-108,216-217
+src/praxis_agent/model.py
+  s_d0b4ccb90bd8ee::t_50dfd9f478590b 87-88,90
+tests/test_terminal_layout.py
+  s_d0b4ccb90bd8ee::t_9d687c8b056d3f 416-418,429-432
+tests/test_command_results.py
+  s_d0b4ccb90bd8ee::t_f868ada11a4a28 6,12,62-63,65-66
+  s_d0b4ccb90bd8ee::t_1a186f41a5b36c 64
+  s_d0b4ccb90bd8ee::t_9d687c8b056d3f 17-19,21,60-61
+tests/test_terminal_refresh.py
+  s_d0b4ccb90bd8ee::t_9d687c8b056d3f 101,118,273,287,306
+  s_d0b4ccb90bd8ee::t_45e383090c7a47 233,236,240
+  s_d0b4ccb90bd8ee::t_f868ada11a4a28 51-66,102,120,192-200,288,294,304-305,307-310
+tests/test_user_input.py
+  s_d0b4ccb90bd8ee::t_9d687c8b056d3f 6,153-157,169-175
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.50-trip",
+  "base_commit_sha": "fda34e9a52430a2e29cb3d9fd99602083220b4b0",
+  "prompts": {},
+  "sessions": {
+    "s_d0b4ccb90bd8ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a158bc-d06d-7e23-bdd9-e0aa573d73b5",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "aldercreek <57739268+aldercreek@users.noreply.github.com>"
+    }
+  }
+}
