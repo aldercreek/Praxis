@@ -7,7 +7,7 @@ import re
 import shlex
 import subprocess
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
@@ -262,28 +262,21 @@ def tool_description(name: str, arguments: Mapping[str, object]) -> tuple[str, s
     return label, detail
 
 
+def _tool_marker_style(calls: tuple[ToolBlock, ...]) -> str:
+    failed = any(call.failed or (
+        call.structured_output is not None
+        and call.structured_output["status"] == "exited"
+        and call.structured_output["exit_code"] != 0
+    ) for call in calls)
+    unfinished = any(call.state in {"running", "cancelled"} for call in calls)
+    return "not dim " + ("red" if failed else "#a0a0a0" if unfinished else "green")
+
+
 def tool_title(calls: tuple[ToolBlock, ...]) -> Text:
     if len(calls) > 1:
-        running = any(call.state == "running" for call in calls)
-        title = Text(f"{'正在' if running else '已'}查看代码 · {len(calls)} 次操作")
-        failed = sum(call.failed for call in calls)
-        cancelled = sum(call.state == "cancelled" for call in calls)
-        if failed:
-            title.append(f" · {failed} 次失败", style="red")
-        if cancelled:
-            title.append(f" · {cancelled} 次已停止", style="dim")
-        return title
+        return Text(f"查看代码 · {len(calls)} 次操作")
     call = calls[0]
-    title = Text({"running": "正在", "cancelled": "已停止 · "}.get(call.state, "已"))
-    if call.failed:
-        title = Text("失败 · ")
-    if call.structured_output is not None:
-        result = call.structured_output
-        label = {"spawn_failed": "启动失败", "timed_out": "已超时", "cancelled": "已停止"}.get(result["status"])
-        if result["status"] == "exited":
-            label = "已完成" if result["exit_code"] == 0 else f"已结束 · 退出码 {result['exit_code']}"
-        title = Text(f"{label} · ")
-    title.append(call.title)
+    title = Text(call.title)
     if call.detail:
         title.append(" ")
         title.append(call.detail if call.name == "run_command" else " ".join(call.detail.split()))
@@ -293,6 +286,48 @@ def tool_title(calls: tuple[ToolBlock, ...]) -> Text:
         title.append(f" -{call.file_change.removed}", style="red")
         title.append(")")
     return title
+
+
+def _shorten_path(path: str, width: int) -> str:
+    if Text(path).cell_len <= width:
+        return path
+    parts = re.split(r"[/\\]", path)
+    separator = "\\" if "\\" in path else "/"
+    for index in range(1, len(parts)):
+        candidate = "…" + separator + separator.join(parts[index:])
+        if Text(candidate).cell_len <= width:
+            return candidate
+    filename = Text(parts[-1])
+    if filename.cell_len <= width:
+        return filename.plain
+    # An unusually long filename still keeps its beginning and extension.
+    head = filename.copy()
+    head.truncate((width - 1) // 2, overflow="crop")
+    tail = filename
+    while tail.cell_len > width - head.cell_len - 1:
+        tail = tail[1:]
+    return head.plain + "…" + tail.plain
+
+
+@dataclass(frozen=True)
+class ToolHeading:
+    calls: tuple[ToolBlock, ...]
+
+    def __rich_console__(self, console, options):
+        calls = self.calls
+        if len(calls) == 1 and calls[0].name in {"read_file", "write_file", "edit_file", "list_files"}:
+            call = calls[0]
+            width = max(1, options.max_width - 2)
+            path = " ".join(call.detail.split())
+            available = width - tool_title((replace(call, detail=""),)).cell_len - 1
+            if Text(re.split(r"[/\\]", path)[-1]).cell_len > available:
+                # Put the path on the second row when that preserves the filename.
+                suffix = f" (+{call.file_change.added} -{call.file_change.removed})" if call.file_change else ""
+                available = width - Text(suffix).cell_len
+            calls = (replace(call, detail=_shorten_path(path, max(1, available))),)
+        title = tool_title(calls)
+        yield OutputPreview([title], max_rows=2, prefix="• ", style="",
+                            prefix_style=_tool_marker_style(calls))
 
 
 def change_lines(change) -> list[Text]:

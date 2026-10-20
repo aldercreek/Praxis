@@ -48,6 +48,22 @@ def start_command(sink, call_id="cmd"):
     sink.emit(ToolStarted("turn", call_id, "run_command"))
 
 
+def assert_title_marker_color(title, color):
+    marker_seen = False
+    for row in range(title.size.height):
+        for segment in title.render_line(row):
+            if not segment.text.strip():
+                continue
+            if "•" in segment.text:
+                marker_seen = True
+                assert segment.text.strip() == "•"
+                assert segment.style.color.name == color
+            else:
+                assert segment.style.color == title.rich_style.color
+            assert not segment.style.dim
+    assert marker_seen
+
+
 @pytest.mark.parametrize("running", [False, True])
 def test_unchanged_ticks_submit_no_frames(terminal_app, frames, monkeypatch, running):
     async def exercise():
@@ -82,7 +98,8 @@ def test_tool_title_is_correct_in_first_frame_and_completion_keeps_widget(
             record = app.query_one(ToolRecord)
             title = record.query_one(".tool-title", Static)
             assert frames
-            assert all(any("正在执行 python demo.py" in row for row in rows) for rows, _, _ in frames)
+            assert all(any("• 执行 python demo.py" in row for row in rows) for rows, _, _ in frames)
+            assert_title_marker_color(title, "#a0a0a0")
             app.sink.emit(ToolOutputDelta("turn", "cmd", "stdout", "line-1\nline-2\n"))
             await wait_for_ui(pilot, lambda: record.query_one(".tool-preview").size.height == 2)
             before = record.region
@@ -98,8 +115,9 @@ def test_tool_title_is_correct_in_first_frame_and_completion_keeps_widget(
             assert frames
             for rows, _, _ in frames:
                 assert sum("python demo.py" in row for row in rows) == 1
-                assert any("已完成 · 执行 python demo.py" in row for row in rows)
+                assert any("• 执行 python demo.py" in row for row in rows)
                 assert not any(row.strip() in {"•", "…"} for row in rows)
+            assert_title_marker_color(title, "green")
     asyncio.run(exercise())
 
 
@@ -171,6 +189,15 @@ def test_exploration_keeps_its_group_through_running_failure_and_cancellation(te
             assert list(app.query(ToolRecord)) == [record]
             assert not app.store.get("main").has_active_tools
             assert record.calls[1].output == "permission denied"
+            stopped = app.query_one("#record-1", Static)
+            assert stopped.render_line(0).text.strip() == "• 已停止本轮执行"
+            assert stopped.content_region.x == record.query_one(".tool-title", Static).content_region.x
+            for segment in stopped.render_line(0):
+                if "•" in segment.text:
+                    assert segment.text.strip() == "•"
+                    assert segment.style.color.name == "red" and not segment.style.dim
+                elif segment.text.strip():
+                    assert segment.style.color == stopped.rich_style.color and segment.style.dim
     asyncio.run(exercise())
 
 
@@ -203,14 +230,14 @@ def test_child_history_titles_survive_switching_scrolling_and_resize(terminal_ap
             frames.clear()
             await pilot.press("alt+right")
             await wait_for_ui(pilot, lambda: app.selected_agent_id == "child" and len(app.query(ToolRecord)) == 12)
-            assert any("已执行 command-11" in row for row in frames[-1][0])
+            assert any("• 执行 command-11" in row for row in frames[-1][0])
             await pilot.press("ctrl+home")
             await pilot.pause()
-            assert any("已执行 command-0" in row for row in frames[-1][0])
+            assert any("• 执行 command-0" in row for row in frames[-1][0])
             await pilot.resize_terminal(44, 22)
             await pilot.press("alt+left", "alt+right")
             await pilot.pause()
-            assert any("已执行 command-0" in row for row in frames[-1][0])
+            assert any("• 执行 command-0" in row for row in frames[-1][0])
             for rows, _, _ in frames:
                 assert not any(row.strip() in {"•", "…"} for row in rows)
     asyncio.run(exercise())
@@ -243,7 +270,7 @@ def test_clock_update_does_not_resend_tool_text(terminal_app, monkeypatch):
 
 
 @pytest.mark.parametrize("state,color", [
-    ("completed", "green"), ("failed", "red"), ("running", None), ("cancelled", None),
+    ("completed", "green"), ("failed", "red"), ("running", "#a0a0a0"), ("cancelled", "#a0a0a0"),
 ])
 @pytest.mark.parametrize("width", [44, 100])
 def test_tool_status_color_stays_on_marker_after_wrapping(terminal_app, state, color, width):
@@ -257,28 +284,14 @@ def test_tool_status_color_stays_on_marker_after_wrapping(terminal_app, state, c
             await pilot.pause()
             title = app.query_one(".tool-title", Static)
             assert title.size.height == 2
-            marker_seen = False
-            for row in range(title.size.height):
-                for segment in title.render_line(row):
-                    if not segment.text.strip():
-                        continue
-                    if "•" in segment.text:
-                        marker_seen = True
-                        assert segment.text.strip() == "•"
-                        if color:
-                            assert segment.style.color.name == color
-                        else:
-                            assert segment.style.dim
-                    else:
-                        assert segment.style.color == title.rich_style.color
-                        assert not segment.style.dim
-            assert marker_seen
+            assert title.render_line(0).text.startswith("• 执行 python demo.py")
+            assert_title_marker_color(title, color)
             preview = app.query_one(".tool-preview", Static)
             assert all(segment.style.dim for segment in preview.render_line(0) if segment.text.strip())
     asyncio.run(exercise())
 
 
-def test_group_failure_color_does_not_spread_to_normal_title(terminal_app):
+def test_group_failure_only_colors_the_marker(terminal_app):
     async def exercise():
         app = terminal_app
         app.store.get("main").committed_blocks.extend([
@@ -288,11 +301,13 @@ def test_group_failure_color_does_not_spread_to_normal_title(terminal_app):
         async with app.run_test(size=(100, 20)) as pilot:
             await pilot.pause()
             title = app.query_one(".tool-title", Static)
-            segments = list(title.render_line(0))
-            red_text = "".join(segment.text for segment in segments if segment.style.color.name == "red")
-            assert red_text.strip() == "•  · 1 次失败"
-            ordinary = [segment for segment in segments if "已查看代码" in segment.text]
-            assert ordinary and all(segment.style.color == title.rich_style.color for segment in ordinary)
+            assert title.render_line(0).text.strip() == "• 查看代码 · 2 次操作"
+            assert_title_marker_color(title, "red")
+            preview = app.query_one(".tool-preview", Static)
+            for row, path in ((0, "a.py"), (1, "b.py")):
+                assert f"读取 {path}" in preview.render_line(row).text
+                assert all(segment.style.color == preview.rich_style.color and segment.style.dim
+                           for segment in preview.render_line(row) if segment.text.strip())
     asyncio.run(exercise())
 
 

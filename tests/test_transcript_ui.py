@@ -11,6 +11,7 @@ from textual.widgets import OptionList, Static
 from praxis_agent.events import (
     AssistantTextCompleted,
     AssistantTextDelta,
+    ChildAgentEvent,
     ChildAgentMessage,
     ModelRequestCompleted,
     ModelRequestStarted,
@@ -23,6 +24,7 @@ from praxis_agent.model import ModelResponse
 from praxis_agent.terminal.app import (
     Approval,
     ApprovalPanel,
+    AgentTab,
     DetailsScreen,
     PraxisApp,
     ToolRecord,
@@ -101,8 +103,80 @@ def test_grouped_reads_update_in_place_and_keep_full_details():
             await pilot.pause(0.15)
             # A failure updates its existing group without moving other records.
             assert len(app.query(ToolRecord)) == 1
-            assert "1 次失败" in render(title.renderable)
-            assert "失败" in render(record.query_one(".tool-preview", Static).renderable)
+            assert render(title.renderable).strip() == "• 查看代码 · 3 次操作"
+            assert "".join(segment.text for segment in title.render_line(0)
+                           if segment.style.color.name == "red").strip() == "•"
+            assert "读取 missing.py" in render(record.query_one(".tool-preview", Static).renderable)
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("separator", ["/", "\\"])
+def test_long_read_title_keeps_filename_on_resize_and_full_path_in_details(separator):
+    async def exercise():
+        sink = ViewEventSink()
+        app = PraxisApp(sink)
+        filename = "AbstractFltFilSegmentSearchTokenStrategy.java"
+        path = separator.join(("src", "main", "java", "com", "ctrip", "flight", "搜索模块",
+                               "aggregatorsearch", "strategy", filename))
+        async with app.run_test(size=(60, 28)) as pilot:
+            finish_tool(sink, "read", "read_file", {"relative_path": path}, "complete file contents")
+            await pilot.pause(0.15)
+            record = app.query_one(ToolRecord)
+            title = record.query_one(".tool-title", Static)
+            for width in (38, 60, 100, 180):
+                await pilot.resize_terminal(width, 28)
+                await pilot.pause()
+                shown = "\n".join(title.render_line(y).text.rstrip() for y in range(title.size.height))
+                assert shown.startswith("• 读取")
+                assert "已读取" not in shown
+                if width == 38:
+                    assert "AbstractFlt" in shown and ".java" in shown
+                else:
+                    assert filename in shown
+                assert "省略" not in shown
+                assert record.size.height <= 2
+                if width == 180:
+                    assert path in shown
+            await pilot.press("ctrl+t")
+            await pilot.pause()
+            details = render(app.screen.query_one("#details-content", Static).renderable, 200)
+            assert json.dumps(path, ensure_ascii=False)[1:-1] in details
+            assert "complete file contents" in details
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("clear", [False, True])
+@pytest.mark.parametrize("refresh_first", [False, True])
+def test_switching_agent_during_refresh_keeps_records_and_cache_consistent(clear, refresh_first):
+    async def exercise():
+        sink = ViewEventSink()
+        app = PraxisApp(sink)
+        app.store.get("main").committed_blocks.append(MessageBlock("Main page", user=True))
+        child = app.store.get("child")
+        child.committed_blocks.extend(MessageBlock(f"Child record {i}") for i in range(31))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await app._update_agents()
+            await pilot.pause()
+            sink.emit(AssistantTextDelta("root", 1, "Main update"))
+            sink.emit(ChildAgentEvent("root", "child", AssistantTextDelta("child_turn", 1, "New text")))
+            if clear:
+                app._results.put((None, "clear", ""))
+            operations = [app.on_agent_selected(AgentTab.Selected("child")), app._tick()]
+            await asyncio.gather(*(reversed(operations) if refresh_first else operations))
+            await pilot.pause()
+            assert app.selected_agent_id == ("main" if clear else "child")
+            widgets = list(app.query_one("#blocks").children)
+            expected = app.store.get(app.selected_agent_id).display_blocks()
+            assert len(widgets) == len(expected) == (0 if clear else 32)
+            assert [widget.id for widget in widgets] == [f"record-{i}" for i in range(len(expected))]
+            assert [widget.renderable for widget in widgets] == expected
+            assert app._mounted_blocks == expected
+            assert app._mounted_agent == app.selected_agent_id
+            assert len(app._mounted_revisions) == len(expected)
+            if clear:
+                assert len(app.query(AgentTab)) == 1
+                await app.on_agent_selected(AgentTab.Selected("child"))
+                assert app.selected_agent_id == "main"
     asyncio.run(exercise())
 
 
@@ -137,7 +211,10 @@ def test_command_preview_is_bounded_and_full_output_is_in_transcript():
             await pilot.press("ctrl+t")
             await pilot.pause(0.1)
             failed = list(app.query(ToolRecord))[-1]
-            assert "已结束 · 退出码 1" in render(failed.query_one(".tool-title", Static).renderable)
+            title = failed.query_one(".tool-title", Static)
+            assert render(title.renderable).strip() == "• 执行 pytest"
+            assert "".join(segment.text for segment in title.render_line(0)
+                           if segment.style.color.name == "red").strip() == "•"
             assert "AssertionError" in render(failed.query_one(".tool-preview", Static).renderable)
     asyncio.run(exercise())
 

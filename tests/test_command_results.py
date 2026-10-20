@@ -3,21 +3,22 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+from rich.console import Console
 
 from praxis_agent.agent import Agent
 from praxis_agent.model import FunctionCall, ModelResponse
 from praxis_agent.planning import RunState
 from praxis_agent.sessions import SQLiteSessionStore
-from praxis_agent.terminal.cells import tool_title
+from praxis_agent.terminal.cells import ToolHeading, tool_title
 from praxis_agent.terminal.views import AgentView, ToolBlock
 from praxis_agent.tools import ToolContext, create_default_registry
 
 
-@pytest.mark.parametrize("ending,code,label", [
-    ("exited", 0, "已完成"), ("exited", 7, "已结束 · 退出码 7"),
-    ("spawn_failed", None, "启动失败"), ("timed_out", None, "已超时"),
+@pytest.mark.parametrize("ending,code,color", [
+    ("exited", 0, "green"), ("exited", 7, "red"),
+    ("spawn_failed", None, "red"), ("timed_out", None, "red"),
 ])
-def test_command_result_has_one_persisted_copy_and_restores_the_live_view(tmp_path, ending, code, label):
+def test_command_result_has_one_persisted_copy_and_restores_the_live_view(tmp_path, ending, code, color):
     arguments = {"argv": [sys.executable, "-u", "-c", f"print('unique-output-marker'); exit({code})"]}
     if ending == "spawn_failed":
         arguments = {"argv": [str(tmp_path / "missing.exe")]}
@@ -56,7 +57,13 @@ def test_command_result_has_one_persisted_copy_and_restores_the_live_view(tmp_pa
         before = next(block for block in live.committed_blocks if isinstance(block, ToolBlock))
         after = next(block for block in restored.committed_blocks if isinstance(block, ToolBlock))
         assert before == after
-        assert tool_title((after,)).plain.startswith(label)
+        title = tool_title((after,))
+        assert title.plain.startswith("执行 ")
+        assert not title.style
+        colored = [segment for segment in Console(width=100).render(ToolHeading((after,)))
+                   if segment.text.strip() and segment.style and segment.style.color]
+        assert len(colored) == 1 and colored[0].text.strip() == "•"
+        assert colored[0].style.color.name == color
         assert after.failed == (ending in {"spawn_failed", "timed_out"})
     finally:
         agent.close()

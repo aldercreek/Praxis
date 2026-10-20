@@ -413,7 +413,9 @@ def test_queued_input_visible_editable_and_consumed_into_transcript(terminal_app
             await pilot.press("enter")
             pending = app.query_one("#pending", Static)
             await wait_for_ui(pilot, lambda: pending.display)
-            assert "补充检查测试" in "".join(pending.render_line(y).text for y in range(pending.size.height))
+            assert pending.render_line(0).text.strip() == "› 补充检查测试"
+            assert all(segment.style.color.name == "#a0a0a0"
+                       for segment in pending.render_line(0) if segment.text.strip())
             assert app.user_input.qsize() == 1 and not editor.text
             await pilot.press("shift+left")
             assert editor.text == "补充检查测试" and app.user_input.empty()
@@ -424,6 +426,10 @@ def test_queued_input_visible_editable_and_consumed_into_transcript(terminal_app
             block = app.query_one("#record-0").renderable
             assert isinstance(block, MessageBlock) and block.user and block.text == task
             assert not pending.display
+            message = app.query_one("#record-0", Static)
+            body = [segment for segment in message.render_line(0) if "补充检查测试" in segment.text]
+            assert body and all(segment.style.color == message.rich_style.color
+                                and not segment.style.dim for segment in body)
     asyncio.run(exercise())
 
 

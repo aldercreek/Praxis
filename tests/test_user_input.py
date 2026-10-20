@@ -3,7 +3,7 @@ from queue import SimpleQueue
 from threading import Event
 
 import pytest
-from textual.widgets import TextArea
+from textual.widgets import Static, TextArea
 
 from praxis_agent.agent import Agent
 from praxis_agent.events import (
@@ -150,6 +150,11 @@ def test_cli_accepts_steer_and_keeps_late_input(tmp_path, arrival):
                     await pilot.press("enter")
                     assert field.text == ""
                 assert app.user_input.qsize() == 2
+                pending = app.query_one("#pending", Static)
+                assert pending.renderable.plain == "› also check tests\n› only change Python files"
+                assert all(segment.style.color.name == "#a0a0a0"
+                           for y in range(pending.size.height)
+                           for segment in pending.render_line(y) if segment.text.strip())
                 release.set()
                 async with asyncio.timeout(10):
                     while app.busy or len(model.inputs) < 2:
@@ -161,6 +166,13 @@ def test_cli_accepts_steer_and_keeps_late_input(tmp_path, arrival):
                 blocks = app.store.views["main"].committed_blocks
                 assert [block.text for block in blocks
                         if isinstance(block, MessageBlock) and block.user] == expected
+                assert not pending.display
+                for widget in app.query("#blocks Static"):
+                    if isinstance(widget.renderable, MessageBlock) and widget.renderable.text in expected[1:]:
+                        body = [segment for y in range(widget.size.height)
+                                for segment in widget.render_line(y) if segment.text.strip() not in {"", "›"}]
+                        assert body and all(segment.style.color == widget.rich_style.color
+                                            and not segment.style.dim for segment in body)
                 turns = [event for event in events if isinstance(event, TurnStarted)]
                 assert len(turns) == (1 if arrival == "during_model" else 2)
                 assert not field.disabled

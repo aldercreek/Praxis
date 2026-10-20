@@ -189,7 +189,7 @@ class AgentView:
             if isinstance(event, TurnCancelled):
                 self.state = "cancelled"
                 self._phase = "已停止"
-                self.committed_blocks.append(Text("已停止本轮执行", style="dim"))
+                self.committed_blocks.append(Text.assemble(("• ", "red"), ("已停止本轮执行", "dim")))
             if isinstance(event, TurnFailed):
                 self.committed_blocks.append(Text(f"{event.error_type}: {event.message}", style="red"))
             if isinstance(event, TurnCompleted) and self.elapsed() >= 1:

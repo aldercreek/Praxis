@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from concurrent.futures import CancelledError, Future, InvalidStateError
@@ -29,13 +30,12 @@ from praxis_agent.execution import ExecutionStopped, Run, current_handle, run_op
 from praxis_agent.terminal.cells import (
     ACCENT,
     MessageBlock,
+    ToolHeading,
     WelcomeHeader,
     approval_content,
     tool_preview,
-    tool_title,
 )
 from praxis_agent.terminal.composer import Composer
-from praxis_agent.terminal.preview import OutputPreview
 from praxis_agent.terminal.screen import ConversationScreen
 from praxis_agent.terminal.selection import SelectableText
 from praxis_agent.terminal.views import ToolBlock, ViewEventSink, ViewStore
@@ -258,11 +258,9 @@ class ToolRecord(Vertical):
             widget.update(preview)
         widget.display = bool(preview)
 
-    def _title(self) -> OutputPreview:
-        style = "bold red" if any(call.failed for call in self.calls) else (
-            "dim" if any(call.state in {"running", "cancelled"} for call in self.calls) else "bold green")
+    def _title(self) -> ToolHeading:
         # Wrap during rendering, when Rich has the actual layout width, including the first frame.
-        return OutputPreview([tool_title(self.calls)], max_rows=2, prefix="• ", style="", prefix_style=style)
+        return ToolHeading(self.calls)
 
 class AgentStrip(HorizontalScroll):
     """Keep agent navigation on one line, including ordinary mouse-wheel input."""
@@ -431,6 +429,8 @@ class PraxisApp(App[int]):
         self._approval_lock = Lock()
         self._approval_handles = set()
         self._tab_agents: dict[str, str] = {"agent-0": "main"}
+        # Timer callbacks and page events run in separate asyncio tasks.
+        self._view_lock = asyncio.Lock()
         self._mounted_blocks: list = []
         self._mounted_revisions: list[int] = []
         self._mounted_agent = "main"
@@ -485,7 +485,8 @@ class PraxisApp(App[int]):
             # Textual 1's Windows driver does not probe synchronized output itself.
             self._driver.write("\x1b[?2026$p")
             self._driver.flush()
-        await self._draw(switching=True)
+        async with self._view_lock:
+            await self._draw(switching=True)
         self._main_screen.query_one("#task", Composer).focus()
         if self.initial_task:
             self._input_history.append(self.initial_task)
@@ -553,8 +554,9 @@ class PraxisApp(App[int]):
             handle.cancel()
 
     async def _tick(self) -> None:
-        with self.batch_update():
-            await self._update_views()
+        async with self._view_lock:
+            with self.batch_update():
+                await self._update_views()
 
     async def _update_views(self) -> None:
         if not self.is_running:
@@ -658,11 +660,11 @@ class PraxisApp(App[int]):
         preview = screen.query_one("#pending", Static)
         preview.display = is_main and bool(retained or queued) and not approval
         if preview.display:
-            pending = [("已保留", item) for item in retained] + [("已排队", item) for item in queued]
-            lines = [Text(f"› {' '.join(item.split())}  ({label})", no_wrap=True, overflow="ellipsis")
-                     for label, item in pending[:2]]
+            pending = retained + queued
+            lines = [Text(f"› {' '.join(item.split())}", no_wrap=True, overflow="ellipsis")
+                     for item in pending[:2]]
             if len(pending) > 2:
-                lines.append(Text(f"  还有 {len(pending) - 2} 条待发送"))
+                lines.append(Text(f"  … 另有 {len(pending) - 2} 条"))
             content = Text("\n").join(lines)
             if preview.renderable != content:
                 preview.update(content)
@@ -930,19 +932,21 @@ class PraxisApp(App[int]):
 
     @on(AgentTab.Selected)
     async def on_agent_selected(self, event: AgentTab.Selected) -> None:
-        agent_id = event.agent_id
-        if agent_id not in self.store.views or agent_id == self.selected_agent_id:
-            return
-        self.clear_text_selection()
-        self._main_screen.query_one("#hint", FooterHint).clear_flash()
-        self._remember_scroll()
-        with self.batch_update():
-            self._switching_page = True
-            self.selected_agent_id = agent_id
-            await self._update_agents()
-            await self._draw(switching=True)
-            self._refresh_bottom()
-        self.call_after_refresh(self._main_screen.query_one(AgentStrip).reveal_selected)
+        async with self._view_lock:
+            agent_id = event.agent_id
+            # A queued selection may refer to an agent removed by a session reset.
+            if agent_id not in self.store.views or agent_id == self.selected_agent_id:
+                return
+            self.clear_text_selection()
+            self._main_screen.query_one("#hint", FooterHint).clear_flash()
+            self._remember_scroll()
+            with self.batch_update():
+                self._switching_page = True
+                self.selected_agent_id = agent_id
+                await self._update_agents()
+                await self._draw(switching=True)
+                self._refresh_bottom()
+            self.call_after_refresh(self._main_screen.query_one(AgentStrip).reveal_selected)
 
     def action_toggle_details(self) -> None:
         self.clear_text_selection()

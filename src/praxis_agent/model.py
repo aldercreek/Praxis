@@ -84,10 +84,10 @@ class OpenAIModelClient:
         reasoning_effort: str | None = None,
         execution_control: ExecutionControl | None = None,
     ) -> None:
-        client_options: dict[str, object] = {"api_key": config.api_key}
+        # SDK 提供有限重试、指数退避和抖动；await_cancellable 也会取消退避等待。
+        client_options: dict[str, object] = {"api_key": config.api_key, "max_retries": 5}
         if execution_control is not None:
-            # Worker cancellation must not wait through the SDK's long default retry cycle.
-            client_options.update(timeout=60.0, max_retries=0)
+            client_options["timeout"] = 60.0
         if config.base_url is not None:
             client_options["base_url"] = config.base_url
 
