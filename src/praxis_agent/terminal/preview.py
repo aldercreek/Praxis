@@ -17,12 +17,12 @@ class OutputPreview:
         width = max(1, options.max_width - len(self.prefix))
         rows = [row for line in self.lines for row in line.wrap(console, width)]
         if not rows:
-            rows = [Text("（无输出）")]
+            rows = [Text("(no output)")]
         if len(rows) > self.max_rows:
             head = max(1, (self.max_rows - 1) // 2)
             tail = self.max_rows - 1 - head
             omitted = len(rows) - head - tail
-            notice = Text(f"… 省略 {omitted} 行 (Ctrl+T 展开)")
+            notice = Text(f"… {omitted} lines omitted (Ctrl+T to expand)")
             notice.truncate(width, overflow="ellipsis")
             rows = rows[:head] + [notice] + (rows[-tail:] if tail else [])
         for index, row in enumerate(rows):

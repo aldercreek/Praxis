@@ -127,7 +127,7 @@ Agent 主循环
 
 | 类别 | 工具 | 用途 |
 | --- | --- | --- |
-| 文件读取与搜索 | `read_file`、`list_files`、`find_files`、`search_text` | 读 UTF-8 文本、列目录、按 glob 找文件、按字面文本搜索 |
+| 文件读取与搜索 | `read_file`、`list_files`、`find_files`、`search_text` | 读文本、列目录、按 glob 找文件、按字面文本或正则搜索 |
 | 文件修改 | `edit_file`、`write_file` | 精确替换，或创建/完整覆写文件 |
 | 命令 | `run_command` | 执行项目代码、测试或系统命令 |
 | 计划 | `update_plan` | 更新当前任务计划 |
@@ -140,8 +140,10 @@ Agent 主循环
 - 读工具支持工作目录内相对路径，也支持外部文件/目录的绝对路径。写工具要求路径位于所分配的工作目录内。
 - `read_file` 从 `start_line=1`、`start_offset=0` 开始；省略结束位置表示读到文件末尾，不再默认只读 200 行。行号从 1 开始，字符偏移从 0 开始。仅设置 `end_line` 时包含该整行；同时设置 `end_offset` 时结束位置不包含在结果内。
 - 直接工具读取受字符预算限制，返回 `text`、`truncated`、`next_position` 和说明；按 `next_position` 继续，保持原来的结束位置。Monty 程序化读取返回完整的指定范围。
-- `list_files` 列出一层内容；`find_files` 与 `search_text` 包含隐藏和 gitignore 忽略的文件，不自动排除目录，也没有结果条数上限。用 `relative_path`、`file_pattern` 和 `ignore_patterns` 控制范围。
-- `search_text` 是区分大小写的单行字面搜索，返回文件、行号和字符偏移，不返回源码正文；再用 `read_file` 读取。
+- `list_files` 列出一层内容；`find_files` 与 `search_text` 包含隐藏和 gitignore 忽略的文件，不自动排除目录。用 `relative_path`、`file_pattern` 和 `ignore_patterns` 控制范围；`find_files` 返回全部文件，`search_text` 按页返回。
+- `search_text` 默认区分大小写、按普通文本搜索；`regex=true` 开启 ripgrep 正则，`case_sensitive=false` 忽略大小写。不支持跨行、前后查找和反向引用。`mode` 支持 `content`（默认，返回 `路径:行号:内容`）、`files`（文件路径）和 `count`（每个文件的匹配行数，同一行命中多次也只算一行）。
+- 搜索统一返回 `{results, next_offset}`。`limit` 默认 50，`offset` 默认 0；内容模式按匹配行分页，其他模式按文件记录分页。`context_lines` 默认 0，前后文不占分页名额，重叠上下文合并，使用 `路径-行号-内容` 展示；片段间以 `--` 分隔。继续搜索时保持其他参数不变，使用工具返回的 `next_offset`；为 null 时已结束。结果按路径、行号排序，文件变化后分页位置可能改变。
+- 搜索结果受工具字符预算约束，实际返回可能少于 `limit`；超长匹配行提供带标记的预览，完整原文用 `read_file` 读取。搜索超时仍为 30 秒。
 - `edit_file` 的每个旧文本必须唯一匹配，多个替换按顺序应用，全部成功才写回文件。
 - `run_command` 接收 argv 数组，不隐式解析管道或 shell 语法。需要这些语法时显式调用 PowerShell、bash 等。`workdir` 接受已存在的绝对目录或相对于 Agent 工作目录的目录，可以位于工作区外；省略时使用 Agent 工作目录。默认超时 60 秒，允许 1–120 秒。
 - 命令以前台方式运行，stdin 不交互，输出可以实时显示。结束或取消时清理其后代进程，不适合作为后台常驻服务启动器。
@@ -198,6 +200,10 @@ Agent 主循环
 4. 激活后可以直接调用对应工具，也可通过 `run_code` 调用；`deactivate_tools` 从当前 Agent 的工具集合移除它。
 
 服务支持 `enabled_tools`、`disabled_tools` 以及 `tools.<原始工具名>.enabled` 过滤。MCP 工具默认要求审批；`tools.<原始工具名>.approval_mode="approve"` 表示该工具自动允许。单个服务连接失败会记录不可用状态，其他服务仍可使用；本地配置错误可能阻止启动。
+
+`run_code` 内的 MCP 成功调用始终返回完整响应字典（`content`、可选 `structuredContent`、`isError` 和服务元数据），不解析文本里的业务 JSON、不转换媒体。直接调用时按内容块提供文字、图片、内嵌 PDF、资源说明，再附加结构化数据；不去重。媒体不支持或无法提供时保留其他内容，不将远端成功误判为失败。远端 `isError` 保留具体原因，超时和断线仍提示完成状态可能未知，不自动重试。
+
+模型输入能力在 `context/model_catalog.py` 中按具体型号配置，覆盖现有 40 个型号；日期后缀和提供商前缀沿用模型目录解析规则。图片和 PDF 经现有 Responses 接口发送；音频目前无法通过该接口发送，即使模型本身支持音频也会明确提示，原始数据仍可在 `run_code` 中读取。资源链接只提供名称和地址，不自动下载。未知模型和 `auto(free)` 默认禁用媒体输入；确认网关支持后，可用 `ADA_MODEL_IMAGE_INPUT=true/false`、`ADA_MODEL_PDF_INPUT=true/false` 显式覆盖。自动化请求格式测试覆盖所有型号，但不代表已逐个完成线上网关验证。
 
 ## 技能（Skills）
 
@@ -282,20 +288,6 @@ Praxis 区分三层数据：完整会话历史、持久化的上下文操作，�
 
 旧文档里的 `ADA_SUMMARY_TARGET_TOKENS`、`ADA_SUMMARY_MAX_OUTPUT_TOKENS`、`ADA_MAX_FILE_READ_LINES` 已不被当前配置读取，不能继续用它们调节行为。
 
-## 可选 Langfuse 接入
-
-没有配置时正常使用本地功能。配置两个项目 key 后启用：
-
-```powershell
-$env:LANGFUSE_PUBLIC_KEY = "your-project-public-key"
-$env:LANGFUSE_SECRET_KEY = "your-project-secret-key"
-# 可选；以下是默认值
-$env:LANGFUSE_BASE_URL = "https://langfuse.flight.ctripcorp.com"
-$env:LANGFUSE_TRACING_ENVIRONMENT = "development"
-```
-
-每个 CLI 进程关联一个 Langfuse session，每次任务产生一个 trace，包含模型、工具、子 Agent 和上下文压缩事件。关闭时刷新待发送数据；Windows 使用系统证书存储。
-
 ## 开发与验证
 
 ```powershell
@@ -313,7 +305,7 @@ src/praxis_agent/
   cli.py                CLI 参数、会话选择、UI 和 Agent 组装
   agent.py              Agent 生命周期、模型循环、用户输入队列消费
   model.py              流式 Responses API 客户端
-  config.py             模型和 Langfuse 配置
+  config.py             模型配置
   tool_execution.py     工具校验、审批、并行执行与事件
   events.py             UI / 观测消费者共享的事件定义
   runtime.py            操作系统、工作目录和 shell 探测
@@ -328,7 +320,6 @@ src/praxis_agent/
   tool_search.py        MCP 工具索引和搜索
   skills.py             技能发现和分页加载
   builtin_skills/       随包提供的技能
-  observability.py      Langfuse 事件消费
   deepseek.py            DeepSeek 响应兼容处理
 tests/                  自动化测试
 pyproject.toml          依赖、打包和 praxis 命令入口

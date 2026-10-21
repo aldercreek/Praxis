@@ -90,7 +90,7 @@ def render_message(
 
 def is_editable(payload: Mapping[str, object]) -> bool:
     if payload.get("type") == "function_call_output":
-        return isinstance(payload.get("output"), str)
+        return isinstance(payload.get("output"), (str, list))
     if payload.get("role") not in {"user", "assistant"}:
         return False
     content = payload.get("content")

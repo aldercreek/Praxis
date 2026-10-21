@@ -32,7 +32,7 @@ def select_command_shell() -> CommandShell | None:
 
 def _shell_version(shell: CommandShell | None) -> str:
     if shell is None:
-        return "未检测到"
+        return "Not detected"
     command = "$PSVersionTable.PSVersion.ToString()" if shell.name in {"pwsh", "powershell"} else 'printf "%s" "${BASH_VERSION:-unknown}"'
     try:
         result = subprocess.run(
@@ -40,9 +40,9 @@ def _shell_version(shell: CommandShell | None) -> str:
             text=True, encoding="utf-8", errors="replace", timeout=3,
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
         )
-        return result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else "未知版本"
+        return result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else "Unknown version"
     except (OSError, subprocess.TimeoutExpired):
-        return "未知版本"
+        return "Unknown version"
 
 
 @dataclass(frozen=True, slots=True)

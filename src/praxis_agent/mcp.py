@@ -14,6 +14,7 @@ from threading import Event, Thread
 from uuid import uuid4
 
 from praxis_agent.execution import await_cancellable, run_operation
+from praxis_agent.mcp_results import mcp_tool_result
 from praxis_agent.tool_search import ToolSearchIndex, parameter_text
 from praxis_agent.tools.registry import Tool, ToolContext, ToolRegistry, ToolResult
 
@@ -178,29 +179,30 @@ class MCPConnections:
         if not entries:
             return ""
         return """<mcp>
-1. 可用服务
+1. Available services
    """ + json.dumps(entries, ensure_ascii=False) + """
 
-2. 查找工具
-   search_tools 搜索候选工具，list_tools 浏览指定服务，均不会激活工具。
-   搜索时使用对象、动作和关键约束；已知服务时用 server 限定范围。
-   结果不合适时调整关键词或浏览服务。
+2. Finding tools
+   search_tools finds candidates; list_tools browses a specific service. Neither activates tools.
+   Search using objects, actions, and key constraints. Use server to narrow the scope when the service is known.
+   Adjust keywords or browse the service if the results are unsuitable.
 
-3. 激活与执行
-   activate_tools 激活工具；不传 arguments 时仅激活，
-   下一次请求可读取完整工具定义。
-   传入 arguments 会立即执行，包括空对象；仅在明确参数时使用。
-   只批量执行彼此独立的调用，失败或超时后先确认执行结果再重试。
+3. Activation and execution
+   activate_tools activates tools. Omitting arguments only activates them;
+   the next request includes their full definitions.
+   Providing arguments, even an empty object, executes immediately. Do this only when the arguments are known.
+   Batch only independent calls. Verify the outcome after a failure or timeout before retrying.
 
-4. 工具管理
-   每个 agent 独立管理已激活工具。
-   deactivate_tools 停用不再需要的工具。
+4. Tool management
+   Each agent manages its own activated tools.
+   Use deactivate_tools to deactivate tools that are no longer needed.
 
-5. 程序化调用
-   MCP 管理工具须直接调用。
-   run_code 通过候选结果中的 name 调用已激活工具。
-   MCP 返回 JSON 字符串，content.text 按实际格式解析，
-   远端分页需按工具接口处理。
+5. Programmatic calls
+   Call MCP management tools directly.
+   In run_code, call activated tools using the name from the candidate results.
+   Successful MCP calls in run_code always return the complete response dictionary: content, optional structuredContent, isError.
+   Read dictionary fields directly. Raw media blocks are preserved; do not print large encoded payloads.
+   Parse text blocks according to their actual format and follow the tool interface for remote pagination.
 </mcp>"""
 
     def register(self, registry: ToolRegistry, *, check_execution=None):
@@ -229,7 +231,8 @@ class MCPConnections:
         def load(record):
             def invoke(context: ToolContext, **arguments):
                 return self.call(record["server"], record["original"], arguments,
-                                 check_execution=lambda: check(context), parallel=context.parallel_tool_call)
+                                 check_execution=lambda: check(context), parallel=context.parallel_tool_call,
+                                 programmatic=context.programmatic_call)
             if record["alias"] in registry.names:
                 return "already_active"
             registry.register(Tool(name=record["alias"], description=record["description"],
@@ -256,11 +259,14 @@ class MCPConnections:
 
         def activate_tools(context: ToolContext, tools: list[dict]):
             results = []
+            attachments = []
+            payload = {"results": results}
             for item in tools:
                 try:
                     check(context)
                 except RuntimeError:
-                    return json.dumps({"results": results, "stopped": "Agent cancelled or closed; remaining items not processed"}, ensure_ascii=False)
+                    payload["stopped"] = "Agent cancelled or closed; remaining items not processed"
+                    break
                 entry = {"tool_id": item["tool_id"], "activation": "failed", "execution": "not_requested"}
                 results.append(entry)
                 try:
@@ -273,9 +279,21 @@ class MCPConnections:
                         else:
                             result = context.invoke_tool(record["alias"], item["arguments"])
                             entry.update(execution="success" if result.success else "failed", output=result.output)
+                            media = [block for block in result.model_content or []
+                                     if block["type"] != "input_text"]
+                            if media:
+                                attachments.extend([
+                                    {"type": "input_text", "text": f"Attachments from {record['id']}:"},
+                                    *media,
+                                ])
                 except ValueError as error:
                     entry["error"] = str(error)
-            return json.dumps({"results": results}, ensure_ascii=False)
+            output = json.dumps(payload, ensure_ascii=False)
+            if attachments:
+                return ToolResult(True, output, model_content=[
+                    {"type": "input_text", "text": output}, *attachments,
+                ])
+            return output
 
         def deactivate_tools(context: ToolContext, tool_ids: list[str]):
             results = []
@@ -320,19 +338,20 @@ class MCPConnections:
 
         return release
 
-    def call(self, server, tool, arguments, *, check_execution=None, parallel=False):
+    def call(self, server, tool, arguments, *, check_execution=None, parallel=False, programmatic=False):
         if self.closed or self.loop is None:
             return ToolResult(False, "MCP connections are closed")
         if check_execution:
             check_execution()
         def invoke(handle):
             async def owned_call():
-                return await await_cancellable(self._call(server, tool, arguments, parallel=parallel), handle)
+                return await await_cancellable(self._call(
+                    server, tool, arguments, parallel=parallel, programmatic=programmatic), handle)
             # Never cancel this proxy: its completion must acknowledge coroutine cleanup.
             return asyncio.run_coroutine_threadsafe(owned_call(), self.loop).result()
         return run_operation(f"MCP {server}/{tool}", invoke)
 
-    async def _call(self, server, tool, arguments, *, parallel=False):
+    async def _call(self, server, tool, arguments, *, parallel=False, programmatic=False):
         try:
             async with asyncio.timeout(self.servers[server].get("tool_timeout_sec", 60)):
                 # Explicit parallel batches opt out of the ordinary per-server queue.
@@ -340,13 +359,7 @@ class MCPConnections:
                     if server not in self.clients:
                         return ToolResult(False, "MCP server disconnected; no automatic retry was attempted")
                     result = await self.clients[server].call_tool(tool, arguments)
-            data = result.model_dump(mode="json", by_alias=True, exclude_none=True)
-            unsupported = [block.type for block in result.content if block.type not in ("text", "resource_link")]
-            if unsupported:
-                return ToolResult(False, "MCP returned unsupported content types: " + ", ".join(unsupported)
-                                  + ". No automatic retry; the remote operation may already have completed.")
-            return ToolResult(not result.is_error, json.dumps(data, ensure_ascii=False),
-                              structured_output=result.structured_content)
+            return mcp_tool_result(result, programmatic=programmatic)
         except asyncio.CancelledError:
             raise
         except Exception as error:

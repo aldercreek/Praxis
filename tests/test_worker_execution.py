@@ -51,7 +51,7 @@ def test_default_agent_binds_directory_delivers_resumes_and_retains_files(tmp_pa
         def create_response(self, input_items, tools, **kwargs):
             self.inputs.append(str(input_items))
             self.calls += 1
-            if "完成主 agent 分配的工作" in self.instructions and "run_command" in self.instructions:
+            if "Complete the work assigned by the main agent" in self.instructions and "run_command" in self.instructions:
                 if self.calls == 1:
                     return response(tool="write_file", arguments={"relative_path": "results/report.txt", "content": "initial report\n"})
                 if self.calls == 2:
@@ -242,7 +242,10 @@ def test_command_stops_descendants_on_every_exit(tmp_path, ending, mode):
     control = ExecutionControl()
     errors = []
     results = []
-    child = "import os,time; from pathlib import Path; Path('child.pid').write_text(str(os.getpid())); time.sleep(120)"
+    # Publish readiness only after the PID is complete; creation alone races readers.
+    child = ("import os,time; from pathlib import Path; "
+             "Path('child.pid.tmp').write_text(str(os.getpid())); "
+             "os.replace('child.pid.tmp', 'child.pid'); time.sleep(120)")
     launcher = (
         "import subprocess,sys,time; from pathlib import Path; "
         f"subprocess.Popen([sys.executable,'-c',{child!r}]); "

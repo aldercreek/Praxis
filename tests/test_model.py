@@ -21,8 +21,52 @@ from openai.types.responses.response_usage import (
 )
 
 from praxis_agent.config import ModelConfig
+from praxis_agent.context.model_catalog import MODEL_INPUT_CATALOG
 from praxis_agent.execution import ExecutionControl, ExecutionStopped, Run
 from praxis_agent.model import ModelClientError, OpenAIModelClient
+
+
+@pytest.mark.parametrize("model", list(MODEL_INPUT_CATALOG) + ["auto(free)", "custom-model"])
+def test_mcp_media_requests_for_all_model_configs(monkeypatch, model):
+    import json
+    from mcp.types import CallToolResult, ImageContent, AudioContent, TextContent, EmbeddedResource, BlobResourceContents
+    from praxis_agent.agent import _build_function_call_output
+    from praxis_agent.mcp_results import mcp_tool_result
+    from praxis_agent.model import FunctionCall
+
+    received = []
+    body = _successful_stream_body()
+    def handle(request):
+        received.append(json.loads(request.content))
+        return httpx2.Response(200, headers={"content-type": "text/event-stream"}, content=body)
+    monkeypatch.setattr("praxis_agent.model.AsyncOpenAI", lambda **options: AsyncOpenAI(
+        **options, http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handle))))
+    config = ModelConfig(api_key="test", model=model, base_url="https://example.test/v1")
+    client = OpenAIModelClient(config)
+    reply = CallToolResult(content=[
+        TextContent(type="text", text="Report completed"),
+        ImageContent(type="image", mime_type="image/png", data="iVBORw0KGgo="),
+        AudioContent(type="audio", mime_type="audio/wav", data="YXVkaW8="),
+        EmbeddedResource(type="resource", resource=BlobResourceContents(
+            uri="file:///report.pdf", mime_type="application/pdf", blob="JVBERi0xLjQK")),
+    ], structured_content={"count": 2})
+    call = FunctionCall("c", "mcp_report", "{}")
+    output = _build_function_call_output(call, mcp_tool_result(reply))
+    try:
+        client.create_response([
+            {"type": "function_call", "call_id": "c", "name": "mcp_report", "arguments": "{}"}, output,
+        ], [{"type": "function", "name": "mcp_report", "parameters": {"type": "object", "properties": {}}}])
+    finally:
+        client.close()
+    request = received[0]
+    assert request["model"] == model
+    blocks = request["input"][-1]["output"]
+    assert any(b["type"] == "input_image" for b in blocks) is bool(config.input_capabilities.image_mime_types)
+    assert any(b["type"] == "input_file" for b in blocks) is config.input_capabilities.pdf
+    text = "\n".join(b["text"] for b in blocks if b["type"] == "input_text")
+    assert "Report completed" in text and '"count": 2' in text
+    assert "interface does not support audio" in text
+    assert "YXVkaW8=" not in json.dumps(request)
 
 
 class FakeResponses:

@@ -160,11 +160,21 @@ class HeuristicTokenEstimator:
             "body": [instructions], "reasoning": [], "tool_definitions": [],
             "tool_arguments": [], "tool_results": [],
         }
+        media_tokens = 0
         for item in input_items:
             payload = item if isinstance(item, Mapping) else _json_default(item)
             if not isinstance(payload, Mapping):
                 continue
             kind = payload.get("type")
+            blocks = payload.get("output" if kind == "function_call_output" else "content")
+            if isinstance(blocks, list):
+                # Heuristic reserves, not base64 text tokens or provider-exact pricing.
+                # Server usage continues to calibrate the overall request estimate.
+                media_tokens += sum(
+                    2048 if block.get("type") == "input_image" else
+                    8192 if block.get("type") == "input_file" else 0
+                    for block in blocks if isinstance(block, Mapping)
+                )
             if kind == "reasoning":
                 parts["reasoning"].extend(_content_text(payload.get("summary")))
                 parts["reasoning"].extend(_content_text(payload.get("content")))
@@ -191,6 +201,8 @@ class HeuristicTokenEstimator:
         }
         # 角色、消息边界和工具定义边界的少量固定开销，并非协议精确 token 数。
         result["overhead"] = 4 * (bool(instructions) + len(input_items) + len(tools))
+        if media_tokens:
+            result["media"] = media_tokens
         return result
 
     def _estimate_text(self, text: str) -> float:

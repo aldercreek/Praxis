@@ -80,7 +80,7 @@ def run_command(
 ) -> dict[str, object]:
     """执行程序或 shell 正文，清理进程后返回同一份结构化结果。"""
     if (argv is None) == (command is None):
-        raise ValueError("argv 和 command 必须且只能提供一个；命令未执行。")
+        raise ValueError("Provide exactly one of argv or command; the command was not executed.")
     if argv is not None:
         if not isinstance(argv, list) or not argv or any(not isinstance(item, str) for item in argv):
             raise ValueError("argv must be a non-empty list of strings")
@@ -129,19 +129,19 @@ def run_command(
             if command is not None:
                 selected_shell = command_shell or select_command_shell()
                 if selected_shell is None:
-                    raise FileNotFoundError("未检测到可用的命令 shell")
+                    raise FileNotFoundError("No command shell detected")
                 argv = selected_shell.argv(command)
             process = CommandProcess(_resolve_command_argv(argv), cwd=working_directory, stdin=subprocess.DEVNULL,
                                      stdout=out, stderr=err, shell=False)
         except OSError as error:
             if isinstance(error, FileNotFoundError):
-                reason = "找不到可执行文件或可用的命令 shell。请检查命令名称、安装情况或程序路径。"
+                reason = "Executable or command shell not found. Check the command name, installation, or executable path."
             elif isinstance(error, PermissionError):
-                reason = "访问被拒绝。请检查执行权限。"
+                reason = "Access denied. Check execution permissions."
             else:
                 reason = str(error)
             return {"status": "spawn_failed", "exit_code": None, "stdout": "", "stderr": "",
-                    "error": f"无法启动命令：{reason}"}
+                    "error": f"Unable to start command: {reason}"}
         handle = current_handle()
         unsubscribe = handle.on_cancel(process.request_stop) if handle is not None else lambda: None
         status = "exited"
@@ -185,10 +185,10 @@ def run_command(
         returncode = process.process.returncode
     error = None
     if status == "timed_out":
-        error = f"执行超过 {timeout_seconds} 秒，命令及其子进程已停止。已保留停止前的输出。"
+        error = f"Execution exceeded {timeout_seconds} seconds. The command and its child processes were stopped. Output produced before stopping was preserved."
     elif status == "cancelled":
-        error = "用户取消了执行，命令及其子进程已停止。已保留停止前的输出。"
+        error = "Execution was cancelled by the user. The command and its child processes were stopped. Output produced before stopping was preserved."
     elif returncode != 0:
-        error = (f"命令已执行并退出，退出码为 {returncode}。请结合 stdout 和 stderr 判断具体原因；"
-                 "非零退出码的含义由具体程序决定。")
+        error = (f"The command ran and exited with code {returncode}. Check stdout and stderr for details. "
+                 "The meaning of a nonzero exit code depends on the program.")
     return {"status": status, "exit_code": returncode, "stdout": stdout, "stderr": stderr, "error": error}

@@ -16,6 +16,8 @@ from openai.types.responses import (
 )
 
 from praxis_agent.config import ModelConfig
+from praxis_agent.context.model_catalog import ModelInputCapabilities
+from praxis_agent.media import adapt_media_blocks
 from praxis_agent.deepseek import DeepSeekResponseNormalizer
 from praxis_agent.execution import await_cancellable, current_handle, run_operation
 from praxis_agent.multi_agent.models import ExecutionControl
@@ -97,6 +99,7 @@ class OpenAIModelClient:
         self._loop_lock = Lock()
         self._closed = False
         self._model = config.model
+        self._input_capabilities = config.input_capabilities
         self._instructions = instructions
         self._execution_control = execution_control
         # None 沿用服务端默认值；摘要客户端显式传入 "none" 关闭 thinking。
@@ -141,7 +144,7 @@ class OpenAIModelClient:
         stream = await self._client.responses.create(
             model=self._model,
             instructions=self._instructions,
-            input=[_response_input(item) for item in input_items],
+            input=[_response_input(item, self._input_capabilities) for item in input_items],
             tools=list(tools),
             stream=True,
             **options,
@@ -201,7 +204,7 @@ class OpenAIModelClient:
                 self._thread.join()
 
 
-def _response_input(item: object) -> dict[str, object]:
+def _response_input(item: object, capabilities: ModelInputCapabilities | None = None) -> dict[str, object]:
     """回传响应时省略状态和空可选字段，兼容网关较窄的输入协议。
 
     保留 reasoning 的 id、正文及 encrypted_content，也保留消息 phase。
@@ -217,6 +220,10 @@ def _response_input(item: object) -> dict[str, object]:
                 if isinstance(block, Mapping) else block
                 for block in payload[field]
             ]
+    if capabilities is not None:
+        field = "output" if payload.get("type") == "function_call_output" else "content"
+        if isinstance(payload.get(field), list):
+            payload[field] = adapt_media_blocks(payload[field], capabilities)
     return payload
 
 

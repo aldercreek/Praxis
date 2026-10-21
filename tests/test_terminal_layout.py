@@ -36,7 +36,7 @@ def capacity(percent):
 @pytest.mark.parametrize("percent,expected", [(0, "0%"), (18.3, "18.3%"), (100, "100%"), (101.2, "101.2%")])
 def test_capacity_emphasizes_percentage_only(percent, expected):
     text = capacity_footer(capacity(percent))
-    assert text.plain == "上下文 ≈ " + expected
+    assert text.plain == "Context ≈ " + expected
     assert len(text.spans) == 1
     span = text.spans[0]
     assert text.plain[span.start:span.end] == expected
@@ -63,8 +63,8 @@ def test_welcome_keeps_large_wordmark_model_and_shortened_directory(terminal_app
                 "█    █  █ █  █ ▄▀ ▀▄ ▄█▄ ▄▄▄▀",
             ]
             assert lines[3] == ""
-            assert lines[4] == f"v{__version__} · 模型 auto(free)"
-            assert lines[5].startswith("目录 ") and lines[5].endswith("Praxis")
+            assert lines[4] == f"v{__version__} · Model auto(free)"
+            assert lines[5].startswith("Directory ") and lines[5].endswith("Praxis")
             assert ("…" in lines[5]) == (width == 40)
             assert app.query_one("#composer").region.y < 10
     asyncio.run(exercise())
@@ -137,7 +137,7 @@ def test_agent_list_is_compact_text_only_and_preserves_draft(terminal_app, wait_
             app.sink.emit(ChildAgentStatus("root", "child", "running", "分析测试"))
             await wait_for_ui(pilot, lambda: len(app.query(AgentTab)) == 2)
             rows = list(app.query(AgentTab))
-            assert rows[0].renderable.plain[1:] == " 主 Agent"
+            assert rows[0].renderable.plain[1:] == " Main agent"
             assert rows[1].renderable.plain[1:] == " Agent 1"
             assert rows[1].region.y == rows[0].region.y
             assert rows[1].region.x >= rows[0].region.right + 2
@@ -207,11 +207,11 @@ def test_running_indicators_remain_static_across_ticks_and_cancellation(terminal
                 monkeypatch.setattr("praxis_agent.terminal.app.monotonic", lambda: timestamp)
                 await app._tick()
                 await pilot.pause()
-                assert [tab.renderable.plain for tab in app.query(AgentTab)] == ["• 主 Agent", "• Agent 1"]
+                assert [tab.renderable.plain for tab in app.query(AgentTab)] == ["• Main agent", "• Agent 1"]
                 assert app.query_one("#status").renderable.plain.startswith("• ")
             await pilot.press("escape")
-            assert app.query_one("#status").renderable.plain.startswith("• 正在停止")
-            assert [tab.renderable.plain for tab in app.query(AgentTab)] == ["• 主 Agent", "• Agent 1"]
+            assert app.query_one("#status").renderable.plain.startswith("• Stopping")
+            assert [tab.renderable.plain for tab in app.query(AgentTab)] == ["• Main agent", "• Agent 1"]
     asyncio.run(exercise())
 
 
@@ -347,14 +347,14 @@ def test_agent_ending_is_visible_retained_and_not_overwritten_by_shutdown(
             await wait_for_ui(pilot, lambda: tab.renderable.plain == "• Agent 1")
             await pilot.press("alt+right", "escape")
             assert tab.renderable.plain == "• Agent 1"  # Cancel request is not cleanup completion.
-            assert "正在停止" in app.query_one("#status").renderable.plain
+            assert "Stopping" in app.query_one("#status").renderable.plain
             app.sink.emit(ChildAgentEvent("main", "child", ending))
             app.sink.emit(ChildAgentStatus("main", "child", "closing", occurred_at=30))
             app.sink.emit(ChildAgentStatus("main", "child", "closed", occurred_at=40))
             await wait_for_ui(pilot, lambda: tab.renderable.plain == f"{symbol} Agent 1")
             view = app.store.get("child")
             assert view.state == state and view.elapsed(now=100) == 10
-            assert "正在停止" not in app.query_one("#status").renderable.plain
+            assert "Stopping" not in app.query_one("#status").renderable.plain
             assert len(app.query(AgentTab)) == 2 and app.selected_agent_id == "child"
             assert tab.styles.background.a == 0 and tab.styles.text_style.bold
             segment = next(s for s in tab.render_line(0) if symbol in s.text)
@@ -378,7 +378,42 @@ def test_new_child_turn_resets_prior_terminal_state(ending):
     view.consume(TurnStarted("child2", "second", occurred_at=101))
     assert view.state == "running" and view.finished_at is None and view.elapsed(now=103) == 2
     view.set_status(ChildAgentStatus("main", "child", "closing"))
-    assert view.state == "closing" and view.phase == "正在关闭"
+    assert view.state == "closing" and view.phase == "Closing"
+
+
+@pytest.mark.parametrize("ending", [TurnCompleted("child"), TurnFailed("child", "Error", "failed"),
+                                     TurnCancelled("child")])
+def test_new_main_turn_hides_finished_agents_and_reuse_restores_tab(terminal_app, wait_for_ui, ending):
+    async def exercise():
+        app = terminal_app
+        async with app.run_test(size=(80, 25)) as pilot:
+            app.sink.emit(TurnStarted("first", "first task"))
+            app.sink.emit(ChildAgentEvent("first", "child", TurnStarted("child", "child task")))
+            app.sink.emit(ChildAgentEvent("first", "child", ending))
+            app.sink.emit(TurnCompleted("first"))
+            await wait_for_ui(pilot, lambda: len(app.query(AgentTab)) == 2)
+            await pilot.press("alt+right")
+            assert app.selected_agent_id == "child"
+            history = list(app.store.get("child").committed_blocks)
+            app.sink.emit(TurnStarted("second", "second task"))
+            await wait_for_ui(pilot, lambda: len(app.query(AgentTab)) == 1)
+            assert app.selected_agent_id == app._mounted_agent == "main"
+            assert not app.query_one("#agent-bar").display
+            assert app.store.get("child").committed_blocks == history
+            await app.on_agent_selected(AgentTab.Selected("child"))
+            assert app.selected_agent_id == "main"
+            app.sink.emit(ChildAgentStatus("first", "child", "closed"))
+            app.sink.emit(ChildAgentStatus("second", "new-child", "queued"))
+            await wait_for_ui(pilot, lambda: len(app.query(AgentTab)) == 2)
+            assert [tab.agent_id for tab in app.query(AgentTab)] == ["main", "new-child"]
+            app.sink.emit(ChildAgentStatus("second", "child", "queued"))
+            await wait_for_ui(pilot, lambda: len(app.query(AgentTab)) == 3)
+            assert len({tab.id for tab in app.query(AgentTab)}) == 3
+            assert app.query_one("#agent-1", AgentTab).renderable.plain == "○ Agent 1"
+            app.sink.emit(TurnStarted("third", "third task"))
+            await pilot.pause()
+            assert len(app.query(AgentTab)) == 3  # Pending work survives a root turn boundary.
+    asyncio.run(exercise())
 
 
 def test_input_wrap_resize_and_explicit_newline_preserve_text(terminal_app, wait_for_ui):
@@ -449,5 +484,5 @@ def test_escape_from_either_page_cancels_whole_tree_without_exiting(terminal_app
             await pilot.press("escape")
             assert parent.cancelled.is_set() and child.cancelled.is_set()
             assert app.stopping and app.is_running
-            assert "正在停止" in app.query_one("#status").renderable.plain
+            assert "Stopping" in app.query_one("#status").renderable.plain
     asyncio.run(exercise())

@@ -5,7 +5,7 @@ import textwrap
 from unittest.mock import AsyncMock
 
 import pytest
-from mcp.types import CallToolResult, TextContent
+from mcp.types import AudioContent, CallToolResult, ImageContent, TextContent
 
 from praxis_agent.mcp import MCPConnections
 from praxis_agent.model import FunctionCall
@@ -149,12 +149,14 @@ def test_result_encoding_failure_keeps_executed_changes(code_tools, tmp_path, ex
     assert run("saved")["result"] == 2
 
 
-@pytest.mark.parametrize("structured", [None, {}, {"orders": [{"id": 42}]}])
+@pytest.mark.parametrize("structured", [None, {}, [], 0, False, "value", {"orders": [{"id": 42}]}])
 @pytest.mark.parametrize("is_error", [False, True])
 def test_mcp_structured_result_through_code_bridge(code_tools, tmp_path, structured, is_error):
     run, registry, _ = code_tools
     reply = CallToolResult(
-        content=[TextContent(type="text", text="Original response text")],
+        content=[TextContent(type="text", text="Original response text"),
+                 ImageContent(type="image", data="aW1hZ2U=", mime_type="image/png"),
+                 AudioContent(type="audio", data="YXVkaW8=", mime_type="audio/wav")],
         structured_content=structured, is_error=is_error,
     )
     connections = MCPConnections(tmp_path / "missing-mcp.json")
@@ -167,7 +169,7 @@ def test_mcp_structured_result_through_code_bridge(code_tools, tmp_path, structu
     def query(context):
         async def invoke():
             connections.locks["test"] = asyncio.Lock()
-            return await connections._call("test", "query", {})
+            return await connections._call("test", "query", {}, programmatic=context.programmatic_call)
         result = asyncio.run(invoke())
         captured.append(result)
         return result
@@ -180,16 +182,17 @@ def test_mcp_structured_result_through_code_bridge(code_tools, tmp_path, structu
     response = run('call_tool("mcp_test_structured", {})', success=not is_error)
     result = captured[0]
     assert result.success is (not is_error)
-    assert result.structured_output == structured
-    assert json.loads(result.output) == reply.model_dump(
+    assert result.structured_output == reply.model_dump(
         mode="json", by_alias=True, exclude_none=True,
     )
+    assert result.model_content is None
     client.call_tool.assert_awaited_once_with("query", {})
     if is_error:
         assert response["error_kind"] == "tool"
         assert "Original response text" in response["error"]
     else:
-        assert response["result"] == (structured if structured is not None else result.output)
+        assert result.output == ""
+        assert response["result"] == result.structured_output
 
 
 def test_mcp_envelope_retry_and_partial_progress_survive_between_calls(code_tools):
@@ -202,10 +205,10 @@ def test_mcp_envelope_retry_and_partial_progress_survive_between_calls(code_tool
             return ToolResult(False, "Permission denied")
         if attempts[key] == 1:
             return ToolResult(False, "MCP call failed (TimeoutError)")
-        return ToolResult(True, json.dumps({
+        return ToolResult(True, "", structured_output={
             "content": [{"type": "text", "text": "ordinary text, not JSON"}],
             "structuredContent": {"key": key, "value": 42},
-        }))
+        })
 
     registry.register(Tool(
         "mcp_test_query", "Read test data", {
@@ -225,7 +228,7 @@ def test_mcp_envelope_retry_and_partial_progress_survive_between_calls(code_tool
                         raise
                     time.sleep(0.01)
                 else:
-                    return json.loads(raw)
+                    return raw
         results = {}
         errors = {}
     ''')
@@ -357,3 +360,30 @@ def test_output_file_failure_keeps_executed_changes(code_tools, tmp_path):
     assert "stdout" in result["output_errors"]
     assert result["output_files"] == {}
     assert run("values")["result"] == [1, 2]
+
+
+def test_search_pages_through_real_monty_tools(code_tools, tmp_path):
+    run, _, _ = code_tools
+    (tmp_path / "search.txt").write_bytes(b"before\nhit hit\ncontext\nhit\nend\n")
+    result = run('''
+        pages = []
+        offset = 0
+        while True:
+            page = call_tool("search_text", {
+                "query": "^hit", "regex": True, "context_lines": 1,
+                "relative_path": "search.txt", "limit": 1, "offset": offset,
+            })
+            pages.append(page["results"])
+            if page["next_offset"] is None:
+                break
+            offset = page["next_offset"]
+        counts = call_tool("search_text", {"query": "hit", "mode": "count", "relative_path": "search.txt"})
+        {"pages": pages, "counts": counts}
+    ''')
+    assert result["result"] == {
+        "pages": [
+            ["search.txt-1-before", "search.txt:2:hit hit", "search.txt-3-context"],
+            ["search.txt-3-context", "search.txt:4:hit", "search.txt-5-end"],
+        ],
+        "counts": {"results": [{"path": "search.txt", "count": 2}], "next_offset": None},
+    }

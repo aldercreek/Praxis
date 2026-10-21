@@ -120,7 +120,7 @@ def test_missing_executable_returns_generic_startup_error(tmp_path):
     assert result["status"] == "spawn_failed"
     assert result["exit_code"] is None
     assert result["stdout"] == result["stderr"] == ""
-    assert result["error"].startswith("无法启动命令：找不到可执行文件")
+    assert result["error"].startswith("Unable to start command: Executable")
 
 
 def test_nonzero_exit_preserves_both_streams_and_explains_the_code(tmp_path):
@@ -130,7 +130,7 @@ def test_nonzero_exit_preserves_both_streams_and_explains_the_code(tmp_path):
     assert result["exit_code"] == 7
     assert result["stdout"] == "result\n"
     assert result["stderr"] == "failure\n"
-    assert "退出码为 7" in result["error"]
+    assert "exited with code 7" in result["error"]
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="PowerShell execution")
@@ -157,7 +157,7 @@ def test_powershell_forwards_native_exit_code_without_command_wrapping(tmp_path)
     result = run_command(tmp_path, command=f"& '{python}' '测试 script.py'\nexit $LASTEXITCODE")
     assert result["exit_code"] == 7, result
     assert result["stdout"] == "native output\n"
-    assert "退出码为 7" in result["error"]
+    assert "exited with code 7" in result["error"]
 
 
 def test_selected_shell_executes_script_in_the_requested_directory(tmp_path):

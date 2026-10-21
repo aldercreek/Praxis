@@ -63,6 +63,7 @@ class _AgentWorker:
     closed: threading.Event = field(default_factory=threading.Event)
     resources: AsyncExitStack | None = None
     session: AsyncMontySession | None = None
+    process_handle: int | None = None
 
     async def open(self, config: CodeConfig) -> None:
         from pydantic_monty import AsyncMonty
@@ -83,6 +84,11 @@ class _AgentWorker:
                 type_check=True, type_check_stubs=_TOOL_STUBS,
                 type_check_format="concise",
             ))
+            if os.name == "nt":
+                import _winapi
+
+                # Keep the exact process identity even if the SDK drops its handle.
+                self.process_handle = _winapi.OpenProcess(0x100000, False, session.worker_pid)
         except BaseException:
             await resources.aclose()
             raise
@@ -90,10 +96,24 @@ class _AgentWorker:
 
     async def close(self) -> None:
         resources, self.resources = self.resources, None
+        process_handle, self.process_handle = self.process_handle, None
         self.session = None
-        if resources is not None:
-            # Exit the checkout before its pool so the process is reaped.
-            await resources.aclose()
+        try:
+            if resources is not None:
+                await resources.aclose()
+            if process_handle is not None:
+                import _winapi
+
+                # Monty's pool exit may precede Windows' process-exit signal.
+                # Wait off the shared event loop so other agents can continue.
+                status = await asyncio.to_thread(_winapi.WaitForSingleObject, process_handle, 10000)
+                if status == _winapi.WAIT_TIMEOUT:
+                    raise TimeoutError("Monty worker did not exit after pool cleanup")
+        finally:
+            if process_handle is not None:
+                import _winapi
+
+                _winapi.CloseHandle(process_handle)
 
 
 class CodeRuntime:

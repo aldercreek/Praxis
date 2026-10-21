@@ -51,7 +51,7 @@ def test_drag_copies_exact_unicode_text(terminal_app, drag_selection, source, us
             await pilot.press("ctrl+c")
             assert app.clipboard == expected
             assert app.is_running
-            assert app.query_one("#hint").renderable.plain == "已复制到剪贴板"
+            assert app.query_one("#hint").renderable.plain == "Copied to clipboard"
     asyncio.run(exercise())
 
 
@@ -167,7 +167,7 @@ def test_copy_feedback_is_inline_without_focus_or_layout_change(
             literal = "print('hello')"
         elif surface == "tool":
             result = {"status": "exited", "exit_code": 0, "stdout": "copy output", "stderr": "", "error": None}
-            blocks.append(ToolBlock("执行命令", "{}", json.dumps(result), structured_output=result,
+            blocks.append(ToolBlock("Running command", "{}", json.dumps(result), structured_output=result,
                                     name="run_command", detail="echo copy output"))
             literal = "copy output"
         else:
@@ -196,7 +196,7 @@ def test_copy_feedback_is_inline_without_focus_or_layout_change(
             focused, region = app.focused, hint.region
             await pilot.press("ctrl+c")
             assert app.clipboard == literal
-            assert hint.renderable.plain == "已复制到剪贴板"
+            assert hint.renderable.plain == "Copied to clipboard"
             assert app.focused is focused and hint.region == region
             assert hint.size.height == 1
             assert not notify.called
@@ -206,9 +206,9 @@ def test_copy_feedback_is_inline_without_focus_or_layout_change(
                 # Normal footer changes during the flash must appear after it expires.
                 app.query_one(Composer).load_draft("new draft")
                 await pilot.pause()
-                assert hint.renderable.plain == "已复制到剪贴板"
+                assert hint.renderable.plain == "Copied to clipboard"
                 await wait_for_ui(pilot, lambda: "Enter" in hint.renderable.plain)
-                assert "发送" in hint.renderable.plain
+                assert "Send" in hint.renderable.plain
     asyncio.run(exercise())
 
 
@@ -242,11 +242,11 @@ def test_native_clipboard_result_never_cancels_execution(
             assert not notify.called
             hint = app.query_one("#hint", FooterHint)
             if failure:
-                assert hint.renderable.plain == "复制失败，请重试"
+                assert hint.renderable.plain == "Copy failed. Try again."
                 assert hint.renderable.style == "red"
                 assert app.clipboard == ""
             else:
-                assert hint.renderable.plain == "已复制到剪贴板"
+                assert hint.renderable.plain == "Copied to clipboard"
                 assert app.clipboard == "copy safely"
     asyncio.run(exercise())
 
@@ -316,6 +316,6 @@ def test_copy_flash_resets_on_agent_switch(terminal_app, drag_selection, wait_fo
             await drag_selection(pilot, app.query_one("#record-0"), (0, 0), (4, 0))
             await pilot.press("ctrl+c", "alt+right")
             await wait_for_ui(pilot, lambda: app.selected_agent_id == "child")
-            assert "已复制" not in app.query_one("#hint").renderable.plain
-            assert "切换 Agent" in app.query_one("#hint").renderable.plain
+            assert "Copied" not in app.query_one("#hint").renderable.plain
+            assert "Switch agent" in app.query_one("#hint").renderable.plain
     asyncio.run(exercise())

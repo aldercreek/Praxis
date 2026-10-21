@@ -321,7 +321,7 @@ def test_search_text_returns_path_line_and_content(tmp_path: Path) -> None:
         file_pattern="*.py",
     )
 
-    assert result == {"matches": [
-        {"path": "src/first.py", "line": 2, "offset": 0},
-        {"path": "src/second.py", "line": 1, "offset": 2},
-    ]}
+    assert result == {"results": [
+        "src/first.py:2:needle = value",
+        "src/second.py:1:# needle",
+    ], "next_offset": None}

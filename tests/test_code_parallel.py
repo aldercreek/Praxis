@@ -288,7 +288,9 @@ def test_activated_mcp_tools_overlap_on_same_connection(setup, tmp_path):
         })))
         assert activated.success
         results = setup.run('call_parallel_tools([{"name": "mcp_test_lookup", "arguments": {"index": i}} for i in range(2)])')["result"]
-        assert results == [{"success": True, "output": {"index": i}} for i in range(2)]
+        assert [item["output"]["structuredContent"] for item in results] == [{"index": i} for i in range(2)]
+        assert all(item["success"] and item["output"]["content"] and not item["output"]["isError"]
+                   for item in results)
         assert entered == 2
     finally:
         release()

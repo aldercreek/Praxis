@@ -23,7 +23,7 @@ class CommandOutput:
 
     def text(self) -> str:
         streams = (
-            stream.text[:4096] + "\n… 输出缓冲已截断\n" + stream.text[4096:]
+            stream.text[:4096] + "\n… Output buffer truncated\n" + stream.text[4096:]
             if stream.truncated else stream.text
             for stream in self.streams.values()
         )

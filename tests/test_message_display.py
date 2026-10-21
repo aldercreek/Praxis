@@ -38,7 +38,7 @@ def rendered(content):
 ])
 @pytest.mark.parametrize("chunk_size", [1, 3, 17])
 def test_metadata_never_flashes_during_streaming_and_source_is_unchanged(prefix, chunk_size):
-    view = AgentView("main", "主 Agent")
+    view = AgentView("main", "Main agent")
     view.consume(ModelRequestStarted("turn", 1))
     source = prefix + "已经找到源码。\n\n    keep_indentation()"
     for start in range(0, len(source), chunk_size):
@@ -87,7 +87,7 @@ def test_prose_code_quotes_and_invalid_labels_survive_streaming(source):
     TurnFailed("turn", "NetworkError", "connection lost"), TurnCancelled("turn"),
 ])
 def test_incomplete_prefix_is_released_when_stream_ends(source, completion):
-    view = AgentView("main", "主 Agent")
+    view = AgentView("main", "Main agent")
     view.consume(AssistantTextDelta("turn", 1, source))
     block, = view.committed_blocks
     assert block.display_text == ""

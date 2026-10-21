@@ -133,7 +133,7 @@ def test_command_schema_rejects_invalid_choices_before_execution(tmp_path, argum
         validate(arguments, definition["parameters"])
     result = registry.execute("run_command", arguments, context=_context(tmp_path))
     assert not result.success
-    assert "run_command 未执行" in result.output
+    assert "run_command was not executed" in result.output
 
 
 def test_registry_returns_an_error_for_unknown_tools(tmp_path: Path) -> None:

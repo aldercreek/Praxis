@@ -58,7 +58,7 @@ def test_command_result_has_one_persisted_copy_and_restores_the_live_view(tmp_pa
         after = next(block for block in restored.committed_blocks if isinstance(block, ToolBlock))
         assert before == after
         title = tool_title((after,))
-        assert title.plain.startswith("执行 ")
+        assert title.plain.startswith("Run ")
         assert not title.style
         colored = [segment for segment in Console(width=100).render(ToolHeading((after,)))
                    if segment.text.strip() and segment.style and segment.style.color]
@@ -78,4 +78,4 @@ def test_search_no_match_keeps_exit_one_without_marking_tool_failed(tmp_path):
     assert result.structured_output["status"] == "exited"
     assert result.structured_output["exit_code"] == 1
     assert result.structured_output["stdout"] == result.structured_output["stderr"] == ""
-    assert "非零退出码的含义由具体程序决定" in result.structured_output["error"]
+    assert "The meaning of a nonzero exit code depends on the program" in result.structured_output["error"]

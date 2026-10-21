@@ -50,12 +50,12 @@ class WelcomeHeader:
             )
         content.append(f"v{__version__}", style="#a0a0a0")
         if self.model:
-            content.append(" · 模型 ", style="#a0a0a0")
+            content.append(" · Model ", style="#a0a0a0")
             content.append(self.model)
         if self.workspace is not None:
             workspace = self.workspace
             path = Text(str(workspace))
-            path_width = max(1, options.max_width - 5)
+            path_width = max(1, options.max_width - len("Directory "))
             if path.cell_len > path_width:
                 for index in range(1, len(workspace.parts)):
                     path = Text(str(Path(workspace.anchor, "…", *workspace.parts[index:])))
@@ -65,7 +65,7 @@ class WelcomeHeader:
                     path = Text("…" + workspace.name)
                     while path.cell_len > path_width:
                         path = Text("…") + path[2:]
-            content.append("\n目录 ", style="#a0a0a0")
+            content.append("\nDirectory ", style="#a0a0a0")
             content.append_text(path)
         yield content
 
@@ -160,7 +160,7 @@ class CollaborationBlock:
     text: str
 
     def __rich_console__(self, console, options):
-        yield Text(f"• {self.label} → 主 Agent：收到新消息", style="dim")
+        yield Text(f"• {self.label} → Main agent: new message", style="dim")
 
 
 def collaboration_messages(text: str) -> list[dict] | None:
@@ -182,9 +182,9 @@ def plan_cell(plan: Iterable[PlanStep], *, compact: bool = False) -> RenderableT
     plan = list(plan)
     if compact:
         completed = sum(step.status.value == "completed" for step in plan)
-        current = next((step.description for step in plan if step.status.value == "in_progress"), "等待下一步")
-        return Group(_completed_header(f"计划 · {completed}/{len(plan)} 已完成"), _detail_line(current))
-    lines = [_completed_header("更新计划")]
+        current = next((step.description for step in plan if step.status.value == "in_progress"), "Waiting for the next step")
+        return Group(_completed_header(f"Plan · {completed}/{len(plan)} complete"), _detail_line(current))
+    lines = [_completed_header("Update plan")]
     for index, step in enumerate(plan):
         prefix = "  └ " if index == 0 else "    "
         line = Text(prefix, style="dim")
@@ -235,13 +235,13 @@ def display_command(arguments: Mapping[str, object]) -> str:
 
 
 _TOOL_LABELS = {
-    "read_file": "读取", "list_files": "列出", "find_files": "查找",
-    "search_text": "搜索", "edit_file": "修改", "write_file": "写入",
-    "run_command": "执行", "update_plan": "更新计划",
-    "delete": "整理消息", "compress": "压缩上下文",
-    "search_history": "搜索历史", "read_history": "读取历史",
-    "spawn_agent": "创建子 Agent", "send_messages": "发送协作消息",
-    "wait_agents": "等待子 Agent", "close_agent": "关闭子 Agent", "send_message": "汇报结果",
+    "read_file": "Read", "list_files": "List", "find_files": "Find",
+    "search_text": "Search", "edit_file": "Edit", "write_file": "Write",
+    "run_command": "Run", "update_plan": "Update plan",
+    "delete": "Prune messages", "compress": "Compact context",
+    "search_history": "Search history", "read_history": "Read history",
+    "spawn_agent": "Create subagent", "send_messages": "Send collaboration messages",
+    "wait_agents": "Wait for subagents", "close_agent": "Close subagent", "send_message": "Report results",
 }
 
 
@@ -253,9 +253,11 @@ def tool_description(name: str, arguments: Mapping[str, object]) -> tuple[str, s
         return label, str(arguments.get("task_summary") or arguments.get("task", ""))
     if name in {"wait_agents", "send_messages"}:
         items = arguments.get("agent_ids" if name == "wait_agents" else "messages", [])
-        return label, f"{len(items)} 个 Agent" if name == "wait_agents" else f"{len(items)} 条消息"
+        unit = "agent" if name == "wait_agents" else "message"
+        return label, f"{len(items)} {unit}{'' if len(items) == 1 else 's'}"
     if name in {"delete", "compress"}:
-        return label, f"{len(arguments.get('message_ids', []))} 条消息"
+        count = len(arguments.get("message_ids", []))
+        return label, f"{count} message{'' if count == 1 else 's'}"
     path = str(arguments.get("relative_path", ""))
     query = arguments.get("query") or arguments.get("file_pattern")
     detail = f"{query} · {path}" if query and path else str(query or path)
@@ -274,7 +276,7 @@ def _tool_marker_style(calls: tuple[ToolBlock, ...]) -> str:
 
 def tool_title(calls: tuple[ToolBlock, ...]) -> Text:
     if len(calls) > 1:
-        return Text(f"查看代码 · {len(calls)} 次操作")
+        return Text(f"Explore code · {len(calls)} operations")
     call = calls[0]
     title = Text(call.title)
     if call.detail:
@@ -325,9 +327,16 @@ class ToolHeading:
                 suffix = f" (+{call.file_change.added} -{call.file_change.removed})" if call.file_change else ""
                 available = width - Text(suffix).cell_len
             calls = (replace(call, detail=_shorten_path(path, max(1, available))),)
-        title = tool_title(calls)
-        yield OutputPreview([title], max_rows=2, prefix="• ", style="",
-                            prefix_style=_tool_marker_style(calls))
+        if len(calls) == 1 and calls[0].name == "run_command":
+            calls = (replace(calls[0], detail=" ".join(calls[0].detail.split())),)
+        width = max(1, options.max_width - 2)
+        rows = tool_title(calls).wrap(console, width)
+        if len(rows) > 2:
+            rows = rows[:2]
+            rows[-1].truncate(max(0, width - 1), overflow="crop")
+            rows[-1].append("…")
+        for index, row in enumerate(rows):
+            yield Text.assemble(("• " if index == 0 else "  ", _tool_marker_style(calls)), row)
 
 
 def change_lines(change) -> list[Text]:
@@ -349,7 +358,7 @@ def change_lines(change) -> list[Text]:
             new_line += not line.startswith("-")
         else:
             rows.append(Text(line, style="dim"))
-    return rows or [Text("内容未变化")]
+    return rows or [Text("No changes")]
 
 
 def _operation_summary(call: ToolBlock) -> list[Text] | None:
@@ -365,16 +374,16 @@ def _operation_summary(call: ToolBlock) -> list[Text] | None:
         return None
     if not isinstance(result, dict) or (call.failed and "results" not in result):
         return None
-    statuses = {"queued": "排队中", "running": "执行中", "idle": "本轮结束",
-                "closing": "正在关闭", "closed": "已关闭"}
+    statuses = {"queued": "Queued", "running": "Running", "idle": "Turn finished",
+                "closing": "Closing", "closed": "Closed"}
     if call.name == "wait_agents":
         lines = [Text(f"{statuses.get(agent['status'], agent['status'])} · {agent.get('task') or agent['agent_id']}")
                  for agent in result.get("agents", [])]
         count = len(result.get("messages", []))
         if count:
-            lines.append(Text(f"收到 {count} 条协作消息；Ctrl+T 查看全文"))
+            lines.append(Text(f"Received {count} collaboration message{'' if count == 1 else 's'}; Ctrl+T for details"))
         if result.get("timed_out"):
-            lines.append(Text("本次等待结束，子 Agent 仍在执行"))
+            lines.append(Text("Wait ended; subagents are still running"))
         return lines
     if call.name == "send_messages":
         return [Text(str(item.get("error")), style="red") for item in result.get("results", []) if item.get("error")]
@@ -407,7 +416,7 @@ def tool_details(calls: tuple[ToolBlock, ...]) -> RenderableType:
             lines.append(Text(f"{call.title} {call.detail}".rstrip(), style="bold"))
         if call.file_change is not None:
             lines.extend(change_lines(call.file_change))
-        lines.extend((Text("参数", style="dim"), Text(call.arguments), Text("输出", style="dim")))
+        lines.extend((Text("Arguments", style="dim"), Text(call.arguments), Text("Output", style="dim")))
         if call.structured_output is not None:
             for field, value in call.structured_output.items():
                 lines.extend((Text(field, style="dim"), Text.from_ansi(str(value) if value is not None else "null")))
@@ -424,12 +433,12 @@ def approval_content(name: str, arguments: Mapping[str, object]) -> RenderableTy
     else:
         title, detail = tool_description(name, arguments)
         lines.append(Text(f"{title} {detail}".rstrip()))
-    labels = {"relative_path": "目录", "workdir": "目录", "workspace": "工作区", "timeout_seconds": "超时（秒）", "reason": "原因",
-              "old_string": "替换前", "new_string": "替换后", "content": "写入内容"}
+    labels = {"relative_path": "Directory", "workdir": "Directory", "workspace": "Workspace", "timeout_seconds": "Timeout (seconds)", "reason": "Reason",
+              "old_string": "Before", "new_string": "After", "content": "Content"}
     for key, value in arguments.items():
         if key in {"argv", "command", "agent_id"}:
             continue
-        line = Text(f"{labels.get(key, key)}：", style="dim")
+        line = Text(f"{labels.get(key, key)}: ", style="dim")
         line.append(str(value), style="not dim")
         lines.append(line)
     return Group(*lines)

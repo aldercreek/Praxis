@@ -17,6 +17,7 @@ from praxis_agent.events import (
     ModelRequestStarted,
     ToolCallPrepared,
     ToolFinished,
+    ToolStarted,
     TurnCompleted,
     TurnStarted,
 )
@@ -44,6 +45,33 @@ def finish_tool(sink, call_id, name, arguments, output, success=True):
     sink.emit(ToolCallPrepared("turn", call_id, name, arguments, False))
     result = ToolResult(success, json.dumps(output, ensure_ascii=False), structured_output=output) if isinstance(output, dict) else ToolResult(success, output)
     sink.emit(ToolFinished("turn", call_id, name, result))
+
+
+def test_multiline_command_heading_does_not_claim_missing_output(wait_for_ui):
+    async def exercise():
+        sink = ViewEventSink()
+        app = PraxisApp(sink)
+        script = "\n".join(f"print('marker-{i}')" for i in range(24))
+        arguments = {"argv": ["python", "-c", script]}
+        async with app.run_test(size=(60, 28)) as pilot:
+            sink.emit(ToolCallPrepared("turn", "cmd", "run_command", arguments, False))
+            sink.emit(ToolStarted("turn", "cmd", "run_command"))
+            await wait_for_ui(pilot, lambda: bool(app.query(ToolRecord)))
+            record = app.query_one(ToolRecord)
+            title = record.query_one(".tool-title", Static)
+            shown = "\n".join(title.render_line(y).text for y in range(title.size.height))
+            assert "omitted" not in shown and "marker-0" in shown and "…" in shown
+            assert title.size.height <= 2
+            assert not record.query_one(".tool-preview", Static).display
+            assert json.loads(record.calls[0].arguments) == arguments
+            sink.emit(ToolFinished("turn", "cmd", "run_command", ToolResult(True, "\n".join(map(str, range(10))))))
+            await wait_for_ui(pilot, lambda: record.calls[0].state == "completed")
+            assert "6 lines omitted" in render(record.query_one(".tool-preview", Static).renderable)
+            await pilot.press("ctrl+t")
+            await pilot.pause()
+            details = render(app.screen.query_one("#details-content", Static).renderable, 200)
+            assert "marker-23" in details
+    asyncio.run(exercise())
 
 
 @pytest.mark.parametrize("width", [48, 100])
@@ -86,7 +114,7 @@ def test_grouped_reads_update_in_place_and_keep_full_details():
             finish_tool(sink, "b", "read_file", {"relative_path": "src/b.py"}, "second full result")
             await pilot.pause(0.15)
             assert app.query_one(ToolRecord) is record
-            assert "2 次操作" in render(title.renderable)
+            assert "2 operations" in render(title.renderable)
             await pilot.press("ctrl+t")
             await pilot.pause(0.1)
             assert isinstance(app.screen, DetailsScreen)
@@ -103,10 +131,10 @@ def test_grouped_reads_update_in_place_and_keep_full_details():
             await pilot.pause(0.15)
             # A failure updates its existing group without moving other records.
             assert len(app.query(ToolRecord)) == 1
-            assert render(title.renderable).strip() == "• 查看代码 · 3 次操作"
+            assert render(title.renderable).strip() == "• Explore code · 3 operations"
             assert "".join(segment.text for segment in title.render_line(0)
                            if segment.style.color.name == "red").strip() == "•"
-            assert "读取 missing.py" in render(record.query_one(".tool-preview", Static).renderable)
+            assert "Read missing.py" in render(record.query_one(".tool-preview", Static).renderable)
     asyncio.run(exercise())
 
 
@@ -127,13 +155,13 @@ def test_long_read_title_keeps_filename_on_resize_and_full_path_in_details(separ
                 await pilot.resize_terminal(width, 28)
                 await pilot.pause()
                 shown = "\n".join(title.render_line(y).text.rstrip() for y in range(title.size.height))
-                assert shown.startswith("• 读取")
-                assert "已读取" not in shown
+                assert shown.startswith("• Read")
+                assert "Read completed" not in shown
                 if width == 38:
                     assert "AbstractFlt" in shown and ".java" in shown
                 else:
                     assert filename in shown
-                assert "省略" not in shown
+                assert "omitted" not in shown
                 assert record.size.height <= 2
                 if width == 180:
                     assert path in shown
@@ -194,7 +222,7 @@ def test_command_preview_is_bounded_and_full_output_is_in_transcript():
             assert record.size.height == 6
             preview = render(record.query_one(".tool-preview", Static).renderable)
             assert all(f"result {i}" in preview for i in (0, 1, 8, 9))
-            assert "省略 6 行" in preview
+            assert "6 lines omitted" in preview
             assert "result 6" not in preview
             assert "stdout:" not in preview and "<empty>" not in preview
             assert "-NoProfile" not in render(record.query_one(".tool-title", Static).renderable)
@@ -212,7 +240,7 @@ def test_command_preview_is_bounded_and_full_output_is_in_transcript():
             await pilot.pause(0.1)
             failed = list(app.query(ToolRecord))[-1]
             title = failed.query_one(".tool-title", Static)
-            assert render(title.renderable).strip() == "• 执行 pytest"
+            assert render(title.renderable).strip() == "• Run pytest"
             assert "".join(segment.text for segment in title.render_line(0)
                            if segment.style.color.name == "red").strip() == "•"
             assert "AssertionError" in render(failed.query_one(".tool-preview", Static).renderable)
@@ -249,7 +277,7 @@ def test_live_message_survives_correction_resize_and_reading_history():
             await pilot.pause(0.15)
             assert app.query_one("#record-0", Static) is message
             assert "最终 结论" in render(message.renderable)
-            assert any("收到新消息" in render(widget.renderable) for widget in app.query("#blocks Static"))
+            assert any("new message" in render(widget.renderable) for widget in app.query("#blocks Static"))
             assert pane.scroll_y <= pane.max_scroll_y
     asyncio.run(exercise())
 
@@ -277,7 +305,7 @@ def test_inline_approval_uses_existing_boolean_decision(keys, allowed):
             assert panel.region.bottom <= app.screen.size.height
             content = render(panel.query_one("#approval-content", Static).renderable)
             assert "$ echo hello" in content and "argv" not in content
-            assert "目录：." in content
+            assert "Directory: ." in content
             await pilot.press(*keys)
             await pilot.pause(0.1)
             assert request.future.result(timeout=0) is allowed

@@ -412,7 +412,7 @@ class AgentRuntime:
             agents = [self._snapshot(h)
                       for h in self.handles.values() if h.status != AgentStatus.CLOSED]
         return {"role": "developer", "content": (
-            "当前子 agent 状态：\n" + json.dumps(agents, ensure_ascii=False)
+            "Current subagent status:\n" + json.dumps(agents, ensure_ascii=False)
         )}
 
     def pump_events(self, sink: EventSink | None) -> None:

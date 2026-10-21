@@ -34,7 +34,7 @@ def _parse_arguments(encoded_arguments: str) -> dict[str, object]:
     except json.JSONDecodeError as error:
         raise _InvalidToolArgumentsError(
             f"invalid JSON arguments: {error.msg} "
-            f"（第 {error.lineno} 行，第 {error.colno} 列，字符位置 {error.pos + 1}）；请修正 JSON 格式。"
+            f"(line {error.lineno}, column {error.colno}, character {error.pos + 1}); correct the JSON syntax."
         ) from error
 
     if not isinstance(arguments, dict):

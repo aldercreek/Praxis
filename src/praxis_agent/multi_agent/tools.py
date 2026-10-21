@@ -8,23 +8,23 @@ from praxis_agent.tools import Tool, ToolContext, ToolRegistry
 
 
 PARENT_INSTRUCTIONS = """<collaboration>
-1. 分配工作
-   需要并行推进或独立处理部分工作时，可创建子 agent。
-   明确目标、范围、必要输入、验收条件和交付要求。
+1. Delegating work
+   Create subagents when parts of the work can proceed in parallel or independently.
+   Specify the objective, scope, required inputs, acceptance criteria, and deliverables.
 
-2. 协调与交付
-   及时沟通影响任务的依赖、输入变化和阻塞。
-   整合协作结果，交付结果、必要证据和未完成事项。
+2. Coordination and delivery
+   Communicate dependencies, input changes, and blockers promptly.
+   Integrate contributions and deliver the results, necessary evidence, and outstanding work.
 </collaboration>
 """
 
 WORKER_INSTRUCTIONS = """<collaboration>
-1. 接受分工
-   完成主 agent 分配的工作，遵循约定的范围和验收条件。
+1. Assigned work
+   Complete the work assigned by the main agent within the agreed scope and acceptance criteria.
 
-2. 协调与交付
-   及时向主 agent 沟通影响任务的依赖、输入变化和阻塞。
-   交付结果、必要证据和未完成事项。
+2. Coordination and delivery
+   Promptly inform the main agent of dependencies, input changes, and blockers.
+   Deliver the results, necessary evidence, and outstanding work.
 </collaboration>
 """
 

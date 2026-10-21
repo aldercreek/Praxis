@@ -95,8 +95,8 @@ class ApprovalPanel(Vertical):
     #approval-hint { height: 1; color: $text-muted; }
     """
     BINDINGS: ClassVar[list[Binding]] = [
-        Binding("y,1", "allow", "允许本次", show=False),
-        Binding("n,2,escape", "deny", "拒绝", show=False),
+        Binding("y,1", "allow", "Allow once", show=False),
+        Binding("n,2,escape", "deny", "Deny", show=False),
     ]
 
     class Decided(Message):
@@ -114,7 +114,7 @@ class ApprovalPanel(Vertical):
         yield Static("", id="approval-heading")
         yield SelectableText("", id="approval-content")
         yield Static("", id="approval-overflow")
-        yield OptionList("1. 允许本次 (y)", "2. 拒绝 (n)", id="approval-choices")
+        yield OptionList("1. Allow once (y)", "2. Deny (n)", id="approval-choices")
         yield FooterHint(id="approval-hint")
 
     def show_request(self, request: Approval, label: str) -> None:
@@ -133,7 +133,7 @@ class ApprovalPanel(Vertical):
         if self.request is None:
             return
         width = max(1, self.app.size.width - 2)
-        question = "是否执行命令？" if self.request.tool == "run_command" else "是否允许操作？"
+        question = "Run this command?" if self.request.tool == "run_command" else "Allow this action?"
         heading = Text(f"{self.label} · {question}", no_wrap=True, overflow="ellipsis")
         self.query_one("#approval-heading", Static).update(heading)
         content = approval_content(self.request.tool, self.request.arguments)
@@ -148,10 +148,10 @@ class ApprovalPanel(Vertical):
         self.query_one("#approval-content").display = shown > 0
         overflow = self.query_one("#approval-overflow", Static)
         overflow.display = hidden and budget > 0
-        overflow.update(Text(f"… 省略 {len(rows) - shown} 行 · Ctrl+T 查看全文",
+        overflow.update(Text(f"… {len(rows) - shown} lines omitted · Ctrl+T for details",
                              no_wrap=True, overflow="ellipsis"))
         self.query_one("#approval-hint", FooterHint).update_hint(shortcut_line([
-            ("Enter", "确认"), ("Esc", "停止"), ("↑/↓", "选择"), ("Ctrl+T", "详情"),
+            ("Enter", "Confirm"), ("Esc", "Stop"), ("↑/↓", "Select"), ("Ctrl+T", "Details"),
         ], width))
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
@@ -179,7 +179,7 @@ class DetailsScreen(ModalScreen[None]):
     #details-scroll { height: 1fr; scrollbar-size: 0 0; }
     #details-hint { height: 1; color: $text-muted; }
     """
-    BINDINGS: ClassVar[list[Binding]] = [Binding("escape,q", "close", "返回", show=False)]
+    BINDINGS: ClassVar[list[Binding]] = [Binding("escape,q", "close", "Back", show=False)]
 
     def __init__(self, title: str, content, *, agent_id: str | None = None,
                  request: Approval | None = None) -> None:
@@ -202,8 +202,8 @@ class DetailsScreen(ModalScreen[None]):
     def on_resize(self) -> None:
         if self.is_mounted:
             self.query_one("#details-hint", FooterHint).update_hint(shortcut_line([
-                ("Ctrl+T", "返回"), ("Esc", "停止" if self.app.busy else "返回"),
-                ("↑/↓", "滚动"), ("Ctrl+C", "复制选中文字"),
+                ("Ctrl+T", "Back"), ("Esc", "Stop" if self.app.busy else "Back"),
+                ("↑/↓", "Scroll"), ("Ctrl+C", "Copy selected text"),
             ], max(1, self.app.size.width - 2)))
 
     def update_content(self, content) -> None:
@@ -384,22 +384,22 @@ class PraxisApp(App[int]):
     #hint { height: 1; color: $text-muted; padding: 0 1; }
     """
     BINDINGS: ClassVar[list[Binding]] = [
-        Binding("alt+left", "previous_agent", "上一个 agent", priority=True),
-        Binding("alt+right", "next_agent", "下一个 agent", priority=True),
-        Binding("ctrl+t", "toggle_details", "完整记录", priority=True),
-        Binding("ctrl+q", "request_exit", "退出", priority=True),
-        Binding("ctrl+c", "interrupt", "停止或退出", priority=True),
-        Binding("ctrl+shift+c", "copy_selection", "复制选中文字", priority=True),
-        Binding("escape", "stop_run", "停止本轮", priority=True),
-        Binding("ctrl+r", "resume_pending", "发送保留的补充", priority=True),
-        Binding("f1", "show_shortcuts", "快捷键", priority=True),
-        Binding("shift+left", "edit_pending", "编辑待发送消息", priority=True),
-        Binding("pageup", "scroll_history(-1)", "上翻", priority=True),
-        Binding("pagedown", "scroll_history(1)", "下翻", priority=True),
-        Binding("ctrl+home", "history_edge(False)", "最早记录", priority=True),
-        Binding("ctrl+end", "history_edge(True)", "回到最新", priority=True),
-        Binding("alt+up", "jump_message(-1)", "上一条输入", priority=True),
-        Binding("alt+down", "jump_message(1)", "下一条输入", priority=True),
+        Binding("alt+left", "previous_agent", "Previous agent", priority=True),
+        Binding("alt+right", "next_agent", "Next agent", priority=True),
+        Binding("ctrl+t", "toggle_details", "Full transcript", priority=True),
+        Binding("ctrl+q", "request_exit", "Quit", priority=True),
+        Binding("ctrl+c", "interrupt", "Stop or quit", priority=True),
+        Binding("ctrl+shift+c", "copy_selection", "Copy selected text", priority=True),
+        Binding("escape", "stop_run", "Stop turn", priority=True),
+        Binding("ctrl+r", "resume_pending", "Send retained follow-ups", priority=True),
+        Binding("f1", "show_shortcuts", "Shortcuts", priority=True),
+        Binding("shift+left", "edit_pending", "Edit pending message", priority=True),
+        Binding("pageup", "scroll_history(-1)", "Page up", priority=True),
+        Binding("pagedown", "scroll_history(1)", "Page down", priority=True),
+        Binding("ctrl+home", "history_edge(False)", "First message", priority=True),
+        Binding("ctrl+end", "history_edge(True)", "Jump to latest", priority=True),
+        Binding("alt+up", "jump_message(-1)", "Previous input", priority=True),
+        Binding("alt+down", "jump_message(1)", "Next input", priority=True),
     ]
 
     def __init__(self, sink: ViewEventSink, *, initial_task: str = "") -> None:
@@ -451,7 +451,7 @@ class PraxisApp(App[int]):
         with VerticalScroll(id="transcript"):
             yield Static("", id="welcome")
             yield Vertical(id="blocks")
-        yield Static(Text("↓ 回到最新 · Ctrl+End", no_wrap=True, overflow="ellipsis"), id="jump-latest")
+        yield Static(Text("↓ Jump to latest · Ctrl+End", no_wrap=True, overflow="ellipsis"), id="jump-latest")
         with Vertical(id="controls"):
             with Horizontal(id="agent-bar"):
                 yield Static("‹", id="agents-prev")
@@ -581,7 +581,7 @@ class PraxisApp(App[int]):
                 view = self.store.views["main"]
                 view.state = "cancelled"
                 view.finished_at = monotonic()
-                view._phase = "已停止"
+                view._phase = "Stopped"
             if operation == "clear" and not error:
                 self.sink.discard_pending()
                 self.store = ViewStore()
@@ -598,7 +598,7 @@ class PraxisApp(App[int]):
                     view.committed_blocks.append(Text(error, style="red"))
                     view.state = "failed"
                     view.finished_at = monotonic()
-                    view._phase = "执行出错"
+                    view._phase = "Execution failed"
             changed.add("main")
             field = self._main_screen.query_one("#task", Composer)
             field.disabled = self.closing
@@ -613,8 +613,8 @@ class PraxisApp(App[int]):
             else:
                 self._start(task)
         await self._update_agents()
-        if self.selected_agent_id in changed:
-            await self._draw()
+        if self.selected_agent_id in changed or self._mounted_agent != self.selected_agent_id:
+            await self._draw(switching=self._mounted_agent != self.selected_agent_id)
         if isinstance(self.screen, DetailsScreen) and self.screen.agent_id in changed:
             self.screen.update_content(self.store.get(self.screen.agent_id).transcript_content())
         self._show_approval()
@@ -629,7 +629,7 @@ class PraxisApp(App[int]):
         controls = screen.query_one("#controls")
         controls.set_class(approval, "approving")
         agents = screen.query_one("#agent-bar")
-        agents.display = len(self.store.views) > 1 and not approval
+        agents.display = len(self.store.visible_agent_ids) > 1 and not approval
         screen.query_one("#composer").display = is_main and not approval
         status = screen.query_one("#status", Static)
         running = view.state in {"running", "closing"} or (
@@ -638,12 +638,12 @@ class PraxisApp(App[int]):
         if status.display:
             settling = view.state == "closing" or running and (self.stopping or self.closing)
             if settling:
-                phase = "正在关闭" if self.closing or view.state == "closing" else "正在停止 · 等待操作清理"
+                phase = "Closing" if self.closing or view.state == "closing" else "Stopping · waiting for cleanup"
             else:
-                phase = "处理中" if view.has_active_tools else view.phase
+                phase = "Working" if view.has_active_tools else view.phase
             text = Text(f"• {phase}")
             if view.started_at is not None:
-                text.append(f" · {'已运行' if running else '耗时'} {_duration(view.elapsed())}")
+                text.append(f" · {'Running for' if running else 'Elapsed'} {_duration(view.elapsed())}")
             text.truncate(width, overflow="ellipsis")
             if view._capacity is not None:
                 capacity = view._capacity.copy()
@@ -664,7 +664,7 @@ class PraxisApp(App[int]):
             lines = [Text(f"› {' '.join(item.split())}", no_wrap=True, overflow="ellipsis")
                      for item in pending[:2]]
             if len(pending) > 2:
-                lines.append(Text(f"  … 另有 {len(pending) - 2} 条"))
+                lines.append(Text(f"  … {len(pending) - 2} more"))
             content = Text("\n").join(lines)
             if preview.renderable != content:
                 preview.update(content)
@@ -688,21 +688,21 @@ class PraxisApp(App[int]):
         hint = screen.query_one("#hint", FooterHint)
         hint.display = not approval
         if editor.read_only:
-            actions = [("Alt+←/→", "切换 Agent")]
+            actions = [("Alt+←/→", "Switch agent")]
         elif self.stopping or self.closing:
-            actions = [("", "可继续编辑，停止后发送")]
+            actions = [("", "Keep editing; send after stopping")]
         elif retained and not running:
-            actions = [("Ctrl+R", "发送保留输入"), ("Shift+←", "取回编辑")]
+            actions = [("Ctrl+R", "Send retained input"), ("Shift+←", "Edit pending")]
         elif queued and not editor.text:
-            actions = [("Shift+←", "取回编辑"), ("?", "快捷键")]
+            actions = [("Shift+←", "Edit pending"), ("?", "Shortcuts")]
         elif editor.text:
-            actions = [("Enter", "发送补充" if running else "发送"), ("Shift+Enter", "换行")]
+            actions = [("Enter", "Send follow-up" if running else "Send"), ("Shift+Enter", "New line")]
         elif running:
-            actions = [("Enter", "发送补充")]
+            actions = [("Enter", "Send follow-up")]
         else:
-            actions = [("/", "命令"), ("?", "快捷键")]
+            actions = [("/", "Commands"), ("?", "Shortcuts")]
         if self.busy and not (self.stopping or self.closing):
-            actions.insert(1, ("Esc", "停止本轮"))
+            actions.insert(1, ("Esc", "Stop turn"))
         hint.update_hint(shortcut_line(actions, width))
 
     def on_resize(self) -> None:
@@ -730,19 +730,19 @@ class PraxisApp(App[int]):
         if not widget.display:
             return
         actions = [
-            ("Enter", "发送消息；执行中发送补充"),
-            ("Shift+Enter", "换行；粘贴多行会保留换行"),
-            ("Esc", "停止当前轮次，等待资源清理后继续输入"),
-            ("Ctrl+R", "发送停止后保留的补充"),
-            ("Shift+←", "取回下一条待发送消息，输入框为空时可用"),
-            ("↑/↓", "在首行/末行回看输入历史"),
-            ("PgUp/PgDn · Ctrl+Home/End", "滚动记录 · 最早/最新"),
-            ("Alt+↑/↓", "跳到上一条/下一条用户消息"),
-            ("Ctrl+T", "完整记录；审批时查看完整参数"),
-            ("Alt+←/→", "切换 Agent"),
-            ("Ctrl+C / Ctrl+Shift+C", "拖选后复制文字"),
-            ("Ctrl+C", "无选区时停止或退出"), ("Ctrl+Q", "退出 Praxis"),
-            ("F1 / 空输入时 ?", "快捷键帮助"),
+            ("Enter", "Send a message or follow-up while running"),
+            ("Shift+Enter", "New line; pasted line breaks are preserved"),
+            ("Esc", "Stop the turn; continue after cleanup"),
+            ("Ctrl+R", "Send follow-ups retained after stopping"),
+            ("Shift+←", "Edit the next pending message when the input is empty"),
+            ("↑/↓", "Browse input history from the first/last line"),
+            ("PgUp/PgDn · Ctrl+Home/End", "Scroll history · first/latest"),
+            ("Alt+↑/↓", "Jump to the previous/next user message"),
+            ("Ctrl+T", "Full transcript; full arguments during approval"),
+            ("Alt+←/→", "Switch agent"),
+            ("Ctrl+C / Ctrl+Shift+C", "Copy selected text"),
+            ("Ctrl+C", "Stop or quit when no text is selected"), ("Ctrl+Q", "Quit Praxis"),
+            ("F1 / ? in empty input", "Keyboard shortcuts"),
         ]
         # History, controls, editor padding and footer all need their own rows.
         reserved = 3 + int(editor.styles.height.value) + editor.parent.styles.padding.height
@@ -764,7 +764,7 @@ class PraxisApp(App[int]):
     @staticmethod
     def _matching_commands(text: str) -> list[tuple[str, str]]:
         return [(name, description) for name, description in (
-            ("/clear", "清空当前会话"), ("/help", "快捷键帮助"), ("/exit", "退出 Praxis"),
+            ("/clear", "Clear current chat"), ("/help", "Keyboard shortcuts"), ("/exit", "Quit Praxis"),
         ) if text.startswith("/") and name.startswith(text)]
 
     def action_complete_command(self) -> None:
@@ -819,11 +819,21 @@ class PraxisApp(App[int]):
 
     async def _update_agents(self) -> None:
         agents = self._main_screen.query_one(AgentStrip)
+        visible = set(self.store.visible_agent_ids)
+        if self.selected_agent_id not in visible:
+            self.clear_text_selection()
+            self.selected_agent_id = "main"
+            if self._approval is None:
+                self._main_screen.query_one("#task", Composer).focus()
+        for tab_id, agent_id in list(self._tab_agents.items()):
+            if agent_id not in visible:
+                del self._tab_agents[tab_id]
+                await agents.query_one(f"#{tab_id}", AgentTab).remove()
         known = set(self._tab_agents.values())
         new_tabs = []
-        for agent_id in self.store.views:
-            if agent_id not in known:
-                tab_id = f"agent-{len(self._tab_agents)}"
+        for index, agent_id in enumerate(self.store.views):
+            if agent_id in visible and agent_id not in known:
+                tab_id = f"agent-{index}"
                 self._tab_agents[tab_id] = agent_id
                 new_tabs.append(AgentTab(agent_id, id=tab_id))
         # Register the whole batch before yielding; switching pages may also refresh tabs.
@@ -935,7 +945,7 @@ class PraxisApp(App[int]):
         async with self._view_lock:
             agent_id = event.agent_id
             # A queued selection may refer to an agent removed by a session reset.
-            if agent_id not in self.store.views or agent_id == self.selected_agent_id:
+            if agent_id not in self.store.visible_agent_ids or agent_id == self.selected_agent_id:
                 return
             self.clear_text_selection()
             self._main_screen.query_one("#hint", FooterHint).clear_flash()
@@ -956,13 +966,13 @@ class PraxisApp(App[int]):
             request = self._approval
             view = self.store.get(request.arguments.get("agent_id", "main"))
             self.push_screen(DetailsScreen(
-                f"{view.label} · {request.tool} · 完整参数",
+                f"{view.label} · {request.tool} · Full arguments",
                 Text(json.dumps(request.arguments, ensure_ascii=False, indent=2)), request=request,
             ))
         else:
             view = self.store.get(self.selected_agent_id)
             self.push_screen(DetailsScreen(
-                f"{view.label} · 完整执行记录", view.transcript_content(), agent_id=view.agent_id,
+                f"{view.label} · Full execution transcript", view.transcript_content(), agent_id=view.agent_id,
             ))
 
     def _select_relative(self, direction: int) -> None:
@@ -986,10 +996,10 @@ class PraxisApp(App[int]):
         if not task or self.closing or self.agent is None or self.selected_agent_id != "main":
             return
         if self.stopping and task.lower() != "/exit":
-            self.notify("正在停止；输入已保留，结束后按 Enter 发送。")
+            self.notify("Stopping. Input retained; press Enter to send after cleanup.")
             return
         if task.lower() == "/clear" and self.busy:
-            self.notify("请等待当前任务结束后再清空历史。", severity="warning")
+            self.notify("Wait for the current task to finish before clearing history.", severity="warning")
             return
         event.editor.text = ""
         self._shortcuts_open = False
@@ -1096,10 +1106,10 @@ class PraxisApp(App[int]):
             if not self.is_headless:
                 pyperclip.copy(text)
         except pyperclip.PyperclipException:
-            hint.flash("复制失败，请重试", error=True)
+            hint.flash("Copy failed. Try again.", error=True)
             return
         self._clipboard = text
-        hint.flash("已复制到剪贴板")
+        hint.flash("Copied to clipboard")
 
     def _copy_selection(self) -> bool:
         text = self._selection_widget.selected_text if self._selection_widget is not None else ""

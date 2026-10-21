@@ -83,17 +83,17 @@ def test_parallel_tools_keep_remaining_activity_and_full_results():
     for call_id in ("one", "two"):
         view.consume(ToolCallPrepared("t", call_id, "read_file", {"relative_path": call_id}, False))
         view.consume(ToolStarted("t", call_id, "read_file"))
-    assert view.phase == "执行 2 个工具"
+    assert view.phase == "Running 2 tools"
     output = "full contents\n" * 100
     view.consume(ToolFinished("t", "one", "read_file", ToolResult(True, output)))
-    assert view.phase == "读取文件"
+    assert view.phase == "Reading file"
     assert view.committed_blocks[1].output == output
     assert view.committed_blocks[2].state == "running"
     view.consume(ToolFinished("t", "two", "read_file", ToolResult(False, "missing file")))
     assert view.state == "running"  # A tool error is not an agent failure.
     view.consume(TurnFailed("t", "RuntimeError", "stopped", occurred_at=35))
     view.set_status(ChildAgentStatus("parent", "a", "idle", occurred_at=90))
-    assert view.phase == "执行出错"
+    assert view.phase == "Execution failed"
     assert view.elapsed(now=200) == 25
 
 
@@ -116,7 +116,7 @@ def test_background_report_does_not_clear_or_get_deleted_by_root_stream():
     assert "still writing" in text_of(store.views["main"])
     store.accept(ModelRequestCompleted("main", 1, ModelResponse((), "corrected answer", ())))
     text = text_of(store.views["main"])
-    assert "收到新消息" in text
+    assert "new message" in text
     assert "corrected answer" in text
     assert "draft paragraph" not in text
 
@@ -130,7 +130,7 @@ def test_page_preserves_plan_capacity_compaction_and_partial_answer_on_failure()
     view.consume(PlanUpdated("turn", (PlanStep("Inspect logs", PlanStepStatus.IN_PROGRESS),)))
     assert "Inspect logs" in text_of(view)
     view.consume(ContextCompaction("turn", "started", 110000))
-    assert view.phase == "正在压缩上下文"
+    assert view.phase == "Compacting context"
     view.consume(ContextCompaction("turn", "chunk_started", 110000,
                                    round_number=1, chunk_number=2, chunk_count=3))
     assert "2/3" in view.phase
@@ -151,7 +151,7 @@ def test_page_preserves_plan_capacity_compaction_and_partial_answer_on_failure()
     assert "73%" not in rendered  # Capacity belongs to the footer, not the conversation.
     view.consume(TurnStarted("next", "retry"))
     assert view._capacity is None
-    assert view.phase == "等待模型响应"
+    assert view.phase == "Waiting for model response"
 
 
 def test_worker_stream_and_status_arrive_without_parent_pump_and_trace_is_not_duplicated(tmp_path):

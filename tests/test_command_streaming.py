@@ -163,7 +163,7 @@ def test_preview_is_bounded_and_worker_updates_do_not_write_terminal():
     console.print(tool_preview((block,)))
     text = output.getvalue()
     assert "line 999" in text and "line 0\n" in text
-    assert "省略" in text
+    assert "omitted" in text
     assert len(text.splitlines()) == 6  # Header plus a bounded head/tail preview.
     preview.clear()
     assert not preview.outputs

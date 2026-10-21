@@ -62,6 +62,15 @@ def summary_sources(messages: Sequence[dict[str, object]]) -> list[dict[str, obj
         if payload.get("type") == "reasoning":
             continue
         payload.pop("reasoning_content", None)
+        field = "output" if payload.get("type") == "function_call_output" else "content"
+        if isinstance(payload.get(field), list):
+            # Summary sources are JSON text; encoded media is not readable evidence.
+            # Keep the original attachments in history, only summarize their presence.
+            payload[field] = [
+                {"type": "input_text", "text": f"[{block['type']} attachment; binary omitted from text summary.]"}
+                if block.get("type") in {"input_image", "input_file"} else block
+                for block in payload[field]
+            ]
         if key:
             source[key] = payload
         else:

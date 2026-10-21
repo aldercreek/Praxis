@@ -468,6 +468,12 @@ def _build_function_call_output(
     result: ToolResult,
 ) -> dict[str, object]:
     """把工具结果转换成模型接口要求的输入项。"""
+    if result.model_content is not None:
+        return {
+            "type": "function_call_output", "call_id": function_call.call_id,
+            "output": [{"type": "input_text", "text": json.dumps({"success": result.success})},
+                       *result.model_content],
+        }
     return {
         "type": "function_call_output",
         "call_id": function_call.call_id,
@@ -504,6 +510,7 @@ def create_default_agent(
     )
 
     config = ModelConfig.from_env()
+    collaboration_config = MultiAgentConfig.from_env() if enable_multi_agent else None
     runtime_context = collect_runtime_context(workspace)
     skills = discover_skills(runtime_context.workspace_root)
     instructions = build_instructions(
@@ -563,14 +570,18 @@ def create_default_agent(
     agent.reset_code_worker = lambda: code_runtime.release_agent("parent")
     agent.close_callbacks = (code_runtime.close, *agent.close_callbacks)
     agent.tool_registry.register(create_skill_tool(skills, max_chars=config.context_policy.max_tool_output_chars))
-    mcp = MCPConnections()
+    mcp = None
     try:
+        mcp = MCPConnections()
         mcp.start()
         release_mcp_tools = mcp.register(agent.tool_registry, check_execution=control.check)
         agent.mcp_catalog = mcp.catalog()
     except BaseException:
-        mcp.close()
-        agent.close()
+        try:
+            if mcp is not None:
+                mcp.close()
+        finally:
+            agent.close()
         raise
     agent.close_callbacks = (release_mcp_tools, mcp.close, *agent.close_callbacks)
 
@@ -615,7 +626,7 @@ def create_default_agent(
             close_callbacks=(lambda: code_runtime.release_agent(agent_id), release_worker_tools, client.close, summary.close),
         )
 
-    collaboration = AgentRuntime(create_worker, MultiAgentConfig.from_env(), workspace=runtime_context.workspace_root,
+    collaboration = AgentRuntime(create_worker, collaboration_config, workspace=runtime_context.workspace_root,
                                  approve_tool_call=approve_tool_call, live_output_sink=event_sink)
     agent.collaboration = collaboration
     agent.receive_messages = lambda accept: collaboration.receive("parent", accept)

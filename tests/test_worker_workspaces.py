@@ -77,7 +77,7 @@ def test_absolute_deliveries_from_multiple_directories_remain_readable(tmp_path)
         searched = registry.execute("search_text", {
             "relative_path": str(directory), "query": name,
         }, context=context)
-        assert searched.success and json.loads(searched.output)["matches"][0]["path"] == "report.txt"
+        assert searched.success and json.loads(searched.output)["results"] == [f"report.txt:1:{name}"]
         write = registry.execute("write_file", {"relative_path": str(directory / "bad.txt"), "content": "bad"}, context=context)
         assert not write.success and not (directory / "bad.txt").exists()
 

@@ -127,10 +127,20 @@ _FIND_FILES_PARAMETERS: dict[str, object] = {
 _SEARCH_TEXT_PARAMETERS: dict[str, object] = {
     "type": "object",
     "properties": {
-        "query": {"type": "string", "minLength": 1, "description": "Case-sensitive literal single-line text to locate; no regex."},
+        "query": {"type": "string", "minLength": 1, "description": "Single-line search text; interpreted as a ripgrep regular expression only when regex=true."},
         "relative_path": {"type": "string", "description": "Directory or file, relative to the workspace or absolute. Defaults to '.'."},
         "file_pattern": {"type": "string", "minLength": 1, "description": "Positive ripgrep glob relative to the search directory; defaults to '*'."},
         "ignore_patterns": deepcopy(_FIND_FILES_PARAMETERS["properties"]["ignore_patterns"]),
+        "mode": {"type": "string", "enum": ["content", "files", "count"],
+                 "description": "content (default): matching lines with optional context; files: unique paths; count: matching-line counts per file."},
+        "regex": {"type": "boolean", "description": "Enable ripgrep regex, default false. No multiline, look-around or backreferences."},
+        "case_sensitive": {"type": "boolean", "description": "Case-sensitive search, default true."},
+        "context_lines": {"type": "integer", "minimum": 0,
+                          "description": "Lines before and after each selected matching line, default 0. Only used in content mode; context does not advance pagination."},
+        "limit": {"type": "integer", "minimum": 1,
+                  "description": "Maximum matching lines (content) or file records (files/count) per page, default 50."},
+        "offset": {"type": "integer", "minimum": 0,
+                   "description": "Skip matching lines (content) or file records (files/count), default 0. Continue using next_offset with all other arguments unchanged."},
     },
     "required": ["query"],
     "additionalProperties": False,
@@ -230,6 +240,8 @@ class ToolResult:
     output: str
     structured_output: dict[str, object] | None = None
     file_change: FileChange | None = None
+    # Model-facing content blocks; output remains the readable UI/error summary.
+    model_content: list[dict[str, object]] | None = None
 
 
 class ToolRegistry:
@@ -286,7 +298,7 @@ class ToolRegistry:
             return ToolResult(False, f"unknown tool: {name}")
         return ToolResult(
             False,
-            f"{detail}\n{name} 未执行，请修正以上参数后重试。",
+            f"{detail}\n{name} was not executed. Correct the arguments above before retrying.",
         )
 
     def execute(
@@ -314,7 +326,7 @@ class ToolRegistry:
         if tool is None:
             return ToolResult(False, f"unknown tool: {name}")
         if not isinstance(arguments, Mapping):
-            return self.argument_error(name, "参数必须是 JSON 对象。")
+            return self.argument_error(name, "Arguments must be a JSON object.")
 
         keyword_arguments = dict(arguments)
         issues = _argument_issues(tool, keyword_arguments)
@@ -340,12 +352,12 @@ def _argument_issues(tool: Tool, arguments: Mapping[str, object]) -> list[str]:
         if name not in properties:
             hint = ""
             if name == "max_output_tokens" and "max_output_characters" in properties:
-                hint = "返回长度请使用 max_output_characters，单位为字符，不是 token。"
+                hint = "Use max_output_characters to limit output length in characters, not tokens."
             else:
                 matches = get_close_matches(name, properties, n=1, cutoff=0.75)
                 if matches:
-                    hint = f"是否要使用 {matches[0]}？"
-            issues.append(f"未知参数 {name}：请删除该字段。{hint}")
+                    hint = f"Did you mean {matches[0]}?"
+            issues.append(f"Unknown argument {name}: remove this field. {hint}")
 
     # Python 默认参数仍然可以省略，不把模型协议的 required 当成新的运行时限制。
     parameters = list(signature(tool.handler).parameters.values())[1:]
@@ -356,7 +368,7 @@ def _argument_issues(tool: Tool, arguments: Mapping[str, object]) -> list[str]:
             and parameter.name not in arguments
         ):
             description = properties.get(parameter.name, {}).get("description", "")
-            issues.append(f"缺少必需参数 {parameter.name}。{description}")
+            issues.append(f"Missing required argument {parameter.name}. {description}")
 
     types = {"string": str, "integer": int, "number": (int, float),
              "boolean": bool, "array": list, "object": Mapping}
@@ -370,15 +382,15 @@ def _argument_issues(tool: Tool, arguments: Mapping[str, object]) -> list[str]:
             not isinstance(value, expected)
             or kind in ("integer", "number") and isinstance(value, bool)
         ):
-            issues.append(f"{name} 应为 {kind}，实际类型为 {type(value).__name__}。")
+            issues.append(f"{name} must be {kind}; received {type(value).__name__}.")
             continue
         if "enum" in rule and value not in rule["enum"]:
-            issues.append(f"{name} 必须是以下值之一：{rule['enum']}。")
+            issues.append(f"{name} must be one of: {rule['enum']}.")
         if kind in ("integer", "number"):
             if "minimum" in rule and value < rule["minimum"]:
-                issues.append(f"{name}={value} 小于下限 {rule['minimum']}。")
+                issues.append(f"{name}={value} is below the minimum {rule['minimum']}.")
             if "maximum" in rule and value > rule["maximum"]:
-                issues.append(f"{name}={value} 超过上限 {rule['maximum']}。")
+                issues.append(f"{name}={value} exceeds the maximum {rule['maximum']}.")
     return issues
 
 
@@ -436,6 +448,11 @@ def create_default_registry(policy: ContextPolicy | None = None, *,
     def list_directory(context: ToolContext, relative_path: str = ".") -> ToolResult:
         workspace, relative_path = _read_location(context, relative_path)
         data = list_files(workspace, relative_path)
+        return ToolResult(True, json.dumps(data, ensure_ascii=False), structured_output=data)
+
+    def search_with_limits(context: ToolContext, **arguments) -> ToolResult:
+        workspace, arguments["relative_path"] = _read_location(context, arguments.get("relative_path", "."))
+        data = search_text(workspace, **arguments, character_limit=policy.max_tool_output_chars)
         return ToolResult(True, json.dumps(data, ensure_ascii=False), structured_output=data)
 
     def find_paths(context: ToolContext, file_pattern: str, relative_path: str = ".",
@@ -530,13 +547,16 @@ def create_default_registry(policy: ContextPolicy | None = None, *,
             name="search_text",
             programmatic=True,
             description=(
-                "Locate all non-overlapping literal matches in UTF-8 files. Returns a matches object "
-                "with path, one-based line and zero-based character offset for each occurrence; "
-                "no source text. Use read_file to inspect. No size/result caps or automatic ignores; "
-                "only ignore_patterns excludes paths. Same-line occurrences are separate records."
+                "Search UTF-8 files using literal text or regex. Returns {results, next_offset}; null next_offset means no more results. "
+                "content results are path:line:text strings; context uses path-line-text and separated regions use --. "
+                "Pagination counts matching lines, not occurrences, context or separators. Overlapping context is merged. "
+                "files returns paths; count returns {path, count} records counting matching lines, not occurrences. "
+                "Results are path/line ordered; rerunning after file changes may shift pages. Output has a character budget; "
+                "use next_offset instead of assuming a full page. Oversized lines have marked previews; use read_file for full text. "
+                "Includes hidden and ignored files; only ignore_patterns excludes paths."
             ),
             parameters=_SEARCH_TEXT_PARAMETERS,
-            handler=_inject_workspace(search_text, external_reads=True),
+            handler=search_with_limits,
             strict=False,
             parallel_safe=True,
         )

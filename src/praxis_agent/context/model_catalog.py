@@ -171,6 +171,59 @@ MODEL_LIMIT_CATALOG: Mapping[str, ModelLimits] = MappingProxyType(
 
 DEFAULT_MODEL_LIMITS = ModelLimits(context_window_tokens=128_000)
 
+
+@dataclass(frozen=True, slots=True)
+class ModelInputCapabilities:
+    """Native model inputs; the active API can impose narrower restrictions."""
+
+    image_mime_types: tuple[str, ...] = ()
+    pdf: bool = False
+    audio: bool = False
+
+
+_IMAGES = ("image/png", "image/jpeg", "image/webp", "image/gif")
+_VISION = ModelInputCapabilities(_IMAGES)
+_VISION_PDF = ModelInputCapabilities(_IMAGES, pdf=True)
+_GEMINI_INPUT = ModelInputCapabilities(
+    ("image/png", "image/jpeg", "image/webp", "image/heic", "image/heif"), pdf=True, audio=True,
+)
+_TEXT_INPUT = ModelInputCapabilities()
+
+# Checked 2026-10-21. Exact model entries, not assumptions based on provider prefixes.
+# https://developers.openai.com/api/docs/models
+# https://platform.claude.com/docs/en/about-claude/models/overview
+# https://ai.google.dev/gemini-api/docs/models
+# https://api-docs.deepseek.com/quick_start/pricing
+# https://help.aliyun.com/zh/model-studio/vision
+# https://models.dev/api.json (cross-check of model-specific modalities)
+MODEL_INPUT_CATALOG: Mapping[str, ModelInputCapabilities] = MappingProxyType({
+    **dict.fromkeys((
+        "gpt-6-astra", "gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5",
+        "claude-fable-5-1", "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5",
+        "qwen3.8-max",
+    ), _VISION_PDF),
+    **dict.fromkeys((
+        "gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite",
+        "gemini-3.1-pro-preview", "gemini-3.1-pro-preview-customtools", "gemini-3-flash-preview",
+        "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite",
+    ), _GEMINI_INPUT),
+    **dict.fromkeys((
+        "deepseek-flash", "deepseek-v4.1-flash", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp",
+        "qwen3.8-flash", "qwen3.7-plus", "qwen3.7-flash", "qwen3.6-plus", "qwen3.6-flash",
+        "qwen3.5-plus", "qwen3.5-flash",
+    ), _VISION),
+    **dict.fromkeys((
+        "deepseek-v4-pro", "qwen3-coder-plus", "qwen3-coder-flash", "qwen-plus", "qwen-flash",
+        "qwen3-coder-next", "qwen3-coder-480b-a35b-instruct", "qwen3-coder-30b-a3b-instruct",
+    ), _TEXT_INPUT),
+})
+
+
+def resolve_model_inputs(model: str) -> ModelInputCapabilities:
+    """Unknown models and automatic routing default to text, without guessing vision."""
+    key = _catalog_model_name(model)
+    return MODEL_INPUT_CATALOG.get(key, _TEXT_INPUT)
+
 _SNAPSHOT_SUFFIXES = (
     re.compile(r"-\d{4}-\d{2}-\d{2}$"),
     re.compile(r"-\d{8}$"),
@@ -208,13 +261,16 @@ def resolve_model_limits(
 
 
 def _find_catalog_limits(model: str) -> ModelLimits | None:
+    return MODEL_LIMIT_CATALOG.get(_catalog_model_name(model))
+
+
+def _catalog_model_name(model: str) -> str:
     normalized_model = model.strip().casefold().rsplit("/", 1)[-1]
-    limits = MODEL_LIMIT_CATALOG.get(normalized_model)
-    if limits is not None:
-        return limits
+    if normalized_model in MODEL_LIMIT_CATALOG:
+        return normalized_model
 
     for suffix in _SNAPSHOT_SUFFIXES:
         base_model = suffix.sub("", normalized_model)
         if base_model != normalized_model:
-            return MODEL_LIMIT_CATALOG.get(base_model)
-    return None
+            return base_model
+    return normalized_model

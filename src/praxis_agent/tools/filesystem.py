@@ -1,4 +1,3 @@
-import base64
 import json
 import os
 import shutil
@@ -10,7 +9,9 @@ from difflib import unified_diff
 from pathlib import Path
 
 from praxis_agent.context.budgets import DEFAULT_BUDGETS
+from praxis_agent.tools.file_lock import file_transaction
 from praxis_agent.tools.text_file import TextFile, normalize_newlines
+from praxis_agent.tools.text_search import search_page
 
 _SEARCH_TIMEOUT_SECONDS = 30
 
@@ -33,7 +34,7 @@ class FileChange:
         for index, line in enumerate(lines):
             rendered.append(line.rstrip("\r\n"))
             if index > 1 and line.startswith(("+", "-", " ")) and not line.endswith("\n"):
-                rendered.append("\\ 文件末尾无换行")
+                rendered.append("\\ No newline at end of file")
         return cls(path, "\n".join(rendered),
                    sum(line.startswith("+") for line in lines[2:]),
                    sum(line.startswith("-") for line in lines[2:]))
@@ -202,62 +203,109 @@ def edit_file(
     edits: list[Mapping[str, object]],
 ) -> FileChange:
     """按顺序应用多个精确替换，并在全部成功后写入文件。"""
+    def failure(reason: str, recovery: str, index: int | None = None) -> str:
+        position = f"Edit {index}/{len(edits)} failed. " if index is not None else ""
+        return (f"edit_file {relative_path!r}: {reason}\n"
+                f"{position}No changes from this call were written (including earlier edits).\n{recovery}")
+
     if not isinstance(edits, list) or not edits:
-        raise ValueError("edits must be a non-empty list")
+        raise ValueError(failure("edits must be a non-empty list",
+                                 "Provide at least one replacement with old_text and new_text. Do not call edit_file when no change is needed."))
 
-    file_path = _require_workspace_file(workspace, relative_path)
-    source = TextFile.read(file_path)
-    original_content = normalize_newlines(source.content)
-    updated_content = original_content
+    def path_failure(error: OSError | ValueError) -> str:
+        if isinstance(error, FileNotFoundError):
+            recovery = "Confirm the path with list_files or find_files. Use write_file if you need to create a new file."
+        elif isinstance(error, PermissionError):
+            recovery = "Cannot access the file. Check read permissions and whether another process has locked it before retrying."
+        else:
+            recovery = "Provide a relative file path inside the workspace, not a directory or a path outside it. Confirm the target with list_files or find_files."
+        return failure(str(error), recovery)
 
-    # 先在内存中完成全部校验，避免后续替换失败时留下部分修改。
-    for index, edit in enumerate(edits, start=1):
-        if not isinstance(edit, Mapping):
-            raise TypeError(f"edit {index} must be an object")
-        if set(edit) != {"old_text", "new_text"}:
-            raise ValueError(
-                f"edit {index} must contain only old_text and new_text"
-            )
+    try:
+        file_path = _require_workspace_file(workspace, relative_path)
+    except (OSError, ValueError) as error:
+        raise type(error)(path_failure(error)) from error
+    with file_transaction(file_path) as check_cancelled:
+        try:
+            source = TextFile.read(file_path)
+        except OSError as error:
+            raise type(error)(path_failure(error)) from error
+        original_content = normalize_newlines(source.content)
+        updated_content = original_content
 
-        old_text = edit["old_text"]
-        new_text = edit["new_text"]
-        if not isinstance(old_text, str) or not isinstance(new_text, str):
-            raise TypeError(
-                f"edit {index} old_text and new_text must be strings"
-            )
-        old_text = normalize_newlines(old_text)
-        new_text = normalize_newlines(new_text)
-        if not old_text:
-            raise ValueError(f"edit {index} old_text must not be empty")
-        if old_text == new_text:
-            raise ValueError(
-                f"edit {index} new_text must differ from old_text"
-            )
+        # 先在内存中完成全部校验，避免后续替换失败时留下部分修改。
+        for index, edit in enumerate(edits, start=1):
+            if not isinstance(edit, Mapping):
+                raise TypeError(failure(f"edit {index} must be an object",
+                                        "Replace this item with an object containing old_text and new_text.", index))
+            if set(edit) != {"old_text", "new_text"}:
+                missing = sorted({"old_text", "new_text"} - set(edit))
+                extra = sorted(repr(key) for key in set(edit) - {"old_text", "new_text"})
+                raise ValueError(
+                    failure(f"edit {index} must contain only old_text and new_text; "
+                            f"missing fields: {missing}; unexpected fields: {extra}",
+                            "Add missing fields and remove extra fields. Both old_text and new_text must be strings.", index)
+                )
 
-        match_count = updated_content.count(old_text)
-        if match_count == 0:
-            raise ValueError(f"edit {index} old_text was not found")
-        if match_count > 1:
-            raise ValueError(
-                f"edit {index} old_text must match exactly once; "
-                f"found {match_count} matches"
-            )
-        updated_content = updated_content.replace(old_text, new_text, 1)
+            old_text = edit["old_text"]
+            new_text = edit["new_text"]
+            if not isinstance(old_text, str) or not isinstance(new_text, str):
+                raise TypeError(
+                    failure(f"edit {index} old_text and new_text must be strings "
+                            f"(got {type(old_text).__name__} and {type(new_text).__name__})",
+                            "Provide text strings. To delete text, use an empty string for new_text instead of null.", index)
+                )
+            old_text = normalize_newlines(old_text)
+            new_text = normalize_newlines(new_text)
+            if not old_text:
+                raise ValueError(failure(f"edit {index} old_text must not be empty",
+                                         "To insert content, use unique existing text in old_text and include it with the new content in new_text. Use write_file to create a file.", index))
+            if old_text == new_text:
+                raise ValueError(
+                    failure(f"edit {index} new_text must differ from old_text",
+                            "Remove this unchanged replacement. If the file already has the desired content, no edit is needed.", index)
+                )
 
-    if updated_content == original_content:
-        raise ValueError("edits must produce a file change")
+            match_count = updated_content.count(old_text)
+            if match_count == 0:
+                recovery = "Read the latest content with read_file and rebuild old_text from the actual text, including spaces, indentation, and punctuation."
+                if index > 1:
+                    recovery += " Edits in a batch are applied in order. Each old_text must match the content after earlier replacements."
+                raise ValueError(failure(f"edit {index} old_text was not found", recovery, index))
+            if match_count > 1:
+                raise ValueError(
+                    failure(f"edit {index} old_text must match exactly once; found {match_count} matches",
+                            "Use read_file to inspect the content. Add enough surrounding context to make old_text unique, and preserve unchanged context in new_text.", index)
+                )
+            updated_content = updated_content.replace(old_text, new_text, 1)
 
-    saved = source.write(file_path, updated_content)
-    return FileChange.between(relative_path, source.content, saved)
+        if updated_content == original_content:
+            raise ValueError(failure("edits must produce a file change",
+                                     "These replacements cancel each other out, leaving the original content. Check the edit order and remove conflicting replacements. Do not retry if no change is needed."))
+
+        check_cancelled()
+        try:
+            saved = source.write(file_path, updated_content)
+        except OSError as error:
+            # A disk error may occur after truncation or a partial write. Do
+            # not reuse the pre-save guarantee or imply automatic rollback.
+            raise type(error)(
+                f"edit_file {relative_path!r}: write failed: {error}\n"
+                "The write failed; the file may have been partially modified. "
+                "Check write permissions, file locks, and disk space. Inspect the current file with read_file before recovering; do not blindly replay the batch."
+            ) from error
+        return FileChange.between(relative_path, source.content, saved)
 
 
 def write_file(workspace: Path, relative_path: str, content: str) -> FileChange:
     """保留已有文件的编码和换行；新文件使用无 BOM 的 UTF-8、LF。"""
     workspace_root = _resolve_workspace(workspace)
     file_path = _resolve_workspace_path(workspace_root, relative_path)
-    source = TextFile.read(file_path) if file_path.exists() else TextFile()
-    saved = source.write(file_path, content)
-    return FileChange.between(relative_path, source.content, saved)
+    with file_transaction(file_path) as check_cancelled:
+        source = TextFile.read(file_path) if file_path.exists() else TextFile()
+        check_cancelled()
+        saved = source.write(file_path, content)
+        return FileChange.between(relative_path, source.content, saved)
 
 
 def list_files(workspace: Path, relative_path: str = ".") -> dict[str, object]:
@@ -316,40 +364,37 @@ def search_text(
     relative_path: str = ".",
     file_pattern: str = "*",
     ignore_patterns: list[str] | None = None,
+    mode: str = "content",
+    regex: bool = False,
+    case_sensitive: bool = True,
+    context_lines: int = 0,
+    limit: int = 50,
+    offset: int = 0,
+    *,
+    character_limit: int = DEFAULT_BUDGETS["max_tool_output_chars"],
 ) -> dict[str, object]:
-    """Return every non-overlapping literal match as path/line/character offset."""
+    """Search a page of matching lines, files, or per-file matching-line counts."""
     if not isinstance(query, str) or not query or "\n" in query or "\r" in query:
         raise ValueError("query must be a non-empty single-line string")
+    if mode not in ("content", "files", "count"):
+        raise ValueError("mode must be content, files or count")
+    for name, value in (("regex", regex), ("case_sensitive", case_sensitive)):
+        if not isinstance(value, bool):
+            raise TypeError(f"{name} must be a boolean")
+    for name, value, minimum in (("context_lines", context_lines, 0), ("limit", limit, 1),
+                                 ("offset", offset, 0), ("character_limit", character_limit, 1)):
+        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+            raise ValueError(f"{name} must be an integer >= {minimum}")
     globs = _glob_arguments(file_pattern, ignore_patterns)
     workspace_root = _resolve_workspace(workspace)
     target = _resolve_workspace_path(workspace_root, relative_path)
     if not target.exists():
-        raise FileNotFoundError(f"path does not exist: {relative_path}")
+        raise FileNotFoundError(f"file or directory does not exist: {relative_path}")
     if not target.is_dir() and not target.is_file():
         raise ValueError(f"path is not a file or directory: {relative_path}")
     directory = target if target.is_dir() else target.parent
-    target_argument = "." if target.is_dir() else target.name
-    output = _run_ripgrep(directory, ["--json", "--fixed-strings", "--case-sensitive",
-        "--hidden", "--no-ignore", "--text", "--encoding", "utf-8", "--path-separator", "/",
-        *globs, "--", query, target_argument])
-
-    def decode(value):
-        return value["text"] if "text" in value else base64.b64decode(value["bytes"]).decode("utf-8")
-
-    matches = []
-    for record in output.splitlines():
-        event = json.loads(record)
-        if event["type"] != "match":
-            continue
-        data = event["data"]
-        path = (directory / decode(data["path"])).relative_to(workspace_root).as_posix()
-        line = decode(data["lines"]).encode("utf-8")
-        previous_byte = 0
-        character_offset = 0
-        for match in data["submatches"]:
-            byte_offset = match["start"]
-            character_offset += len(line[previous_byte:byte_offset].decode("utf-8"))
-            matches.append({"path": path, "line": data["line_number"], "offset": character_offset})
-            previous_byte = byte_offset
-    matches.sort(key=lambda match: (match["path"], match["line"], match["offset"]))
-    return {"matches": matches}
+    return search_page(
+        workspace_root, directory, "." if target.is_dir() else target.name, query, globs,
+        mode=mode, regex=regex, case_sensitive=case_sensitive, context_lines=context_lines,
+        limit=limit, offset=offset, character_limit=character_limit, timeout=_SEARCH_TIMEOUT_SECONDS,
+    )

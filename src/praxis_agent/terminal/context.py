@@ -9,6 +9,6 @@ def capacity_footer(status: ContextStatus | None) -> Text | None:
     """展示本次请求已有的容量估算，不解析模型提示词或重复计算。"""
     if status is None:
         return None
-    line = Text("上下文 ≈ ", no_wrap=True, overflow="ellipsis")
+    line = Text("Context ≈ ", no_wrap=True, overflow="ellipsis")
     line.append(f"{status.usage_percent:g}%", style="cyan")
     return line

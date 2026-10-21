@@ -1,12 +1,14 @@
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from praxis_agent.context.capacity import ContextPolicy
 from praxis_agent.context.budgets import DEFAULT_BUDGETS
 from praxis_agent.context.model_catalog import (
     ModelLimitOverrides,
     ModelLimits,
+    ModelInputCapabilities,
+    resolve_model_inputs,
     resolve_model_limits,
 )
 
@@ -15,7 +17,6 @@ _DEFAULT_ADA_BASE_URL = (
     "https://ada-cli-go.ctripcorp.com/coding-plan/openai/v1"
 )
 _DEFAULT_ADA_MODEL = "auto(free)"
-_DEFAULT_LANGFUSE_BASE_URL = "https://langfuse.flight.ctripcorp.com"
 DEFAULT_MAX_PARALLEL_TOOLS = 4
 
 
@@ -33,8 +34,11 @@ class ModelConfig:
     )
     context_policy: ContextPolicy | None = None
     max_parallel_tools: int = DEFAULT_MAX_PARALLEL_TOOLS
+    input_capabilities: ModelInputCapabilities | None = None
 
     def __post_init__(self) -> None:
+        if self.input_capabilities is None:
+            object.__setattr__(self, "input_capabilities", resolve_model_inputs(self.model))
         if self.max_parallel_tools < 1:
             raise ValueError("max_parallel_tools must be at least 1")
         if self.context_policy is None:
@@ -93,61 +97,37 @@ class ModelConfig:
             ),
         )
         max_parallel_tools = _read_optional_integer(values, "PRAXIS_MAX_PARALLEL_TOOLS")
+        inputs = resolve_model_inputs(model)
+        image_input = _read_optional_bool(values, "ADA_MODEL_IMAGE_INPUT")
+        pdf_input = _read_optional_bool(values, "ADA_MODEL_PDF_INPUT")
+        if image_input is not None:
+            inputs = replace(inputs, image_mime_types=(
+                (inputs.image_mime_types or ("image/png", "image/jpeg", "image/webp", "image/gif"))
+                if image_input else ()
+            ))
+        if pdf_input is not None:
+            inputs = replace(inputs, pdf=pdf_input)
         return cls(
             api_key=api_key,
             model=model,
             base_url=base_url,
             model_limit_overrides=model_limit_overrides,
             context_policy=context_policy,
+            input_capabilities=inputs,
             max_parallel_tools=(DEFAULT_MAX_PARALLEL_TOOLS
                                 if max_parallel_tools is None else max_parallel_tools),
         )
 
 
-@dataclass(frozen=True, slots=True)
-class LangfuseConfig:
-    """保存携程内部 Langfuse 客户端所需的配置。"""
-
-    public_key: str = field(repr=False)
-    secret_key: str = field(repr=False)
-    base_url: str = _DEFAULT_LANGFUSE_BASE_URL
-    environment: str = "development"
-
-    @classmethod
-    def from_env(
-        cls,
-        environ: Mapping[str, str] | None = None,
-    ) -> "LangfuseConfig | None":
-        """读取 Langfuse 配置；没有配置密钥时表示不启用观测。"""
-        values = os.environ if environ is None else environ
-        public_key = values.get("LANGFUSE_PUBLIC_KEY", "").strip()
-        secret_key = values.get("LANGFUSE_SECRET_KEY", "").strip()
-
-        if not public_key and not secret_key:
-            return None
-        if not public_key:
-            raise ValueError(
-                "LANGFUSE_PUBLIC_KEY is required when Langfuse is configured"
-            )
-        if not secret_key:
-            raise ValueError(
-                "LANGFUSE_SECRET_KEY is required when Langfuse is configured"
-            )
-
-        base_url = (
-            values.get("LANGFUSE_BASE_URL", "").strip()
-            or _DEFAULT_LANGFUSE_BASE_URL
-        )
-        environment = (
-            values.get("LANGFUSE_TRACING_ENVIRONMENT", "").strip()
-            or "development"
-        )
-        return cls(
-            public_key=public_key,
-            secret_key=secret_key,
-            base_url=base_url,
-            environment=environment,
-        )
+def _read_optional_bool(values: Mapping[str, str], name: str) -> bool | None:
+    raw = values.get(name, "").strip().lower()
+    if not raw:
+        return None
+    if raw in {"true", "1"}:
+        return True
+    if raw in {"false", "0"}:
+        return False
+    raise ValueError(f"{name} must be true/false or 1/0")
 
 
 def _read_optional_integer(

@@ -159,7 +159,8 @@ def test_compute_timeout_discards_only_affected_worker(context, tmp_path):
         runtime.close()
 
 
-def test_release_during_execution_waits_for_callbacks_and_reaps_worker(context, tmp_path):
+@pytest.mark.parametrize("attempt", range(20))
+def test_release_during_execution_waits_for_callbacks_and_reaps_worker(context, tmp_path, attempt):
     from praxis_agent.execution import current_run, run_operation
 
     runtime = CodeRuntime(output_dir=tmp_path / "logs")

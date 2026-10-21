@@ -98,7 +98,7 @@ def test_tool_title_is_correct_in_first_frame_and_completion_keeps_widget(
             record = app.query_one(ToolRecord)
             title = record.query_one(".tool-title", Static)
             assert frames
-            assert all(any("• 执行 python demo.py" in row for row in rows) for rows, _, _ in frames)
+            assert all(any("• Run python demo.py" in row for row in rows) for rows, _, _ in frames)
             assert_title_marker_color(title, "#a0a0a0")
             app.sink.emit(ToolOutputDelta("turn", "cmd", "stdout", "line-1\nline-2\n"))
             await wait_for_ui(pilot, lambda: record.query_one(".tool-preview").size.height == 2)
@@ -115,7 +115,7 @@ def test_tool_title_is_correct_in_first_frame_and_completion_keeps_widget(
             assert frames
             for rows, _, _ in frames:
                 assert sum("python demo.py" in row for row in rows) == 1
-                assert any("• 执行 python demo.py" in row for row in rows)
+                assert any("• Run python demo.py" in row for row in rows)
                 assert not any(row.strip() in {"•", "…"} for row in rows)
             assert_title_marker_color(title, "green")
     asyncio.run(exercise())
@@ -190,7 +190,7 @@ def test_exploration_keeps_its_group_through_running_failure_and_cancellation(te
             assert not app.store.get("main").has_active_tools
             assert record.calls[1].output == "permission denied"
             stopped = app.query_one("#record-1", Static)
-            assert stopped.render_line(0).text.strip() == "• 已停止本轮执行"
+            assert stopped.render_line(0).text.strip() == "• Turn stopped"
             assert stopped.content_region.x == record.query_one(".tool-title", Static).content_region.x
             for segment in stopped.render_line(0):
                 if "•" in segment.text:
@@ -202,7 +202,7 @@ def test_exploration_keeps_its_group_through_running_failure_and_cancellation(te
 
 
 def test_end_of_stream_does_not_remove_preview_before_tool_result():
-    view = AgentView("main", "主 Agent")
+    view = AgentView("main", "Main agent")
     view.consume(ToolOutputDelta("turn", "cmd", "stdout", "last output", command="demo"))
     block, = view.committed_blocks
     assert block.detail == "demo"
@@ -230,14 +230,14 @@ def test_child_history_titles_survive_switching_scrolling_and_resize(terminal_ap
             frames.clear()
             await pilot.press("alt+right")
             await wait_for_ui(pilot, lambda: app.selected_agent_id == "child" and len(app.query(ToolRecord)) == 12)
-            assert any("• 执行 command-11" in row for row in frames[-1][0])
+            assert any("• Run command-11" in row for row in frames[-1][0])
             await pilot.press("ctrl+home")
             await pilot.pause()
-            assert any("• 执行 command-0" in row for row in frames[-1][0])
+            assert any("• Run command-0" in row for row in frames[-1][0])
             await pilot.resize_terminal(44, 22)
             await pilot.press("alt+left", "alt+right")
             await pilot.pause()
-            assert any("• 执行 command-0" in row for row in frames[-1][0])
+            assert any("• Run command-0" in row for row in frames[-1][0])
             for rows, _, _ in frames:
                 assert not any(row.strip() in {"•", "…"} for row in rows)
     asyncio.run(exercise())
@@ -277,14 +277,14 @@ def test_tool_status_color_stays_on_marker_after_wrapping(terminal_app, state, c
     async def exercise():
         app = terminal_app
         app.store.get("main").committed_blocks.append(ToolBlock(
-            "执行", "{}", "plain output", state, "run_command",
+            "Run", "{}", "plain output", state, "run_command",
             "python demo.py --argument " + "long-command-argument " * 10,
         ))
         async with app.run_test(size=(width, 20)) as pilot:
             await pilot.pause()
             title = app.query_one(".tool-title", Static)
             assert title.size.height == 2
-            assert title.render_line(0).text.startswith("• 执行 python demo.py")
+            assert title.render_line(0).text.startswith("• Run python demo.py")
             assert_title_marker_color(title, color)
             preview = app.query_one(".tool-preview", Static)
             assert all(segment.style.dim for segment in preview.render_line(0) if segment.text.strip())
@@ -295,17 +295,17 @@ def test_group_failure_only_colors_the_marker(terminal_app):
     async def exercise():
         app = terminal_app
         app.store.get("main").committed_blocks.extend([
-            ToolBlock("读取", "{}", "contents", name="read_file", detail="a.py"),
-            ToolBlock("读取", "{}", "missing", "failed", "read_file", "b.py"),
+            ToolBlock("Read", "{}", "contents", name="read_file", detail="a.py"),
+            ToolBlock("Read", "{}", "missing", "failed", "read_file", "b.py"),
         ])
         async with app.run_test(size=(100, 20)) as pilot:
             await pilot.pause()
             title = app.query_one(".tool-title", Static)
-            assert title.render_line(0).text.strip() == "• 查看代码 · 2 次操作"
+            assert title.render_line(0).text.strip() == "• Explore code · 2 operations"
             assert_title_marker_color(title, "red")
             preview = app.query_one(".tool-preview", Static)
             for row, path in ((0, "a.py"), (1, "b.py")):
-                assert f"读取 {path}" in preview.render_line(row).text
+                assert f"Read {path}" in preview.render_line(row).text
                 assert all(segment.style.color == preview.rich_style.color and segment.style.dim
                            for segment in preview.render_line(row) if segment.text.strip())
     asyncio.run(exercise())

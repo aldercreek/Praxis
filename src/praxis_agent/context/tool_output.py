@@ -16,6 +16,21 @@ def _excerpt(text: str, limit: int) -> str:
 def _preview(message: dict[str, object], limit: int) -> dict[str, object]:
     payload = message["payload"]
     output = payload.get("output")
+    if payload.get("type") == "function_call_output" and isinstance(output, list):
+        # Bound text only; never slice a data URL or drop an attached image/file.
+        text_count = sum(block.get("type") == "input_text" for block in output)
+        budget = max(1, limit // max(1, text_count))
+        blocks = [
+            {**block, "text": _excerpt(block["text"], budget)}
+            if block.get("type") == "input_text" else block
+            for block in output
+        ]
+        if blocks == output:
+            return message
+        notice = {"type": "input_text", "text": (
+            f"[Tool result preview; full original text is saved as {message['message_id']}.]"
+        )}
+        return {**message, "payload": {**payload, "output": [*blocks, notice]}}
     if payload.get("type") != "function_call_output" or not isinstance(output, str):
         return message
     status = ""
