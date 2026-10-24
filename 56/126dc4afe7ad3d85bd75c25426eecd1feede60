@@ -1,0 +1,58 @@
+src/praxis_agent/desktop/__main__.py
+  s_abc0052df0c3e8::t_9c74044e615188 13,24-25
+src/praxis_agent/desktop/event_adapter.py
+  s_e4a65b156e05a3::t_96f3bb59997f9e 58,94-95,207-208,231
+tests/test_command_sessions.py
+  s_e4a65b156e05a3::t_0447967091e170 1-319
+src/praxis_agent/execution.py
+  s_e4a65b156e05a3::t_96f3bb59997f9e 155-156,158-165
+  s_e4a65b156e05a3::t_a886dc837365df 103-114,153-154
+src/praxis_agent/agent.py
+  s_e4a65b156e05a3::t_a886dc837365df 53,96,241-242,257,329-330,351-355,437-438,497
+src/praxis_agent/terminal/app.py
+  s_e4a65b156e05a3::t_96f3bb59997f9e 768,1015-1025,1032-1039
+src/praxis_agent/desktop/session_manager.py
+  s_e4a65b156e05a3::t_96f3bb59997f9e 71,197-204
+  s_abc0052df0c3e8::t_9c74044e615188 216,220,229-230,233,252
+tests/test_desktop_server.py
+  s_abc0052df0c3e8::t_9806ba821842f7 47,52,57,64
+  s_e4a65b156e05a3::t_0447967091e170 129-148
+  s_abc0052df0c3e8::t_07549fd87552ca 260-291,401-402,404-405,413
+tests/test_execution.py
+  s_e4a65b156e05a3::t_0447967091e170 122-136
+src/praxis_agent/tools/command_sessions.py
+  s_e4a65b156e05a3::t_96f3bb59997f9e 133-136,189-194
+  s_e4a65b156e05a3::t_f56474aae41889 1-59,62-80,82-92,94-95,99,101-132,137-170,174-188,195-196,200-237,239-288,290-304,309-320,322-328,330-347,349-362
+  s_e4a65b156e05a3::t_a886dc837365df 61,93,96-98,100,171-173,197-199,238
+  s_e4a65b156e05a3::t_3841a3baabed9b 60,81,289,305-308,321,348
+  s_e4a65b156e05a3::t_b0d1b73f03b595 329
+src/praxis_agent/desktop/server.py
+  s_abc0052df0c3e8::t_9c74044e615188 19,24-25
+  s_e4a65b156e05a3::t_96f3bb59997f9e 59-62,92
+src/praxis_agent/tools/processes.py
+  s_e4a65b156e05a3::t_3841a3baabed9b 15-16,81-82,95-106
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.51-trip",
+  "base_commit_sha": "56126dc4afe7ad3d85bd75c25426eecd1feede60",
+  "prompts": {},
+  "sessions": {
+    "s_abc0052df0c3e8": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a156f3-2d77-7d52-9689-8c8dfc80dd8f",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "aldercreek <57739268+aldercreek@users.noreply.github.com>"
+    },
+    "s_e4a65b156e05a3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a163e7-6508-7411-816f-5a453411eac7",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "aldercreek <57739268+aldercreek@users.noreply.github.com>"
+    }
+  }
+}
