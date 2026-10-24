@@ -765,6 +765,7 @@ class PraxisApp(App[int]):
     def _matching_commands(text: str) -> list[tuple[str, str]]:
         return [(name, description) for name, description in (
             ("/clear", "Clear current chat"), ("/help", "Keyboard shortcuts"), ("/exit", "Quit Praxis"),
+            ("/commands", "List command sessions"), ("/stop-command", "Stop a command by its session ID"),
         ) if text.startswith("/") and name.startswith(text)]
 
     def action_complete_command(self) -> None:
@@ -1011,11 +1012,31 @@ class PraxisApp(App[int]):
             self.action_request_exit()
         elif task.lower() == "/help":
             self.action_show_shortcuts()
+        elif task.lower() == "/commands":
+            commands = self.agent.command_sessions.summaries()
+            text = "\n".join(f"{item['session_id']}  {item['status']}  {' '.join(item['argv'])}"
+                             for item in commands) or "No command sessions."
+            self.push_screen(DetailsScreen("Command sessions · /stop-command <session_id>", Text(text)))
+        elif task.lower().split()[0] == "/stop-command":
+            parts = task.split()
+            if len(parts) != 2:
+                self.notify("Usage: /stop-command <session_id>", severity="warning")
+            else:
+                self.run_worker(self._stop_command(parts[1]))
         elif self.busy:
             self.user_input.put(task)
         else:
             self._start(task)
         self._refresh_bottom()
+
+    async def _stop_command(self, session_id):
+        manager = self.agent.command_sessions
+        try:
+            await asyncio.to_thread(manager.stop, session_id)
+        except Exception as error:
+            self.notify(str(error), severity="error")
+        else:
+            self.notify(f"Stopped {session_id}. Remaining output is available through wait_command.")
 
     def _start(self, task: str) -> None:
         if self.agent is None or self.busy or self.closing:

@@ -100,6 +100,18 @@ class Run(Handle):
         self.handles = []
         self.accepting = True
         self._settled = False
+        self._cancel_cleanup = {}
+
+    def on_cancel_cleanup(self, cleanup):
+        """Drain background resources on cancellation, without blocking cancel()."""
+        key = object()
+        with self._lock:
+            self._cancel_cleanup[key] = cleanup
+
+        def unsubscribe():
+            with self._lock:
+                self._cancel_cleanup.pop(key, None)
+        return unsubscribe
 
     def add(self, handle):
         with self._lock:
@@ -138,7 +150,19 @@ class Run(Handle):
         if children:
             wait([handle.future for handle in children])
         with self._lock:
+            cleanups = tuple(self._cancel_cleanup.values()) if self.cancelled.is_set() else ()
+            self._cancel_cleanup.clear()
+            # Freeze cancellation together with choosing its cleanup work. A late
+            # cancel must not lose the cleanup callbacks between these decisions.
             self._settled = True
+        cleanup_errors = []
+        for cleanup in cleanups:
+            try:
+                cleanup()
+            except Exception as failure:
+                cleanup_errors.append(failure)
+        if cleanup_errors:
+            raise ExceptionGroup("Could not clean up cancelled execution", cleanup_errors)
         if error is None:
             self.check()
 

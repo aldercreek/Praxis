@@ -141,7 +141,7 @@ class ToolCallExecutor:
         try:
             result = self._result(prepared)
         finally:
-            if function_call.name == "run_command":
+            if function_call.name in {"run_command", "wait_command"}:
                 self.publish_event(ToolOutputDelta(turn_id, function_call.call_id, "", "", finished=True))
         return self._finish(turn_id, function_call, result)
 
@@ -235,7 +235,7 @@ class ToolCallExecutor:
                           check_execution=self.check_execution,
                           on_command_output=lambda stream, text: self.publish_event(ToolOutputDelta(
                               turn_id, function_call.call_id, stream, text,
-                              command=arguments.get("command") or " ".join(str(part) for part in arguments.get("argv", [])),
+                              command=arguments.get("command") or arguments.get("session_id") or " ".join(str(part) for part in arguments.get("argv", [])),
                           )))
         if context.programmatic_call and not self.tool_registry.allows_programmatic(function_call.name):
             return ToolResult(False, f"Tool unavailable for programmatic calls: {function_call.name}")

@@ -129,7 +129,7 @@ Agent 主循环
 | --- | --- | --- |
 | 文件读取与搜索 | `read_file`、`list_files`、`find_files`、`search_text` | 读文本、列目录、按 glob 找文件、按字面文本或正则搜索 |
 | 文件修改 | `edit_file`、`write_file` | 精确替换，或创建/完整覆写文件 |
-| 命令 | `run_command` | 执行项目代码、测试或系统命令 |
+| 命令 | `run_command`、`wait_command` | 启动命令、分段等待并获取新增输出 |
 | 计划 | `update_plan` | 更新当前任务计划 |
 | 上下文 | `delete`、`compress`、`search_history`、`read_history` | 管理模型视图并检索完整历史 |
 | 技能 | `load_skill` | 按名称分页加载技能正文 |
@@ -145,8 +145,12 @@ Agent 主循环
 - 搜索统一返回 `{results, next_offset}`。`limit` 默认 50，`offset` 默认 0；内容模式按匹配行分页，其他模式按文件记录分页。`context_lines` 默认 0，前后文不占分页名额，重叠上下文合并，使用 `路径-行号-内容` 展示；片段间以 `--` 分隔。继续搜索时保持其他参数不变，使用工具返回的 `next_offset`；为 null 时已结束。结果按路径、行号排序，文件变化后分页位置可能改变。
 - 搜索结果受工具字符预算约束，实际返回可能少于 `limit`；超长匹配行提供带标记的预览，完整原文用 `read_file` 读取。搜索超时仍为 30 秒。
 - `edit_file` 的每个旧文本必须唯一匹配，多个替换按顺序应用，全部成功才写回文件。
-- `run_command` 接收 argv 数组，不隐式解析管道或 shell 语法。需要这些语法时显式调用 PowerShell、bash 等。`workdir` 接受已存在的绝对目录或相对于 Agent 工作目录的目录，可以位于工作区外；省略时使用 Agent 工作目录。默认超时 60 秒，允许 1–120 秒。
-- 命令以前台方式运行，stdin 不交互，输出可以实时显示。结束或取消时清理其后代进程，不适合作为后台常驻服务启动器。
+- `run_command` 接收 `argv` 数组或 `command` shell 正文（二选一）。`workdir` 接受已存在的绝对目录或相对于 Agent 工作目录的目录，可以位于工作区外。`yield_time_ms` 默认 10000，允许 0–600000；它只限制本次等待，到期返回 `running` 和 `session_id`，不会停止命令。旧的 `timeout_seconds` 参数不再接受。
+- `wait_command(session_id, yield_time_ms=10000)` 继续等待同一个进程并返回新增 stdout/stderr。设置 0 可立即读取当前结果。正常回合结束不终止后台命令；下一回合继续使用同一个编号。进程不跨 Praxis 重启恢复。
+- stdout/stderr 直接写入临时文件。两个工具等待期间读取文件并实时展示，界面和模型有独立读取位置；工具返回后仅继续写文件，下次等待时补充展示。没有 TTY、stdin 输入或每条命令的输出读取线程。
+- `/commands` 查看主 Agent 的命令会话，`/stop-command <session_id>` 停止其中一个；剩余输出仍可用 `wait_command` 获取。桌面协议对应 `command.list`（聊天 `session_id`）和 `command.stop`（聊天 `session_id`、命令 `command_id`）。
+- 取消回合会停止本回合创建的命令及当前正在等待的命令；其他回合的独立后台命令保留。显式停止、根命令结束或关闭 Agent 时清理受管理后代，服务直接以前台命令启动，由 Praxis 保管，不使用 shell 脱离管理。
+- 单个命令累计临时输出默认最多 16 MiB，每个 Agent 合计 128 MiB，最多保留 32 个未回收命令。共享维护线程定期检查退出和限额；达到限额停止命令并报告，采样有短暂超额空间。模型结果读取也有容量边界。已完成结果默认保留 15 分钟供读取；最终结果成功保存后立即删除临时文件，短期保留无输出的终态。
 
 读文件、列目录、搜索和历史读取等标记为 `parallel_safe` 的连续调用可并行。默认每组最多 4 个处理函数，`PRAXIS_MAX_PARALLEL_TOOLS=1` 可关闭并行。其他调用是顺序屏障，不会跨过它们重排。
 

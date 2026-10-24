@@ -2,18 +2,11 @@ import codecs
 import locale
 import os
 import shutil
-import subprocess
-import tempfile
 from collections.abc import Callable
 from pathlib import Path
-from time import monotonic
 
-from praxis_agent.execution import ExecutionStopped, current_handle
 from praxis_agent.runtime import CommandShell, select_command_shell
-from praxis_agent.tools.processes import CommandProcess
 
-_DEFAULT_TIMEOUT_SECONDS = 60
-_MAX_TIMEOUT_SECONDS = 120
 
 
 class _OutputDecoder:
@@ -71,14 +64,19 @@ def run_command(
     workspace: Path,
     argv: list[str] | None = None,
     workdir: str = ".",
-    timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS,
+    yield_time_ms: int = 10000,
     *,
     command: str | None = None,
     command_shell: CommandShell | None = None,
     check_execution: Callable[[], None] | None = None,
     on_output: Callable[[str, str], None] | None = None,
+    manager=None,
+    defer_ack: bool = False,
 ) -> dict[str, object]:
-    """执行程序或 shell 正文，清理进程后返回同一份结构化结果。"""
+    """Start once; yielding returns control without stopping the command."""
+    from praxis_agent.tools.command_sessions import default_manager, validate_yield
+
+    validate_yield(yield_time_ms)
     if (argv is None) == (command is None):
         raise ValueError("Provide exactly one of argv or command; the command was not executed.")
     if argv is not None:
@@ -88,107 +86,31 @@ def run_command(
             raise ValueError("argv[0] must be a non-empty executable name")
     elif not isinstance(command, str) or not command.strip():
         raise ValueError("command must be a non-empty string")
-    if isinstance(timeout_seconds, bool) or not isinstance(
-        timeout_seconds,
-        int,
-    ):
-        raise TypeError("timeout_seconds must be an integer")
-    if not 1 <= timeout_seconds <= _MAX_TIMEOUT_SECONDS:
-        raise ValueError(
-            f"timeout_seconds must be between 1 and {_MAX_TIMEOUT_SECONDS}"
-        )
-
     working_directory = _resolve_working_directory(workspace, workdir)
-
     if check_execution is not None:
         check_execution()
-    # Disk-backed output also avoids hanging on inherited pipes after the direct
-    # child exits. Commands are foreground jobs; detached descendants are cleaned up.
-    with tempfile.NamedTemporaryFile(buffering=0) as out, \
-            tempfile.NamedTemporaryFile(buffering=0) as err, \
-            _open_output_reader(out.name) as out_reader, \
-            _open_output_reader(err.name) as err_reader:
-        # Separate open handles have independent offsets; seeking a duplicated
-        # child handle while it is writing could overwrite earlier output.
-        readers = (("stdout", out_reader), ("stderr", err_reader))
-        decoders = {name: _OutputDecoder() for name, _ in readers}
+    manager = manager if manager is not None else default_manager()
+    try:
+        if command is not None:
+            selected_shell = command_shell or select_command_shell()
+            if selected_shell is None:
+                raise FileNotFoundError("No command shell detected")
+            argv = selected_shell.argv(command)
+        session_id = manager.start(_resolve_command_argv(argv), working_directory)
+    except OSError as error:
+        reason = ("Executable or command shell not found. Check the command name, installation, or executable path."
+                  if isinstance(error, FileNotFoundError) else str(error))
+        return {"session_id": None, "status": "spawn_failed", "exit_code": None,
+                "stdout": "", "stderr": "", "error": f"Unable to start command: {reason}"}
+    return manager.wait(session_id, yield_time_ms, check_execution=check_execution,
+                        on_output=on_output, defer_ack=defer_ack)
 
-        def drain(*, final=False):
-            if on_output is None:
-                return
-            for name, reader in readers:
-                while True:
-                    chunk = reader.read(65536)
-                    text = decoders[name].decode(chunk, final=final and not chunk)
-                    if text:
-                        on_output(name, text)
-                    if not final or not chunk:
-                        break
 
-        try:
-            if command is not None:
-                selected_shell = command_shell or select_command_shell()
-                if selected_shell is None:
-                    raise FileNotFoundError("No command shell detected")
-                argv = selected_shell.argv(command)
-            process = CommandProcess(_resolve_command_argv(argv), cwd=working_directory, stdin=subprocess.DEVNULL,
-                                     stdout=out, stderr=err, shell=False)
-        except OSError as error:
-            if isinstance(error, FileNotFoundError):
-                reason = "Executable or command shell not found. Check the command name, installation, or executable path."
-            elif isinstance(error, PermissionError):
-                reason = "Access denied. Check execution permissions."
-            else:
-                reason = str(error)
-            return {"status": "spawn_failed", "exit_code": None, "stdout": "", "stderr": "",
-                    "error": f"Unable to start command: {reason}"}
-        handle = current_handle()
-        unsubscribe = handle.on_cancel(process.request_stop) if handle is not None else lambda: None
-        status = "exited"
-        failure = None
-        try:
-            deadline = monotonic() + timeout_seconds
-            while process.process.poll() is None:
-                drain()
-                if check_execution is not None:
-                    check_execution()
-                if monotonic() >= deadline:
-                    status = "timed_out"
-                    break
-                try:
-                    process.process.wait(timeout=min(0.1, max(0.001, deadline - monotonic())))
-                except subprocess.TimeoutExpired:
-                    pass
-            if check_execution is not None:
-                check_execution()
-            if handle is not None:
-                handle.check()
-        except ExecutionStopped:
-            status = "cancelled"
-        except Exception as error:
-            failure = error
-        finally:
-            unsubscribe()
-            try:
-                process.close()
-            except Exception as error:
-                failure = error
-            finally:
-                drain(final=True)
-        out.seek(0)
-        err.seek(0)
-        stdout = _OutputDecoder().decode(out.read(), final=True).replace("\r\n", "\n").replace("\r", "\n")
-        stderr = _OutputDecoder().decode(err.read(), final=True).replace("\r\n", "\n").replace("\r", "\n")
-        if failure is not None:
-            failure.args = (f"{failure}\nstdout:\n{stdout or '<empty>'}\nstderr:\n{stderr or '<empty>'}",)
-            raise failure
-        returncode = process.process.returncode
-    error = None
-    if status == "timed_out":
-        error = f"Execution exceeded {timeout_seconds} seconds. The command and its child processes were stopped. Output produced before stopping was preserved."
-    elif status == "cancelled":
-        error = "Execution was cancelled by the user. The command and its child processes were stopped. Output produced before stopping was preserved."
-    elif returncode != 0:
-        error = (f"The command ran and exited with code {returncode}. Check stdout and stderr for details. "
-                 "The meaning of a nonzero exit code depends on the program.")
-    return {"status": status, "exit_code": returncode, "stdout": stdout, "stderr": stderr, "error": error}
+def wait_command(session_id: str, yield_time_ms: int = 10000, *, manager=None,
+                 check_execution=None, on_output=None, defer_ack: bool = False):
+    """Wait for an existing command and return only its unconsumed output."""
+    from praxis_agent.tools.command_sessions import default_manager
+
+    manager = manager if manager is not None else default_manager()
+    return manager.wait(session_id, yield_time_ms, check_execution=check_execution,
+                        on_output=on_output, defer_ack=defer_ack)

@@ -16,12 +16,13 @@ logger = logging.getLogger(__name__)
 class DesktopServer:
     """The calling thread receives stdin; slow setup and Agent runs never occupy it."""
 
-    def __init__(self, stdin, stdout, *, database_path=None, agent_factory=None):
+    def __init__(self, stdin, stdout, *, database_path=None, agent_factory=None, bypass_approvals=False):
         self.stdin = stdin
         self.stopping = Event()
         self.output = OutputChannel(stdout, on_failure=self.stopping.set)
         options = {} if agent_factory is None else {"agent_factory": agent_factory}
-        self.manager = SessionManager(self.output.send, database_path=database_path, **options)
+        self.manager = SessionManager(self.output.send, database_path=database_path,
+                                      bypass_approvals=bypass_approvals, **options)
         self.management = ThreadPoolExecutor(max_workers=4, thread_name_prefix="praxis-session-setup")
 
     def _error(self, request_id, error):
@@ -55,6 +56,10 @@ class DesktopServer:
                 result = self.manager.require(params).enqueue(required_string(params, "text"))
             elif method == "turn.stop":
                 result = self.manager.require(params).stop()
+            elif method == "command.list":
+                result = self.manager.require(params).commands()
+            elif method == "command.stop":
+                result = self.manager.require(params).stop_command(required_string(params, "command_id"))
             elif method == "approval.respond":
                 result = self.manager.require(params).respond(params)
             elif method == "shutdown":
@@ -84,7 +89,7 @@ class DesktopServer:
                         request_id = None
                     self._error(request_id, error)
                     continue
-                if request["method"] in {"session.create", "session.open", "session.list"}:
+                if request["method"] in {"session.create", "session.open", "session.list", "command.stop"}:
                     self.management.submit(self.handle, request)
                 else:
                     self.handle(request)

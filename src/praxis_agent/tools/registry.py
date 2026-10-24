@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from difflib import get_close_matches
 from functools import partial, wraps
 from inspect import Parameter, signature
@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from praxis_agent.runtime import CommandShell, select_command_shell
-from praxis_agent.tools.command import run_command
+from praxis_agent.tools.command import run_command, wait_command
+from praxis_agent.tools.command_sessions import CommandSessionManager
 from praxis_agent.tools.filesystem import (
     FileChange,
     edit_file,
@@ -177,11 +178,9 @@ _RUN_COMMAND_PARAMETERS: dict[str, object] = {
                 "After locating the target project, pass its directory here."
             ),
         },
-        "timeout_seconds": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 120,
-            "description": "Execution timeout in seconds, from 1 to 120; use 60 for ordinary commands.",
+        "yield_time_ms": {
+            "type": "integer", "minimum": 0, "maximum": 600000,
+            "description": "Maximum wait in milliseconds (default 10000). Yielding never stops the command; 0 returns immediately after startup.",
         },
     },
     "oneOf": [{"required": ["argv"]}, {"required": ["command"]}],
@@ -204,6 +203,8 @@ class ToolContext:
     programmatic_call: bool = False
     parallel_tool_call: bool = False
     on_command_output: Callable[[str, str], None] | None = None
+    command_sessions: CommandSessionManager = field(default_factory=CommandSessionManager, compare=False)
+    defer_command_ack: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,6 +243,7 @@ class ToolResult:
     file_change: FileChange | None = None
     # Model-facing content blocks; output remains the readable UI/error summary.
     model_content: list[dict[str, object]] | None = None
+    on_saved: Callable[[], None] | None = field(default=None, repr=False, compare=False)
 
 
 class ToolRegistry:
@@ -462,12 +464,24 @@ def create_default_registry(policy: ContextPolicy | None = None, *,
         return ToolResult(True, json.dumps(data, ensure_ascii=False), structured_output=data)
 
     registry = ToolRegistry()
+    def command_result(context, data):
+        saved = (lambda: context.command_sessions.acknowledge(data["session_id"], data)) if data["session_id"] else None
+        return ToolResult(data["status"] in {"running", "exited"}, json.dumps(data, ensure_ascii=False),
+                          structured_output=data, on_saved=saved if context.defer_command_ack else None)
+
     def command_with_control(context: ToolContext, argv: list[str] | None = None, workdir: str = ".",
-                             timeout_seconds: int = 60, command: str | None = None) -> ToolResult:
-        data = run_command(context.workspace, argv, workdir, timeout_seconds, command=command,
+                             yield_time_ms: int = 10000, command: str | None = None) -> ToolResult:
+        data = run_command(context.workspace, argv, workdir, yield_time_ms, command=command,
                            command_shell=command_shell, check_execution=context.check_execution or check_execution,
-                           on_output=context.on_command_output)
-        return ToolResult(data["status"] == "exited", json.dumps(data, ensure_ascii=False), structured_output=data)
+                           on_output=context.on_command_output, manager=context.command_sessions,
+                           defer_ack=context.defer_command_ack)
+        return command_result(context, data)
+
+    def wait_with_control(context: ToolContext, session_id: str, yield_time_ms: int = 10000) -> ToolResult:
+        data = wait_command(session_id, yield_time_ms, manager=context.command_sessions,
+                            check_execution=context.check_execution or check_execution,
+                            on_output=context.on_command_output, defer_ack=context.defer_command_ack)
+        return command_result(context, data)
     registry.register(
         Tool(
             name="read_file",
@@ -567,15 +581,17 @@ def create_default_registry(policy: ContextPolicy | None = None, *,
             description=(
                 "Run argv directly OR command as a non-interactive shell script in workdir. "
                 f"command shell: {command_shell.name if command_shell else 'unavailable'}. "
-                "Returns status, exit_code, stdout, stderr, error. "
+                "Returns session_id, status, exit_code, stdout, stderr, error. "
                 "status: exited = process exited; spawn_failed = process could not start; "
-                "timed_out = time limit reached; cancelled = user stopped execution. "
+                "running = still active after this wait; cancelled = user stopped execution; failed = execution infrastructure failure. "
                 "exit_code belongs to the started process (the shell for command), null if unavailable. "
                 "error explains nonzero exits and execution failures; null for exit 0. "
                 "Nonzero exit codes are program-specific, not necessarily tool failures. "
                 "In PowerShell, use exit $LASTEXITCODE to forward a native program's exit code; "
                 "check each dependent step explicitly. "
-                "Commands run in the foreground; descendant processes stop when the command ends or is cancelled."
+                "The process survives tool and normal turn completion. Use wait_command with session_id to get later output; "
+                "do not start the command again. Descendants stop when the root command exits or is cancelled. "
+                "No TTY or stdin input. Launch services directly, without shell detachment."
             ),
             parameters=_RUN_COMMAND_PARAMETERS,
             handler=command_with_control,
@@ -583,6 +599,18 @@ def create_default_registry(policy: ContextPolicy | None = None, *,
             strict=False,
         )
     )
+    registry.register(Tool(
+        name="wait_command",
+        description=("Wait for an existing command in this agent and return only unconsumed stdout/stderr. "
+                     "Does not restart the command. Default wait is 10000 ms, maximum 600000; "
+                     "0 reads current output immediately. Waiting expiry returns running without stopping it. "
+                     "Completed commands return immediately. No stdin input; unavailable IDs may have expired or belong to another agent."),
+        parameters={"type": "object", "properties": {
+            "session_id": {"type": "string", "minLength": 1},
+            "yield_time_ms": {"type": "integer", "minimum": 0, "maximum": 600000},
+        }, "required": ["session_id"], "additionalProperties": False},
+        handler=wait_with_control, strict=False,
+    ))
     registry.register(create_update_plan_tool())
     from praxis_agent.context.tools import create_context_tools
 

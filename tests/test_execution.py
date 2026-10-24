@@ -119,3 +119,18 @@ def test_unsubscribed_callback_is_not_called_by_later_cancellation():
     unsubscribe()
     handle.cancel()
     assert not callback.is_set()
+
+
+def test_cancel_cleanup_failure_does_not_skip_remaining_resources():
+    scope = Run()
+    completed = []
+
+    def broken():
+        raise OSError("cleanup failed")
+
+    scope.on_cancel_cleanup(broken)
+    scope.on_cancel_cleanup(lambda: completed.append("second"))
+    scope.cancel()
+    with pytest.raises(ExceptionGroup, match="clean up"):
+        scope.settle()
+    assert completed == ["second"]

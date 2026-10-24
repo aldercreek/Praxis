@@ -16,15 +16,15 @@ from praxis_agent.tools import ToolContext, create_default_registry
 
 @pytest.mark.parametrize("ending,code,color", [
     ("exited", 0, "green"), ("exited", 7, "red"),
-    ("spawn_failed", None, "red"), ("timed_out", None, "red"),
+    ("spawn_failed", None, "red"), ("running", None, "#a0a0a0"),
 ])
 def test_command_result_has_one_persisted_copy_and_restores_the_live_view(tmp_path, ending, code, color):
     arguments = {"argv": [sys.executable, "-u", "-c", f"print('unique-output-marker'); exit({code})"]}
     if ending == "spawn_failed":
         arguments = {"argv": [str(tmp_path / "missing.exe")]}
-    elif ending == "timed_out":
+    elif ending == "running":
         arguments = {"argv": [sys.executable, "-u", "-c", "import time; print('unique-output-marker'); time.sleep(60)"],
-                     "timeout_seconds": 1}
+                     "yield_time_ms": 1000}
     call = FunctionCall("command", "run_command", json.dumps(arguments))
     requests = []
 
@@ -46,8 +46,8 @@ def test_command_result_has_one_persisted_copy_and_restores_the_live_view(tmp_pa
         history = store.load_conversation_items(session.id)
         saved = next(item for item in history if item.get("type") == "function_call_output")
         result = json.loads(saved["output"])
-        assert result["success"] == (ending == "exited")
-        assert set(result["output"]) == {"status", "exit_code", "stdout", "stderr", "error"}
+        assert result["success"] == (ending in {"exited", "running"})
+        assert set(result["output"]) == {"session_id", "status", "exit_code", "stdout", "stderr", "error"}
         assert result["output"]["status"] == ending
         if ending == "exited":
             assert result["output"]["exit_code"] == code
@@ -64,7 +64,7 @@ def test_command_result_has_one_persisted_copy_and_restores_the_live_view(tmp_pa
                    if segment.text.strip() and segment.style and segment.style.color]
         assert len(colored) == 1 and colored[0].text.strip() == "•"
         assert colored[0].style.color.name == color
-        assert after.failed == (ending in {"spawn_failed", "timed_out"})
+        assert after.failed == (ending == "spawn_failed")
     finally:
         agent.close()
 

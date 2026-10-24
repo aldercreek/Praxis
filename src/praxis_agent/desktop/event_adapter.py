@@ -55,7 +55,7 @@ def display_event(event: AgentEvent) -> tuple[str, str, str, dict]:
         data = {"call_id": event.call_id, "tool_name": event.tool_name,
                 "result": {"success": event.result.success, "output": event.result.output,
                            "structured_output": json_value(event.result.structured_output)
-                           if event.tool_name == "run_command" else None,
+                           if event.tool_name in {"run_command", "wait_command"} else None,
                            "file_change": json_value(event.result.file_change)}}
     else:
         data = {field.name: json_value(getattr(event, field.name)) for field in fields(event)
@@ -91,6 +91,8 @@ def content_text(content) -> str:
 def tool_result_status(result: dict, previous: str = "") -> str:
     output = result.get("output", "")
     structured = result.get("structured_output") or (output if isinstance(output, dict) else {})
+    if structured.get("status") == "running":
+        return "running"
     if structured.get("status") == "cancelled" or (
         isinstance(output, str) and output.startswith("ExecutionStopped:")
     ):
@@ -202,6 +204,8 @@ class Transcript:
                 result = data["result"]
                 message.update(content=result["output"], status=tool_result_status(result, message["status"]),
                                tool_finished=True)
+                if result.get("structured_output"):
+                    message["structured_output"] = result["structured_output"]
                 if result.get("file_change"):
                     message["file_change"] = result["file_change"]
         elif event == "MessagesReceived":
@@ -224,7 +228,7 @@ class Transcript:
                 unfinished = message.get("status") in {"pending", "running", "streaming", "approval"} or (
                     message.get("status") == "denied" and not message.get("tool_finished")
                 )
-                if matches and unfinished:
+                if matches and unfinished and not message.get("tool_finished"):
                     message["status"] = "completed" if terminal_status == "idle" else terminal_status
             if event == "TurnFailed":
                 self.append("system", data.get("message", "Execution failed"), **common, status="failed")

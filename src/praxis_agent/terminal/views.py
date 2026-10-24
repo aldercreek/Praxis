@@ -339,7 +339,7 @@ class AgentView:
             if isinstance(delivery, dict):
                 failed = any(not item["accepted"] for item in delivery.get("results", []))
         state = "failed" if failed else "completed"
-        command_result = event.result.structured_output if name == "run_command" else None
+        command_result = event.result.structured_output if name in {"run_command", "wait_command"} else None
         if command_result is not None:
             state = "completed" if command_result["status"] == "exited" else command_result["status"]
         self.committed_blocks[index] = replace(

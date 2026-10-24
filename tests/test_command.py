@@ -15,9 +15,10 @@ def test_run_command_returns_exit_code_and_output(tmp_path: Path) -> None:
         tmp_path,
         [sys.executable, "-c", "print('hello from command')"],
         ".",
-        10,
+        10000,
     )
 
+    assert result.pop("session_id").startswith("cmd_")
     assert result == {"status": "exited", "exit_code": 0, "stdout": "hello from command\n",
                       "stderr": "", "error": None}
 
@@ -34,7 +35,7 @@ def test_run_command_uses_a_workspace_subdirectory(tmp_path: Path) -> None:
             "from pathlib import Path; print(Path.cwd().name)",
         ],
         "nested",
-        10,
+        10000,
     )
 
     assert result["stdout"] == "nested\n"
@@ -55,7 +56,7 @@ def test_run_command_uses_a_directory_outside_workspace(
         workspace,
         [sys.executable, "-c", "from pathlib import Path; print(Path('input.txt').read_text())"],
         workdir=str(project) if absolute else "../other project",
-        timeout_seconds=10,
+        yield_time_ms=10000,
     )
 
     assert result["exit_code"] == 0
@@ -78,8 +79,8 @@ def test_run_command_rejects_an_empty_or_non_string_workdir(tmp_path: Path, work
 
 
 def test_run_command_rejects_an_invalid_timeout(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="between 1 and 120"):
-        run_command(tmp_path, [sys.executable, "--version"], ".", 121)
+    with pytest.raises(ValueError, match="between 0 and 600000"):
+        run_command(tmp_path, [sys.executable, "--version"], ".", 600001)
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows executable search order")
@@ -91,11 +92,11 @@ def test_run_command_honors_path_without_overriding_explicit_interpreter(
     monkeypatch.setenv("PATH", str(environment / "Scripts") + os.pathsep + os.environ["PATH"])
     argv = ["python", "-c", "import sys; print(sys.prefix)"]
 
-    result = run_command(tmp_path, argv, timeout_seconds=10)
+    result = run_command(tmp_path, argv, yield_time_ms=10000)
     assert result["stdout"] == f"{environment}\n"
     assert argv == ["python", "-c", "import sys; print(sys.prefix)"]
 
-    explicit = run_command(tmp_path, [sys.executable, *argv[1:]], timeout_seconds=10)
+    explicit = run_command(tmp_path, [sys.executable, *argv[1:]], yield_time_ms=10000)
     assert explicit["stdout"] == f"{sys.prefix}\n"
 
 
@@ -110,7 +111,7 @@ def test_direct_arguments_preserve_empty_unicode_quotes_and_metacharacters(tmp_p
 @pytest.mark.parametrize("arguments", [{}, {"argv": ["unused"], "command": "unused"},
                                        {"argv": []}, {"argv": [""]}, {"command": " \n"}])
 def test_invalid_execution_inputs_do_not_start_a_process(tmp_path, monkeypatch, arguments):
-    monkeypatch.setattr("praxis_agent.tools.command.CommandProcess", lambda *a, **k: pytest.fail("process started"))
+    monkeypatch.setattr("praxis_agent.tools.command_sessions.CommandProcess", lambda *a, **k: pytest.fail("process started"))
     with pytest.raises(ValueError):
         run_command(tmp_path, **arguments)
 
@@ -142,7 +143,7 @@ $text = 'literal $HOME; say "hello"; 反引号 `'
 $text > '结果 文件.txt'
 Get-Content -LiteralPath '结果 文件.txt' | Select-String -SimpleMatch '$HOME'
 [Console]::Error.WriteLine('warning')
-""", workdir=str(workdir), timeout_seconds=10)
+""", workdir=str(workdir), yield_time_ms=10000)
     assert result["status"] == "exited" and result["exit_code"] == 0, result
     assert 'literal $HOME; say "hello"; 反引号 `' in result["stdout"]
     assert result["stderr"] == "warning\n"
@@ -179,6 +180,7 @@ def test_cleanup_error_is_reported_with_output_instead_of_claiming_success(tmp_p
         raise OSError("cleanup failed")
 
     monkeypatch.setattr(CommandProcess, "close", fail_after_close)
-    with pytest.raises(OSError, match="cleanup failed") as failure:
-        run_command(tmp_path, [sys.executable, "-c", "print('saved output')"])
-    assert "saved output" in str(failure.value)
+    result = run_command(tmp_path, [sys.executable, "-c", "print('saved output')"])
+    assert result["status"] == "failed"
+    assert "cleanup failed" in result["error"]
+    assert "saved output" in result["stdout"]

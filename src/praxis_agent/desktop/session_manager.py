@@ -68,6 +68,7 @@ class SessionRuntime:
             return {"session": self.summary(), "messages": deepcopy(self.transcript.messages),
                     "approvals": [deepcopy(data) for data, _ in self.approvals.values()],
                     "pending_inputs": list(self.paused_inputs),
+                    "commands": self.agent.command_sessions.summaries() if self.agent else [],
                     "sequence": self.sequence}
 
     def approve(self, tool_name, arguments):
@@ -193,6 +194,15 @@ class SessionRuntime:
             self.closed = True
         self.stop()
 
+    def commands(self):
+        return {"commands": self.agent.command_sessions.summaries() if self.agent else []}
+
+    def stop_command(self, command_id):
+        if self.agent is None:
+            raise ProtocolError("command_not_found", "No command sessions are loaded")
+        self.agent.command_sessions.stop(command_id)
+        return {"stopped": True, "command_id": command_id}
+
     def close(self):
         self.cancel_for_shutdown()
         worker = self.worker
@@ -203,10 +213,11 @@ class SessionRuntime:
 
 
 class SessionManager:
-    def __init__(self, send, *, database_path=None, agent_factory=create_default_agent):
+    def __init__(self, send, *, database_path=None, agent_factory=create_default_agent, bypass_approvals=False):
         self.send = send
         self.store = SQLiteSessionStore(database_path)
         self.agent_factory = agent_factory
+        self.bypass_approvals = bypass_approvals
         self.lock = Lock()
         self.sessions: dict[str, SessionRuntime] = {}
         self.loading: dict[str, Future] = {}
@@ -215,10 +226,11 @@ class SessionManager:
     def initialize(self):
         try:
             config = ModelConfig.from_env()
-            return {"protocol_version": 1, "model": config.model, "configured": True}
+            return {"protocol_version": 1, "model": config.model, "configured": True,
+                    "bypass_approvals": self.bypass_approvals}
         except ValueError as error:
             return {"protocol_version": 1, "model": os.environ.get("ADA_MODEL", "").strip() or "auto(free)",
-                    "configured": False, "configuration_error": str(error)}
+                    "configured": False, "configuration_error": str(error), "bypass_approvals": self.bypass_approvals}
 
     def _load(self, record):
         with self.lock:
@@ -237,6 +249,7 @@ class SessionManager:
         try:
             runtime.agent = self.agent_factory(
                 record.workspace, event_sink=DesktopEventSink(runtime), approve_tool_call=runtime.approve,
+                bypass_approvals=self.bypass_approvals,
                 resume_session_id=record.id, session_database_path=self.store.database_path,
             )
             runtime.agent.user_input = runtime.input

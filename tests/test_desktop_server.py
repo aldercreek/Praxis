@@ -44,24 +44,24 @@ class Capture:
 
 
 class Harness:
-    def __init__(self, tmp_path, clients):
+    def __init__(self, tmp_path, clients, *, bypass_approvals=False):
         self.input, self.output = Lines(), Capture()
         self.messages, self.created = [], []
         self.clients = iter(clients)
 
-        def factory(workspace, *, event_sink, approve_tool_call, resume_session_id, session_database_path):
+        def factory(workspace, *, event_sink, approve_tool_call, bypass_approvals, resume_session_id, session_database_path):
             store = SQLiteSessionStore(session_database_path)
             record = store.get_session(resume_session_id)
             store.recover_interrupted_runs(record.id)
             agent = Agent(next(self.clients), create_default_registry(), workspace,
-                          event_sink=event_sink, approve_tool_call=approve_tool_call,
+                          event_sink=event_sink, approve_tool_call=approve_tool_call, bypass_approvals=bypass_approvals,
                           session_store=store, session_id=record.id, session_model=record.model)
             agent.restore_history(store.load_conversation_items(record.id))
             self.created.append(agent)
             return agent
 
         self.server = DesktopServer(self.input, self.output, database_path=tmp_path / "desktop.sqlite3",
-                                    agent_factory=factory)
+                                    agent_factory=factory, bypass_approvals=bypass_approvals)
         self.thread = Thread(target=self.server.run, daemon=True)
         self.thread.start()
         self.next_id = 0
@@ -124,6 +124,26 @@ class BlockingClient:
             return answer(self.text)
         finally:
             unsubscribe()
+
+
+def test_background_command_management_is_scoped_to_its_chat(tmp_path):
+    from praxis_agent.tools import run_command, wait_command
+
+    harness = Harness(tmp_path, [BlockingClient("unused"), BlockingClient("unused")])
+    try:
+        first, other = harness.create(), harness.create()
+        manager = harness.created[0].command_sessions
+        command = run_command(tmp_path, [sys.executable, "-c", "import time; time.sleep(60)"],
+                              yield_time_ms=0, manager=manager)
+        command_id = command["session_id"]
+        listed = harness.request("command.list", session_id=first)["result"]["commands"]
+        assert listed[0]["session_id"] == command_id
+        assert harness.request("command.list", session_id=other)["result"]["commands"] == []
+        assert "error" in harness.request("command.stop", session_id=other, command_id=command_id)
+        assert harness.request("command.stop", session_id=first, command_id=command_id)["result"]["stopped"]
+        assert wait_command(command_id, 0, manager=manager)["status"] == "cancelled"
+    finally:
+        harness.close()
 
 
 def test_concurrent_sessions_are_routed_and_live_open_reuses_runtime(tmp_path):
@@ -237,6 +257,38 @@ def test_approval_response_stop_and_eof_are_responsive(tmp_path, decision):
             harness.close()
 
 
+def test_desktop_bypass_executes_tools_without_approval_in_new_and_reopened_sessions(tmp_path):
+    class Client:
+        calls = 0
+
+        def create_response(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                call = FunctionCall("write-bypass", "run_command", json.dumps({
+                    "argv": [sys.executable, "-c", "from pathlib import Path; Path('bypass.txt').write_text('executed')"],
+                }))
+                return ModelResponse(({"type": "function_call", "call_id": call.call_id,
+                                       "name": call.name, "arguments": call.arguments},), "", (call,))
+            return answer("done")
+
+    session = None
+    for _ in range(2):
+        harness = Harness(tmp_path, [Client()], bypass_approvals=True)
+        try:
+            assert harness.request("initialize")["result"]["bypass_approvals"] is True
+            if session is None:
+                session = harness.create()
+            else:
+                assert "result" in harness.request("session.open", session_id=session)
+            turn = harness.request("turn.start", session_id=session, text="write file")["result"]["turn_id"]
+            assert harness.settled(session, turn)["data"]["status"] == "idle"
+            assert not any(message.get("event") == "ApprovalPending" for message in harness.messages)
+            assert (tmp_path / "bypass.txt").read_text() == "executed"
+            (tmp_path / "bypass.txt").unlink()
+        finally:
+            harness.close()
+
+
 def test_malformed_input_and_unknown_methods_do_not_kill_receiver(tmp_path, monkeypatch):
     monkeypatch.delenv("ADA_API_KEY", raising=False)
     harness = Harness(tmp_path, [])
@@ -346,9 +398,11 @@ def test_session_reopens_persisted_history_after_server_restart(tmp_path):
         second.close()
 
 
-def test_module_entrypoint_emits_only_json_and_exits_on_eof(tmp_path):
+@pytest.mark.parametrize("bypass", [False, True])
+def test_module_entrypoint_emits_only_json_and_exits_on_eof(tmp_path, bypass):
     result = subprocess.run(
-        [sys.executable, "-m", "praxis_agent.desktop", "--stdio", "--database", str(tmp_path / "stdio.sqlite3")],
+        [sys.executable, "-m", "praxis_agent.desktop", "--stdio", "--database", str(tmp_path / "stdio.sqlite3"),
+         *(["--bypass"] if bypass else [])],
         input='{"id":"init","method":"initialize","params":{}}\n',
         capture_output=True, text=True, encoding="utf-8", timeout=15,
     )
@@ -356,6 +410,7 @@ def test_module_entrypoint_emits_only_json_and_exits_on_eof(tmp_path):
     messages = [json.loads(line) for line in result.stdout.splitlines()]
     assert messages[0]["id"] == "init"
     assert messages[0]["result"]["protocol_version"] == 1
+    assert messages[0]["result"]["bypass_approvals"] is bypass
 
 
 def test_cancelled_supplementary_input_stays_paused_until_explicitly_resubmitted(tmp_path):

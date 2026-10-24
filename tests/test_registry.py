@@ -24,6 +24,7 @@ def test_default_registry_contains_all_builtin_tools() -> None:
         "find_files",
         "search_text",
         "run_command",
+        "wait_command",
         "update_plan",
         "delete",
         "compress",
@@ -113,7 +114,7 @@ def test_command_workdir_reaches_the_process(tmp_path: Path, directory: str) -> 
 def test_command_schema_and_executor_accept_workdir_without_the_old_parameter(tmp_path: Path) -> None:
     registry = create_default_registry()
     definition = next(tool for tool in registry.definitions() if tool["name"] == "run_command")
-    arguments = {"argv": [sys.executable, "--version"], "workdir": str(tmp_path), "timeout_seconds": 10}
+    arguments = {"argv": [sys.executable, "--version"], "workdir": str(tmp_path), "yield_time_ms": 10000}
     validate(arguments, definition["parameters"])
     arguments["relative_path"] = arguments.pop("workdir")
 

@@ -112,7 +112,7 @@ def test_agent_returns_the_models_final_text(tmp_path: Path) -> None:
             _empty_run_state_context(),
         ]
     ]
-    assert len(model_client.tools[0]) == 12
+    assert len(model_client.tools[0]) == 13
     assert any(tool["name"] == "update_plan" for tool in model_client.tools[0])
     assert agent.run_state is not None
     assert agent.run_state.original_task == "inspect repository"
@@ -341,7 +341,7 @@ def test_agent_asks_for_approval_and_respects_a_decline(
                         "call-1",
                         "run_command",
                         '{"argv":["not-a-real-command"],'
-                        '"workdir":".","timeout_seconds":10}',
+                        '"workdir":".","yield_time_ms":10000}',
                     ),
                 ),
             ),

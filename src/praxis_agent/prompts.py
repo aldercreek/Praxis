@@ -22,6 +22,9 @@ BASE_INSTRUCTIONS = """You are Praxis. Use tools in the local workspace to help 
    Check status, exit_code, stdout, stderr, and error together; success does not guarantee the intended outcome.
    command returns the shell exit code. In PowerShell, use exit $LASTEXITCODE to forward an external program's exit code.
    Check each step in scripts whose later steps depend on earlier results.
+   run_command waits up to 10 seconds by default; yield_time_ms controls only this wait (maximum 600000).
+   A running result means the process continues in the background. Use wait_command(session_id) for later output;
+   do not rerun the command. Both tools stream output to the UI during their waits. No TTY or input is supported.
 
 4. Composing tools
    run_code uses the official Monty Python subset. Use call_tool to combine file, history, and activated MCP tools.

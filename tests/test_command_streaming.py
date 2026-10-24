@@ -52,7 +52,7 @@ os.write(1, b'done\\n')
             (tmp_path / "ack").touch()
 
     result = run_command(tmp_path, [sys.executable, "-u", "-c", code],
-                         timeout_seconds=8, on_output=receive)
+                         yield_time_ms=8000, on_output=receive)
     assert result["exit_code"] == 0
     assert "".join(chunks["stdout"]) == "中文 ready\ndone\n"
     assert "".join(chunks["stderr"]) == "warning\n"
@@ -82,19 +82,19 @@ def test_timeout_and_cancellation_preserve_partial_output(tmp_path, cancel):
             raise ExecutionStopped("cancel requested")
 
     code = "import os,time; os.write(1,b'partial out\\n'); os.write(2,b'partial error\\n'); time.sleep(20)"
-    result = run_command(tmp_path, [sys.executable, "-u", "-c", code], timeout_seconds=1,
+    result = run_command(tmp_path, [sys.executable, "-u", "-c", code], yield_time_ms=1000,
                          on_output=receive, check_execution=check)
-    assert result["status"] == ("cancelled" if cancel else "timed_out")
+    assert result["status"] == ("cancelled" if cancel else "running")
     assert "partial out" in result["stdout"]
     assert "partial error" in result["stderr"]
-    assert result["error"]
+    assert bool(result["error"]) == cancel
     assert "partial out" in "".join(seen)
 
 
 def test_streaming_events_do_not_add_model_requests_or_history_items(tmp_path):
     calls, events = [], []
     arguments = json.dumps({"argv": [sys.executable, "-u", "-c", "print('visible output')"],
-                            "workdir": ".", "timeout_seconds": 5})
+                            "workdir": ".", "yield_time_ms": 5000})
     call = FunctionCall("cmd", "run_command", arguments)
 
     def respond(items, tools, **kwargs):
@@ -184,7 +184,7 @@ while not Path('ui-ack').exists():
     time.sleep(.02)
 print('last diagnostic', flush=True)
 """
-        arguments = {"argv": [sys.executable, "-u", "-c", code], "workdir": ".", "timeout_seconds": 8}
+        arguments = {"argv": [sys.executable, "-u", "-c", code], "workdir": ".", "yield_time_ms": 8000}
 
         def execute():
             sink.emit(TurnStarted("demo", "stream output"))

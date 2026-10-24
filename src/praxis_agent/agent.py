@@ -50,6 +50,7 @@ from praxis_agent.planning import RunState, build_run_state_context
 from praxis_agent.prompts import build_instructions
 from praxis_agent.runtime import collect_runtime_context
 from praxis_agent.skills import create_skill_tool, discover_skills
+from praxis_agent.tools.command_sessions import CommandSessionManager
 from praxis_agent.tool_execution import (
     ToolApprovalHandler,
     ToolCallExecutor,
@@ -92,6 +93,7 @@ class Agent:
     close_callbacks: tuple[Callable[[], None], ...] = ()
     mcp_catalog: str = ""
     reset_code_worker: Callable[[], None] | None = None
+    command_sessions: CommandSessionManager = field(default_factory=CommandSessionManager, init=False, repr=False)
     _run_lock: Lock = field(default_factory=Lock, init=False, repr=False)
     _closed: bool = field(default=False, init=False)
     _pending_calls: list[FunctionCall] = field(default_factory=list, init=False, repr=False)
@@ -236,6 +238,8 @@ class Agent:
             self.session_id = session.id
         if self.reset_code_worker is not None:
             self.reset_code_worker()
+        self.command_sessions.close()
+        self.command_sessions = CommandSessionManager()
         self._history.clear()
         self.context_manager.reset()
         self.context_manager.operations.clear()
@@ -250,6 +254,7 @@ class Agent:
         if self.execution_control is not None:
             self.execution_control.cancel()
         try:
+            self.command_sessions.close()
             if self.collaboration is not None:
                 self.collaboration.shutdown(self._pump_worker_events)
         finally:
@@ -321,6 +326,8 @@ class Agent:
                 self.workspace, run_state,
                 context_manager=self.context_manager,
                 history=self._history,
+                command_sessions=self.command_sessions,
+                defer_command_ack=True,
             ),
             publish_event=self._emit,
             approve_tool_call=self.approve_tool_call,
@@ -341,6 +348,11 @@ class Agent:
             tool_definitions = self.tool_registry.definitions()
             request_number += 1
             transient_items = (build_run_state_context(run_state),)
+            commands = self.command_sessions.summaries()
+            if commands:
+                transient_items += ({"role": "developer", "content":
+                    "Command sessions owned by this agent (use wait_command; do not restart): "
+                    + json.dumps(commands, ensure_ascii=False)},)
             if self.mcp_catalog:
                 transient_items += ({"role": "developer", "content": self.mcp_catalog},)
             if self.collaboration is not None:
@@ -422,6 +434,8 @@ class Agent:
                     )
                 self._history.append(output_item)
                 self._pending_calls.remove(function_call)
+                if result.on_saved is not None:
+                    result.on_saved()
                 if (
                     result.success
                     and function_call.name == "update_plan"
@@ -480,7 +494,7 @@ def _build_function_call_output(
         "output": json.dumps(
             {
                 "success": result.success,
-                "output": result.structured_output if function_call.name == "run_command" and result.structured_output is not None else result.output,
+                "output": result.structured_output if function_call.name in {"run_command", "wait_command"} and result.structured_output is not None else result.output,
             },
             ensure_ascii=False,
         ),

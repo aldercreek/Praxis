@@ -12,6 +12,8 @@ class CommandProcess:
         self.job = None
         self.process = None
         self._lock = Lock()
+        self._close_lock = Lock()
+        self._closed = False
         if os.name == "nt":
             self._start_windows(argv, kwargs)
         else:
@@ -76,6 +78,8 @@ class CommandProcess:
     def request_stop(self) -> None:
         """Signal the process tree without waiting on the UI/cancellation thread."""
         with self._lock:
+            if self._closed:
+                return
             if os.name == "nt":
                 if self.job:
                     if not self.kernel.TerminateJobObject(self.job, 1):
@@ -88,10 +92,15 @@ class CommandProcess:
                     pass
 
     def close(self) -> None:
-        self.request_stop()
-        with self._lock:
-            if os.name == "nt" and self.job:
-                self.kernel.CloseHandle(self.job)
-                self.job = None
-        if self.process is not None:
-            self.process.wait(timeout=10)
+        with self._close_lock:
+            if self._closed:
+                return
+            self.request_stop()
+            with self._lock:
+                if os.name == "nt" and self.job:
+                    self.kernel.CloseHandle(self.job)
+                    self.job = None
+            if self.process is not None:
+                self.process.wait(timeout=10)
+            with self._lock:
+                self._closed = True

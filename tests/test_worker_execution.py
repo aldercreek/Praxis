@@ -57,7 +57,7 @@ def test_default_agent_binds_directory_delivers_resumes_and_retains_files(tmp_pa
                 if self.calls == 2:
                     return response(tool="run_command", arguments={"argv": [sys.executable, "-c",
                         "from pathlib import Path; p=Path('results/report.txt'); assert p.read_text() == 'initial report\\n'; print('verified')"],
-                        "workdir": ".", "timeout_seconds": 10})
+                        "workdir": ".", "yield_time_ms": 10000})
                 return response("Report complete: results/report.txt; command verified.")
             return response("Reviewed worker deliveries.")
 
@@ -188,7 +188,7 @@ def test_parent_shutdown_cancels_running_command_and_queued_worker(tmp_path):
             started.set()
             return run_command(root, [sys.executable, "-c",
                 "import time; from pathlib import Path; Path('partial.txt').write_text('saved'); time.sleep(120)"],
-                timeout_seconds=120, check_execution=control.check)
+                yield_time_ms=120000, check_execution=control.check)
         return SimpleNamespace(run=run, close=lambda: None)
 
     runtime = AgentRuntime(factory, MultiAgentConfig(max_workers=1), workspace=parent)
@@ -269,7 +269,7 @@ def test_command_stops_descendants_on_every_exit(tmp_path, ending, mode):
     def run():
         try:
             results.append(run_command(tmp_path, **arguments,
-                                       timeout_seconds=1 if ending == "timeout" else 10,
+                                       yield_time_ms=1000 if ending == "timeout" else 10000,
                                        check_execution=control.check))
         except Exception as error:
             errors.append(error)
@@ -286,12 +286,17 @@ def test_command_stops_descendants_on_every_exit(tmp_path, ending, mode):
             control.cancelled.set()
         thread.join(5)
         assert not thread.is_alive()
+        if ending == "timeout":
+            assert results[0]["status"] == "running"
+            assert process_alive(pid)
+            from praxis_agent.tools.command_sessions import default_manager
+            default_manager().stop(results[0]["session_id"])
         deadline = monotonic() + 2
         while process_alive(pid) and monotonic() < deadline:
             sleep(0.02)
         assert not process_alive(pid)
         assert not errors
-        assert results[0]["status"] == {"cancel": "cancelled", "timeout": "timed_out", "return": "exited"}[ending]
+        assert results[0]["status"] == {"cancel": "cancelled", "timeout": "running", "return": "exited"}[ending]
     finally:
         control.cancelled.set()
         thread.join(5)

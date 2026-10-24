@@ -88,7 +88,7 @@ def test_git_commands_support_repeated_merges_and_report_real_conflicts(tmp_path
 
     def git(*args, success=True):
         result = registry.execute("run_command", {
-            "argv": ["git", *map(str, args)], "workdir": ".", "timeout_seconds": 30,
+            "argv": ["git", *map(str, args)], "workdir": ".", "yield_time_ms": 30000,
         }, context=context)
         assert result.success, result.output
         if success:

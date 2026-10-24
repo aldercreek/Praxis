@@ -237,7 +237,7 @@ def display_command(arguments: Mapping[str, object]) -> str:
 _TOOL_LABELS = {
     "read_file": "Read", "list_files": "List", "find_files": "Find",
     "search_text": "Search", "edit_file": "Edit", "write_file": "Write",
-    "run_command": "Run", "update_plan": "Update plan",
+    "run_command": "Run", "wait_command": "Wait for command", "update_plan": "Update plan",
     "delete": "Prune messages", "compress": "Compact context",
     "search_history": "Search history", "read_history": "Read history",
     "spawn_agent": "Create subagent", "send_messages": "Send collaboration messages",
@@ -249,6 +249,8 @@ def tool_description(name: str, arguments: Mapping[str, object]) -> tuple[str, s
     label = _TOOL_LABELS.get(name, name)
     if name == "run_command":
         return label, display_command(arguments)
+    if name == "wait_command":
+        return label, str(arguments.get("session_id", ""))
     if name == "spawn_agent":
         return label, str(arguments.get("task_summary") or arguments.get("task", ""))
     if name in {"wait_agents", "send_messages"}:
@@ -433,7 +435,7 @@ def approval_content(name: str, arguments: Mapping[str, object]) -> RenderableTy
     else:
         title, detail = tool_description(name, arguments)
         lines.append(Text(f"{title} {detail}".rstrip()))
-    labels = {"relative_path": "Directory", "workdir": "Directory", "workspace": "Workspace", "timeout_seconds": "Timeout (seconds)", "reason": "Reason",
+    labels = {"relative_path": "Directory", "workdir": "Directory", "workspace": "Workspace", "yield_time_ms": "Wait (milliseconds)", "reason": "Reason",
               "old_string": "Before", "new_string": "After", "content": "Content"}
     for key, value in arguments.items():
         if key in {"argv", "command", "agent_id"}:

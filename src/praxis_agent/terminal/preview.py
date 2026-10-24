@@ -32,5 +32,7 @@ class OutputPreview:
 
 def output_lines(output: str | dict[str, object]) -> list[Text]:
     if isinstance(output, dict):
-        output = "\n".join(output[field] for field in ("error", "stdout", "stderr") if output[field])
+        heading = (f"Running in background · {output['session_id']}\n"
+                   if output.get("status") == "running" and output.get("session_id") else "")
+        output = heading + "\n".join(output[field] for field in ("error", "stdout", "stderr") if output[field])
     return [Text.from_ansi(line) for line in output.splitlines()]

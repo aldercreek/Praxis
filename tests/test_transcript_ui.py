@@ -294,7 +294,7 @@ def test_inline_approval_uses_existing_boolean_decision(keys, allowed):
     async def exercise():
         app = PraxisApp(ViewEventSink())
         request = Approval("run_command", {"argv": ["cmd", "/c", "echo hello"],
-                           "workdir": ".", "timeout_seconds": 30}, Future())
+                           "workdir": ".", "yield_time_ms": 30000}, Future())
         async with app.run_test(size=(70, 28)) as pilot:
             app._approvals.put(request)
             await pilot.pause(0.15)
