@@ -1,0 +1,27 @@
+src/praxis_agent/service/store.py
+  s_da4263abd40288::t_5a6395d6598c18 10,191,193,211
+tests/service/test_history.py
+  s_da4263abd40288::t_472907078c2393 1-22,24-28,30-33,35-37,39-40,42-63,65-80,82-89,91-104,106-125
+src/praxis_agent/service/history.py
+  s_da4263abd40288::t_df9cc09d6992ac 24-29,51-54,67-73,88-90,92-96,106-112,123-128,134-142,144,148-152
+  s_da4263abd40288::t_5a6395d6598c18 1-23,30-50,55-66,74-87,91,97-105,113-122,129-133,145-147,153-154
+README.md
+  s_da4263abd40288::t_8f2c5d57cd4be0 130
+  s_da4263abd40288::t_ebf1ff879fbf87 131
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.51-trip",
+  "base_commit_sha": "b13746bd073ee5b9d657995586e3f5b9bd39742e",
+  "prompts": {},
+  "sessions": {
+    "s_da4263abd40288": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a17135-e366-75a1-bfc8-4f1cd0fdd2e7",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "aldercreek <57739268+aldercreek@users.noreply.github.com>"
+    }
+  }
+}
