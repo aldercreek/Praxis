@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from contextlib import ExitStack
+from functools import partial
 from pathlib import Path
 from threading import RLock
 
@@ -13,13 +14,17 @@ from .runtime import SessionRuntime
 
 
 class SessionManager:
-    def __init__(self, store, *, agent_factory=create_default_agent):
+    def __init__(self, store, *, agent_factory=create_default_agent, mcp=None):
         self.store = store
-        self.factory = agent_factory
+        self.mcp = mcp
+        self.factory = partial(agent_factory, mcp=mcp) if mcp is not None else agent_factory
         self.lock = RLock()
         self.runtimes = {}
         self.closed = False
         self.bypass_approvals = os.environ.get("PRAXIS_BYPASS_APPROVALS") == "1"
+
+    def mcp_status(self):
+        return self.mcp.snapshot() if self.mcp is not None else {"servers": []}
 
     def configuration(self):
         try:
@@ -145,5 +150,9 @@ class SessionManager:
         with self.lock:
             self.closed = True
             runtimes = list(self.runtimes.values())
-        for runtime in runtimes:
-            runtime.close()
+        try:
+            for runtime in runtimes:
+                runtime.close()
+        finally:
+            if self.mcp is not None:
+                self.mcp.close()

@@ -1,11 +1,16 @@
 import asyncio
+import json
 
+import httpx
+import pytest
 from test_sessions import BlockingModel
 from textual.widgets import TextArea
 
+from praxis_agent.mcp import MCPConnections
 from praxis_agent.terminal.app import PraxisApp
 from praxis_agent.terminal.connection import TerminalSession
 from praxis_agent.terminal.views import ViewEventSink
+from praxis_agent.terminal.widgets import DetailsScreen
 
 
 def test_terminal_can_submit_supplementary_input_and_disconnect_without_cancel(service):
@@ -65,3 +70,35 @@ def test_two_terminals_cancel_and_resume_same_session(service):
             assert not app.paused_inputs
 
     asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("initial", [False, True])
+def test_mcp_command_reads_shared_status_without_starting_a_turn(service, tmp_path, initial):
+    h = service()
+    path = tmp_path / "mcp.json"
+    path.write_text(json.dumps({"servers": {"数据库": {"enabled": False}, "浏览器": {"enabled": False}}}), encoding="utf-8")
+    h.manager.mcp = MCPConnections(path)
+    h.manager.mcp._state("数据库", "connected")
+    session = h.create()
+    client = h.client()
+    assert client.request("GET", "/api/mcp/servers") == {"servers": [
+        {"name": "数据库", "state": "connected"}, {"name": "浏览器", "state": "disabled"}
+    ]}
+    assert httpx.get(h.endpoint["url"] + "/api/mcp/servers").status_code == 401
+
+    async def exercise():
+        app = PraxisApp(ViewEventSink(), connection=TerminalSession(client, session), initial_task="/mcp" if initial else "")
+        async with app.run_test() as pilot:
+            if not initial:
+                app.query_one("#task", TextArea).text = "/mcp"
+                await pilot.press("enter")
+            async with asyncio.timeout(5):
+                while not isinstance(app.screen, DetailsScreen):
+                    await pilot.pause(0.02)
+            assert "数据库" in str(app.screen.content)
+            assert "已连接" in str(app.screen.content)
+            assert "工具" not in str(app.screen.content)
+            await pilot.press("escape")
+    asyncio.run(exercise())
+    assert h.agents == []
+    assert h.store.snapshot(session["id"])["messages"] == []

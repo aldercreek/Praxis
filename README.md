@@ -102,6 +102,7 @@ praxis --resume a3f21c8d              # Full session ID or unique prefix
 | Approve / deny a tool call | y / n in the approval panel |
 | Start a new session | `/clear` while idle |
 | Inspect / stop a background command | `/commands` / `/stop-command ID` |
+| View MCP service status | `/mcp` |
 | Disconnect the terminal | `/exit` or Ctrl+Q |
 
 Closing the terminal or desktop **does not cancel its tasks**. Use the stop control to cancel a turn. Cancellation waits for owned work to finish cleaning up, then leaves unconsumed input available to resume, edit, or delete.
@@ -142,6 +143,9 @@ Session events currently remain in SQLite without retention cleanup. Subagent pr
 | `service.json` | PID, port, instance ID, and protocol version |
 | `service.token` | Local HTTP authentication token |
 | `service.log` | Background-service diagnostics |
+| `mcp.json` | Shared MCP server configuration |
+
+The service starts enabled MCP servers in the background, with at most eight connection attempts in progress. Each server gets up to three attempts, with one- and two-second retry delays. Startup does not wait for MCP connections. Successful connections are shared by all agents; newly available services appear on their next model request. Tool activation and approvals stay local to each agent. Use `/mcp` in the terminal or desktop to see service names and connection states. Tool execution is never automatically retried.
 
 ```sh
 python -m praxis_agent.service --ensure                 # Discover/start; print registration without its token

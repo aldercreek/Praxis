@@ -1,4 +1,5 @@
 from praxis_agent.factory import create_default_agent
+from praxis_agent.mcp import MCPConnections
 from praxis_agent.config import ModelConfig
 from praxis_agent.model import ModelResponse
 from praxis_agent.multi_agent.tools import PARENT_INSTRUCTIONS
@@ -22,6 +23,7 @@ def test_single_agent_removes_collaboration_but_preserves_tools_and_resume(tmp_p
     monkeypatch.setattr(ModelConfig, "from_env", classmethod(
         lambda cls, **kwargs: ModelConfig(api_key="test", model="test")))
     monkeypatch.setattr("praxis_agent.factory.discover_skills", lambda workspace: ())
+    monkeypatch.setattr("praxis_agent.factory.MCPConnections", lambda: MCPConnections(tmp_path / "absent-mcp.json"))
     database = tmp_path / "sessions.sqlite"
     agent = create_default_agent(tmp_path, session_database_path=database, enable_multi_agent=False)
     try:

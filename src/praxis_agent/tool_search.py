@@ -68,12 +68,22 @@ class ToolSearchIndex:
             db.execute("DROP TABLE IF EXISTS tools")
             db.execute("CREATE TABLE tools (id TEXT PRIMARY KEY, server TEXT, original TEXT, alias TEXT UNIQUE, description TEXT, schema_json TEXT, metadata_json TEXT, search_text TEXT, approval INTEGER)")
             db.execute("CREATE VIRTUAL TABLE tool_fts USING fts5(tool_id UNINDEXED, terms)")
-            for record in records:
-                db.execute("INSERT INTO tools VALUES (?,?,?,?,?,?,?,?,?)", (
-                    record["id"], record["server"], record["original"], record["alias"], record["description"],
-                    json.dumps(record["schema"], ensure_ascii=False), json.dumps(record["metadata"], ensure_ascii=False),
-                    record["search_text"], record["approval"]))
-                db.execute("INSERT INTO tool_fts VALUES (?,?)", (record["id"], " ".join(tokens(record["search_text"]))))
+            self._insert(db, records)
+
+    def add(self, records: list[dict]):
+        """Publish a newly connected service atomically without replacing other tools."""
+        if records:
+            with self.connect() as db:
+                self._insert(db, records)
+
+    @staticmethod
+    def _insert(db, records):
+        for record in records:
+            db.execute("INSERT INTO tools VALUES (?,?,?,?,?,?,?,?,?)", (
+                record["id"], record["server"], record["original"], record["alias"], record["description"],
+                json.dumps(record["schema"], ensure_ascii=False), json.dumps(record["metadata"], ensure_ascii=False),
+                record["search_text"], record["approval"]))
+            db.execute("INSERT INTO tool_fts VALUES (?,?)", (record["id"], " ".join(tokens(record["search_text"]))))
 
     def get(self, tool_id: str) -> dict:
         with self.connect() as db:

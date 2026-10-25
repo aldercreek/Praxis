@@ -76,8 +76,9 @@ def run_model_loop(
                     + json.dumps(commands, ensure_ascii=False),
                 },
             )
-        if agent.mcp_catalog:
-            transient_items += ({"role": "developer", "content": agent.mcp_catalog},)
+        mcp_catalog = agent.mcp_catalog() if agent.mcp_catalog else ""
+        if mcp_catalog:
+            transient_items += ({"role": "developer", "content": mcp_catalog},)
         if agent.collaboration is not None:
             transient_items += (agent.collaboration.context_item(),)
         context_view = run_operation(

@@ -74,7 +74,7 @@ class Agent:
     input_source: object | None = None
     execution_control: ExecutionControl | None = None
     close_callbacks: tuple[Callable[[], None], ...] = ()
-    mcp_catalog: str = ""
+    mcp_catalog: Callable[[], str] | None = None
     reset_code_worker: Callable[[], None] | None = None
     command_sessions: CommandSessionManager = field(default_factory=CommandSessionManager, init=False, repr=False)
     _run_lock: Lock = field(default_factory=Lock, init=False, repr=False)

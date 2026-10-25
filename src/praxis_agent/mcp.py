@@ -1,4 +1,4 @@
-"""A session-owned MCP client bridge for the synchronous agent runtime."""
+"""Shared MCP connections, started in the background and borrowed by agents."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import os
 import re
 from contextlib import AsyncExitStack, nullcontext
 from pathlib import Path
-from threading import Event, Thread
+from threading import Event, RLock, Thread
 from uuid import uuid4
 
 from praxis_agent.execution import await_cancellable, run_operation
@@ -22,13 +22,21 @@ logger = logging.getLogger(__name__)
 
 
 class MCPConnections:
+    MAX_CONNECTING = 8
+    MAX_ATTEMPTS = 3
+    RETRY_DELAYS = (1, 2)
+
     def __init__(self, path: Path | None = None):
         self.path = path or Path.home() / ".praxis" / "mcp.json"
         self.config = json.loads(self.path.read_text(encoding="utf-8-sig")) if self.path.exists() else {}
         self.servers = self.config.get("servers", self.config.get("mcp_servers", {}))
         if not isinstance(self.servers, dict):
             raise ValueError("MCP servers must be an object")
-        self.status: dict[str, dict] = {}
+        self.status: dict[str, dict] = {
+            name: {"state": "disabled" if isinstance(config, dict) and not config.get("enabled", True) else "queued"}
+            for name, config in self.servers.items()
+        }
+        self.state_lock = RLock()
         self.clients = {}
         self.definitions = {}
         self.locks = {}
@@ -39,26 +47,28 @@ class MCPConnections:
         self.closed = False
         self.index = None
         self.server_descriptions = {}
+        self.aliases = set()
 
     def start(self):
-        if not self.servers:
+        if self.closed:
+            raise RuntimeError("MCP connections are closed")
+        if self.thread is not None:
             return
-        # Validate local configuration before starting any subprocesses.
-        for name, config in self.servers.items():
-            if not isinstance(config, dict):
-                raise ValueError(f"MCP server {name} must be an object")
-            for key, default in (("startup_timeout_sec", 30), ("tool_timeout_sec", 60)):
-                value = config.get(key, default)
-                if not isinstance(value, (int, float)) or not 0 < value <= 3600:
-                    raise ValueError(f"MCP {name}: {key} must be between 0 and 3600 seconds")
+        if not self.servers:
+            self.ready.set()
+            return
+        # Register discovery tools before any agent can borrow this manager.
+        self._build_index()
         self.thread = Thread(target=self._run, name="praxis-mcp", daemon=True)
         self.thread.start()
-        try:
-            self.ready.wait()
-            self._build_index()
-        except BaseException:
-            self.close()
-            raise
+
+    def snapshot(self):
+        with self.state_lock:
+            return {"servers": [{"name": name, **state} for name, state in self.status.items()]}
+
+    def _state(self, name, state, **details):
+        with self.state_lock:
+            self.status[name] = {"state": state, **details}
 
     def _run(self):
         asyncio.run(self._serve())
@@ -66,79 +76,127 @@ class MCPConnections:
     async def _serve(self):
         self.loop = asyncio.get_running_loop()
         self.stopping = asyncio.Event()
+        if self.closed:
+            self.ready.set()
+            return
+        semaphore = asyncio.Semaphore(self.MAX_CONNECTING)
         initialized = [asyncio.Event() for _ in self.servers]
-        tasks = [asyncio.create_task(self._server(name, config, done))
+        tasks = [asyncio.create_task(self._server(name, config, done, semaphore))
                  for (name, config), done in zip(self.servers.items(), initialized)]
         try:
-            await asyncio.gather(*(done.wait() for done in initialized))
-            self.ready.set()
+            # Shutdown must also interrupt connections still starting or retrying.
+            async def mark_ready():
+                await asyncio.gather(*(done.wait() for done in initialized))
+                self.ready.set()
+            readiness = asyncio.create_task(mark_ready())
             await self.stopping.wait()
         finally:
+            readiness.cancel()
             for task in tasks:
                 task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.gather(readiness, *tasks, return_exceptions=True)
             self.ready.set()
 
-    async def _server(self, name, config, initialized):
+    async def _server(self, name, config, initialized, semaphore):
+        connected = False
+        try:
+            if self.status[name]["state"] == "disabled":
+                return
+            if not isinstance(config, dict):
+                self._state(name, "failed", error="InvalidConfiguration")
+                return
+            for key, default in (("startup_timeout_sec", 30), ("tool_timeout_sec", 60)):
+                value = config.get(key, default)
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value <= 3600:
+                    self._state(name, "failed", error="InvalidConfiguration")
+                    return
+            for attempt in range(self.MAX_ATTEMPTS):
+                acquired = False
+                try:
+                    await semaphore.acquire()
+                    acquired = True
+                    self._state(name, "connecting")
+                    # Each failed attempt releases its own transport before retrying.
+                    async with AsyncExitStack() as stack:
+                        async with asyncio.timeout(config.get("startup_timeout_sec", 30)):
+                            client, definitions = await self._connect(name, config, stack)
+                            self.definitions[name] = definitions
+                            self._build_index()
+                            with self.state_lock:
+                                self.clients[name] = client
+                                self.server_descriptions[name] = str(config.get("description") or client.instructions or name)[:400]
+                                self.locks[name] = asyncio.Lock()
+                                self._state(name, "connected")
+                            connected = True
+                        semaphore.release()
+                        acquired = False
+                        initialized.set()
+                        await self.stopping.wait()
+                        return
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    # Exception text can contain credentials from URLs or server responses.
+                    state = "disconnected" if connected else "failed" if attempt + 1 == self.MAX_ATTEMPTS else "retrying"
+                    self._state(name, state, error=type(error).__name__)
+                    logger.warning("MCP server %s unavailable (%s)", name, type(error).__name__)
+                    if connected or state == "failed":
+                        return
+                finally:
+                    if acquired:
+                        semaphore.release()
+                    self.definitions.pop(name, None)
+                await asyncio.sleep(self.RETRY_DELAYS[attempt])
+        finally:
+            with self.state_lock:
+                self.clients.pop(name, None)
+                if connected or self.closed and self.status[name]["state"] in {"queued", "connecting", "retrying"}:
+                    self._state(name, "disconnected")
+            initialized.set()
+
+    async def _connect(self, name, config, stack):
         import httpx2
         from mcp import Client
         from mcp.client.stdio import StdioServerParameters
         from mcp.client.streamable_http import streamable_http_client
 
-        if not config.get("enabled", True):
-            self.status[name] = {"state": "disabled"}
-            initialized.set()
-            return
-        try:
-            async with AsyncExitStack() as stack:
-                async with asyncio.timeout(config.get("startup_timeout_sec", 30)):
-                    if "url" in config:
-                        headers = dict(config.get("http_headers", {}))
-                        for key, variable in config.get("env_http_headers", {}).items():
-                            headers[key] = os.environ[variable]
-                        if config.get("bearer_token_env_var"):
-                            headers["Authorization"] = "Bearer " + os.environ[config["bearer_token_env_var"]]
-                        http = await stack.enter_async_context(httpx2.AsyncClient(headers=headers, timeout=30, follow_redirects=False))
-                        transport = streamable_http_client(config["url"], http_client=http)
-                    else:
-                        env = {key: os.environ[key] for key in config.get("env_vars", []) if key in os.environ}
-                        env.update(config.get("env", {}))
-                        transport = StdioServerParameters(command=config["command"], args=config.get("args", []),
-                                                          env=env, cwd=config.get("cwd", str(self.path.parent)))
-                    client = await stack.enter_async_context(Client(transport, cache=None,
-                                                                 read_timeout_seconds=config.get("tool_timeout_sec", 60)))
-                    definitions = []
-                    cursor = None
-                    seen = set()
-                    while True:
-                        page = await client.list_tools(cursor=cursor)
-                        definitions.extend(page.tools)
-                        cursor = page.next_cursor
-                        if not cursor:
-                            break
-                        if cursor in seen:
-                            raise ValueError("Repeated MCP tools pagination cursor")
-                        seen.add(cursor)
-                    self.clients[name] = client
-                    self.definitions[name] = definitions
-                    self.server_descriptions[name] = str(config.get("description") or client.instructions or name)[:400]
-                    self.locks[name] = asyncio.Lock()
-                    self.status[name] = {"state": "connected", "tools": len(definitions)}
-                initialized.set()
-                await self.stopping.wait()
-        except asyncio.CancelledError:
-            raise
-        except Exception as error:
-            # Never log exception text: URLs and server errors may contain credentials.
-            self.status[name] = {"state": "failed", "error": type(error).__name__}
-            logger.warning("MCP server %s unavailable (%s)", name, type(error).__name__)
-        finally:
-            self.clients.pop(name, None)
-            initialized.set()
+        async def receive(message):
+            # SDK transport errors can arrive separately from the pending call.
+            if isinstance(message, Exception) and self.status[name]["state"] == "connected":
+                self._state(name, "disconnected", error=type(message).__name__)
+
+        if "url" in config:
+            headers = dict(config.get("http_headers", {}))
+            for key, variable in config.get("env_http_headers", {}).items():
+                headers[key] = os.environ[variable]
+            if config.get("bearer_token_env_var"):
+                headers["Authorization"] = "Bearer " + os.environ[config["bearer_token_env_var"]]
+            http = await stack.enter_async_context(httpx2.AsyncClient(headers=headers, timeout=30, follow_redirects=False))
+            transport = streamable_http_client(config["url"], http_client=http)
+        else:
+            env = {key: os.environ[key] for key in config.get("env_vars", []) if key in os.environ}
+            env.update(config.get("env", {}))
+            transport = StdioServerParameters(command=config["command"], args=config.get("args", []),
+                                              env=env, cwd=config.get("cwd", str(self.path.parent)))
+        client = await stack.enter_async_context(Client(transport, cache=None, message_handler=receive,
+                                                     read_timeout_seconds=config.get("tool_timeout_sec", 60)))
+        definitions = []
+        cursor = None
+        seen = set()
+        while True:
+            page = await client.list_tools(cursor=cursor)
+            definitions.extend(page.tools)
+            cursor = page.next_cursor
+            if not cursor:
+                break
+            if cursor in seen:
+                raise ValueError("Repeated MCP tools pagination cursor")
+            seen.add(cursor)
+        return client, definitions
 
     def _build_index(self):
         records = []
-        aliases = set()
+        aliases = set(self.aliases)
         for server, definitions in self.definitions.items():
             config = self.servers[server]
             for definition in definitions:
@@ -153,7 +211,9 @@ class MCPConnections:
                 identity = f"{server}/{original}"
                 raw_name = f"mcp_{server}_{original}"
                 alias = re.sub(r"[^a-zA-Z0-9_-]", "_", raw_name)
-                if len(alias) > 64 or alias != raw_name or alias in aliases:
+                # Separators inside either name can otherwise collide depending
+                # on which service finishes connecting first (a_b/c vs a/b_c).
+                if len(alias) > 64 or alias != raw_name or "_" in server or "_" in original or alias in aliases:
                     alias = alias[:51] + "_" + hashlib.sha256(identity.encode()).hexdigest()[:12]
                 if alias in aliases:
                     raise ValueError("Duplicate MCP tool identity")
@@ -165,17 +225,21 @@ class MCPConnections:
                     "description": description, "schema": definition.input_schema,
                     "metadata": definition.model_dump(mode="json", by_alias=True, exclude_none=True),
                     "search_text": text, "approval": tool_config.get("approval_mode") != "approve"})
-        path = self.path.parent / "indexes" / f"{uuid4().hex}.sqlite"
-        self.index = ToolSearchIndex(path, self.config.get("search", {}))
-        self.index.rebuild(records)
+        if self.index is None:
+            path = self.path.parent / "indexes" / f"{uuid4().hex}.sqlite"
+            self.index = ToolSearchIndex(path, self.config.get("search", {}))
+            self.index.rebuild([])
+        self.index.add(records)
+        self.aliases = aliases
         self.definitions.clear()
 
     def catalog(self):
         if self.index is None:
             return ""
-        entries = [{"server": name, "description": description}
-                   for name, description in sorted(self.server_descriptions.items())
-                   if self.status.get(name, {}).get("state") == "connected"]
+        with self.state_lock:
+            entries = [{"server": name, "description": description}
+                       for name, description in sorted(self.server_descriptions.items())
+                       if self.status.get(name, {}).get("state") == "connected"]
         if not entries:
             return ""
         return """<mcp>
@@ -220,7 +284,7 @@ class MCPConnections:
         def available(server):
             if server not in self.status:
                 raise ValueError("Unknown MCP server: " + server)
-            if server not in self.clients:
+            if server not in self.clients or self.status[server]["state"] == "disconnected":
                 raise ValueError("MCP server unavailable: " + server)
 
         def candidate(record):
@@ -247,7 +311,8 @@ class MCPConnections:
                 available(server)
             result = self.index.search(query, mode, server, limit)
             records = [self.index.get(identity) for identity in result["matches"]]
-            result["matches"] = [candidate(record) for record in records if record["server"] in self.clients]
+            result["matches"] = [candidate(record) for record in records if record["server"] in self.clients
+                                 and self.status[record["server"]]["state"] != "disconnected"]
             return json.dumps(result, ensure_ascii=False)
 
         def list_tools(context: ToolContext, server: str, cursor: str = "", limit: int = 10):
@@ -352,17 +417,29 @@ class MCPConnections:
         return run_operation(f"MCP {server}/{tool}", invoke)
 
     async def _call(self, server, tool, arguments, *, parallel=False, programmatic=False):
+        from anyio import BrokenResourceError, ClosedResourceError, EndOfStream
+        from httpx2 import TransportError
+        from mcp.shared.exceptions import MCPError
+        from mcp_types import CONNECTION_CLOSED
+
         try:
+            if server not in self.clients:
+                return ToolResult(False, "MCP server disconnected; no automatic retry was attempted")
             async with asyncio.timeout(self.servers[server].get("tool_timeout_sec", 60)):
                 # Explicit parallel batches opt out of the ordinary per-server queue.
                 async with nullcontext() if parallel else self.locks[server]:
                     if server not in self.clients:
                         return ToolResult(False, "MCP server disconnected; no automatic retry was attempted")
                     result = await self.clients[server].call_tool(tool, arguments)
+            self._state(server, "connected")
             return mcp_tool_result(result, programmatic=programmatic)
         except asyncio.CancelledError:
             raise
         except Exception as error:
+            if isinstance(error, (ConnectionError, BrokenResourceError, ClosedResourceError, EndOfStream, TransportError)) or (
+                isinstance(error, MCPError) and error.code == CONNECTION_CLOSED
+            ):
+                self._state(server, "disconnected", error=type(error).__name__)
             return ToolResult(False, f"MCP call failed ({type(error).__name__}); remote completion may be unknown. No automatic retry.")
 
     def close(self):

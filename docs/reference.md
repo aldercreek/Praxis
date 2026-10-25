@@ -79,7 +79,11 @@ Messages to idle workers start work; running workers receive them at execution b
 
 ## MCP servers
 
-Configure external tools in `~/.praxis/mcp.json`. Built-in tools work without it. Supported transports are local stdio and remote Streamable HTTP.
+Configure external tools in `<PRAXIS_DATA_DIR>/mcp.json` (default `~/.praxis/mcp.json`). Built-in tools work without it. Supported transports are local stdio and remote Streamable HTTP. The shared service loads this file at startup; restart the service after editing it.
+
+Enabled servers connect in the background, up to eight at once. Each gets at most three attempts, waiting one then two seconds between failures; each attempt uses `startup_timeout_sec` (default 30 seconds). Disabled servers remain visible in status without starting a transport. Agents share connected clients, but keep their own activated tools and approval context. Closing an agent does not close these shared clients. Available service descriptions refresh before each model request.
+
+`GET /api/mcp/servers` returns all configured server names and states through the authenticated local API. States are `disabled`, `queued`, `connecting`, `retrying`, `connected`, `failed`, and `disconnected`. Errors contain only their category, never server responses or credentials. Disconnections observed during calls update status; no tool call is automatically retried. Both clients display names and states with `/mcp`.
 
 ```json
 {

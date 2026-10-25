@@ -114,6 +114,9 @@ class TerminalSession:
             "commands"
         ]
 
+    def mcp_servers(self):
+        return self.client.request("GET", "/api/mcp/servers")["servers"]
+
     def stop_command(self, command_id):
         return self.client.request(
             "POST", f"/api/sessions/{self.id}/commands/{command_id}/stop"

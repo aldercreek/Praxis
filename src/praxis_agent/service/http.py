@@ -54,6 +54,9 @@ def create_app(manager, *, token, instance_id, heartbeat=15.0, poll_interval=0.1
             await asyncio.to_thread(manager.list, request.query_params.get("workspace"))
         )
 
+    async def mcp_servers(request):
+        return JSONResponse(manager.mcp_status())
+
     async def snapshot(request):
         return JSONResponse(
             await asyncio.to_thread(store.snapshot, request.path_params["session_id"])
@@ -200,6 +203,7 @@ def create_app(manager, *, token, instance_id, heartbeat=15.0, poll_interval=0.1
 
     routes = [
         Route("/api/health", health),
+        Route("/api/mcp/servers", mcp_servers),
         Route("/api/settings", configure, methods=["PUT"]),
         Route("/api/sessions", sessions, methods=["GET", "POST"]),
         Route("/api/sessions/{session_id}/snapshot", snapshot),

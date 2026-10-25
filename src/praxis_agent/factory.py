@@ -47,6 +47,7 @@ def create_default_agent(
     session_database_path: Path | None = None,
     enable_multi_agent: bool = True,
     session_store=None,
+    mcp: MCPConnections | None = None,
 ) -> Agent:
     """使用环境配置和内置工具创建默认 Agent。"""
     if resume_latest and resume_session_id is not None:
@@ -128,22 +129,23 @@ def create_default_agent(
     agent.tool_registry.register(
         create_skill_tool(skills, max_chars=config.context_policy.max_tool_output_chars)
     )
-    mcp = None
+    owns_mcp = mcp is None
     try:
-        mcp = MCPConnections()
-        mcp.start()
+        if owns_mcp:
+            mcp = MCPConnections()
+            mcp.start()
         release_mcp_tools = mcp.register(
             agent.tool_registry, check_execution=control.check
         )
-        agent.mcp_catalog = mcp.catalog()
+        agent.mcp_catalog = mcp.catalog
     except BaseException:
         try:
-            if mcp is not None:
+            if owns_mcp and mcp is not None:
                 mcp.close()
         finally:
             agent.close()
         raise
-    agent.close_callbacks = (release_mcp_tools, mcp.close, *agent.close_callbacks)
+    agent.close_callbacks = (release_mcp_tools, *((mcp.close,) if owns_mcp else ()), *agent.close_callbacks)
 
     if not enable_multi_agent:
         agent.restore_history(history)
@@ -191,7 +193,7 @@ def create_default_agent(
             tool_registry=registry,
             workspace=handle.workspace,
             name=agent_id,
-            mcp_catalog=mcp.catalog(),
+            mcp_catalog=mcp.catalog,
             reset_code_worker=lambda: code_runtime.release_agent(agent_id),
             event_sink=sink,
             max_parallel_tools=config.max_parallel_tools,

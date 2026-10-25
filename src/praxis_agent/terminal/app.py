@@ -185,8 +185,9 @@ class PraxisApp(App[int]):
             await self._draw(switching=True)
         self._main_screen.query_one("#task", Composer).focus()
         if self.initial_task:
-            self._input_history.append(self.initial_task)
-            self._start(self.initial_task)
+            editor = self._main_screen.query_one("#task", Composer)
+            editor.text = self.initial_task
+            self.on_message_submitted(Composer.Submitted(editor))
         self._refresh_bottom()
 
     def _display(self, screen: Screen, renderable: RenderableType | None) -> None:
@@ -416,6 +417,7 @@ class PraxisApp(App[int]):
         return [(name, description) for name, description in (
             ("/clear", "Clear current chat"), ("/help", "Keyboard shortcuts"), ("/exit", "Quit Praxis"),
             ("/commands", "List command sessions"), ("/stop-command", "Stop a command by its session ID"),
+            ("/mcp", "Show MCP service status"),
         ) if text.startswith("/") and name.startswith(text)]
 
     def action_complete_command(self) -> None:
@@ -655,6 +657,8 @@ class PraxisApp(App[int]):
             self.action_request_exit()
         elif task.lower() == "/help":
             self.action_show_shortcuts()
+        elif task.lower() == "/mcp":
+            self.run_worker(self._show_mcp(), group="mcp-status", exclusive=True)
         elif task.lower() == "/commands":
             commands = self.connection.commands()
             text = "\n".join(f"{item['session_id']}  {item['status']}  {' '.join(item['argv'])}"
@@ -669,6 +673,20 @@ class PraxisApp(App[int]):
         else:
             self._start(task)
         self._refresh_bottom()
+
+    async def _show_mcp(self):
+        states = {
+            "disabled": "已禁用", "queued": "等待连接", "connecting": "连接中",
+            "retrying": "等待重试", "connected": "已连接", "failed": "连接失败",
+            "disconnected": "已断开",
+        }
+        try:
+            servers = await asyncio.to_thread(self.connection.mcp_servers)
+            text = "\n".join(f"{item['name']}    {states.get(item['state'], item['state'])}"
+                             for item in servers) or "未配置 MCP 服务"
+            self.push_screen(DetailsScreen("MCP 服务", Text(text)))
+        except Exception as error:
+            self.notify(str(error), severity="error")
 
     async def _stop_command(self, session_id):
         try:

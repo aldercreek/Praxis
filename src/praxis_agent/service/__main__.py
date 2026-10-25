@@ -12,6 +12,7 @@ from uuid import uuid4
 
 import uvicorn
 
+from praxis_agent.mcp import MCPConnections
 from praxis_agent.sessions import SQLiteSessionStore
 from praxis_agent.sessions.database import data_directory
 
@@ -32,7 +33,9 @@ async def serve(directory):
         # No database opening or recovery before winning process ownership.
         store = ServiceStore(SQLiteSessionStore(directory / "state.sqlite3"))
         store.recover()
-        manager = SessionManager(store)
+        mcp = MCPConnections(directory / "mcp.json")
+        manager = SessionManager(store, mcp=mcp)
+        mcp.start()
         token = secrets.token_urlsafe(32)
         atomic_write(directory / "service.token", token)
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
