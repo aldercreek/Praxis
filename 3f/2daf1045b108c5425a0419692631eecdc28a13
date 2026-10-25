@@ -1,0 +1,21 @@
+tests/test_worker_execution.py
+  s_da4263abd40288::t_862f9d3f865304 12,66
+tests/test_single_agent.py
+  s_da4263abd40288::t_862f9d3f865304 2,26
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.51-trip",
+  "base_commit_sha": "3f2daf1045b108c5425a0419692631eecdc28a13",
+  "prompts": {},
+  "sessions": {
+    "s_da4263abd40288": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a17135-e366-75a1-bfc8-4f1cd0fdd2e7",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "aldercreek <57739268+aldercreek@users.noreply.github.com>"
+    }
+  }
+}
