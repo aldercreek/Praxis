@@ -1,3 +1,4 @@
+from support.terminal import FakeConnection
 """Regression coverage for the terminal's layout, context color and agent navigation."""
 
 import asyncio
@@ -51,8 +52,7 @@ def test_missing_capacity_has_no_placeholder():
 def test_welcome_keeps_large_wordmark_model_and_shortened_directory(terminal_app, width):
     async def exercise():
         app = terminal_app
-        app.agent = SimpleNamespace(workspace=Path("D:/Projects/long-parent-directory/Praxis"),
-                                    session_model="auto(free)")
+        app.connection = FakeConnection(workspace="D:/Projects/long-parent-directory/Praxis")
         async with app.run_test(size=(width, 20)) as pilot:
             await pilot.pause()
             welcome = app.query_one("#welcome", Static)
@@ -74,7 +74,7 @@ def test_welcome_keeps_large_wordmark_model_and_shortened_directory(terminal_app
 def test_welcome_only_compacts_when_large_title_cannot_fit(terminal_app, size):
     async def exercise():
         app = terminal_app
-        app.agent = SimpleNamespace(workspace=Path("D:/Projects/Praxis"), session_model="auto(free)")
+        app.connection = FakeConnection()
         async with app.run_test(size=size) as pilot:
             await pilot.pause()
             welcome = app.query_one("#welcome", Static)
@@ -198,18 +198,20 @@ def test_running_indicators_remain_static_across_ticks_and_cancellation(terminal
     async def exercise():
         app = terminal_app
         app.animation_level = "full"
-        app.busy, app.current_run = True, Run("main")
+        app.connection = FakeConnection(active=True)
+        app.busy, app.current_turn_id = True, "T1"
         async with app.run_test(size=(80, 24)) as pilot:
             app.sink.emit(TurnStarted("main", "主任务"))
             app.sink.emit(ChildAgentStatus("main", "child", "running", "子任务"))
             await wait_for_ui(pilot, lambda: len(app.query(AgentTab)) == 2)
             for timestamp in (100.0, 100.1, 100.5):
-                monkeypatch.setattr("praxis_agent.terminal.app.monotonic", lambda: timestamp)
+                monkeypatch.setattr("praxis_agent.terminal.views.monotonic", lambda: timestamp)
                 await app._tick()
                 await pilot.pause()
                 assert [tab.renderable.plain for tab in app.query(AgentTab)] == ["• Main agent", "• Agent 1"]
                 assert app.query_one("#status").renderable.plain.startswith("• ")
             await pilot.press("escape")
+            await wait_for_ui(pilot, lambda: app.stopping)
             assert app.query_one("#status").renderable.plain.startswith("• Stopping")
             assert [tab.renderable.plain for tab in app.query(AgentTab)] == ["• Main agent", "• Agent 1"]
     asyncio.run(exercise())
@@ -336,7 +338,8 @@ def test_agent_ending_is_visible_retained_and_not_overwritten_by_shutdown(
     async def exercise():
         app = terminal_app
         app.busy = True
-        app.current_run = Run("main")
+        app.connection = FakeConnection(active=True)
+        app.current_turn_id = "T1"
         async with app.run_test(size=(80, 25)) as pilot:
             app.sink.emit(TurnStarted("main", "父任务"))
             app.sink.emit(ChildAgentStatus("main", "child", "queued", "子任务"))
@@ -346,6 +349,7 @@ def test_agent_ending_is_visible_retained_and_not_overwritten_by_shutdown(
             app.sink.emit(ChildAgentEvent("main", "child", TurnStarted("child", "子任务", occurred_at=10)))
             await wait_for_ui(pilot, lambda: tab.renderable.plain == "• Agent 1")
             await pilot.press("alt+right", "escape")
+            await wait_for_ui(pilot, lambda: app.stopping)
             assert tab.renderable.plain == "• Agent 1"  # Cancel request is not cleanup completion.
             assert "Stopping" in app.query_one("#status").renderable.plain
             app.sink.emit(ChildAgentEvent("main", "child", ending))
@@ -440,7 +444,7 @@ def test_input_wrap_resize_and_explicit_newline_preserve_text(terminal_app, wait
 def test_queued_input_visible_editable_and_consumed_into_transcript(terminal_app, wait_for_ui):
     async def exercise():
         app = terminal_app
-        app.agent = SimpleNamespace()
+        app.connection = FakeConnection(active=True)
         app.busy = True
         async with app.run_test(size=(80, 28)) as pilot:
             editor = app.query_one(Composer)
@@ -451,11 +455,12 @@ def test_queued_input_visible_editable_and_consumed_into_transcript(terminal_app
             assert pending.render_line(0).text.strip() == "› 补充检查测试"
             assert all(segment.style.color.name == "#a0a0a0"
                        for segment in pending.render_line(0) if segment.text.strip())
-            assert app.user_input.qsize() == 1 and not editor.text
+            assert len(app.connection.pending) == 1 and not editor.text
             await pilot.press("shift+left")
-            assert editor.text == "补充检查测试" and app.user_input.empty()
+            await wait_for_ui(pilot, lambda: editor.text == "补充检查测试" and not app.connection.pending)
             await pilot.press("enter")
-            task = app.user_input.get_nowait()
+            await wait_for_ui(pilot, lambda: bool(app.connection.pending))
+            task = app.connection.pending.pop(0)["content"]
             app.sink.emit(MessagesReceived("root", ({"role": "user", "content": task},), source="user"))
             await wait_for_ui(pilot, lambda: bool(app.query("#record-0")))
             block = app.query_one("#record-0").renderable
@@ -474,7 +479,8 @@ def test_escape_from_either_page_cancels_whole_tree_without_exiting(terminal_app
         app = terminal_app
         parent, child = Run("main"), Run("child")
         parent.add_child(child)
-        app.busy, app.current_run = True, parent
+        app.connection = FakeConnection(active=True)
+        app.busy, app.current_turn_id = True, "T1"
         async with app.run_test(size=(80, 25)) as pilot:
             app.sink.emit(ChildAgentStatus("root", "child", "running", "测试"))
             await wait_for_ui(pilot, lambda: len(app.query(AgentTab)) == 2)
@@ -482,7 +488,7 @@ def test_escape_from_either_page_cancels_whole_tree_without_exiting(terminal_app
                 await pilot.press("alt+right")
                 await wait_for_ui(pilot, lambda: app.selected_agent_id == "child")
             await pilot.press("escape")
-            assert parent.cancelled.is_set() and child.cancelled.is_set()
+            await wait_for_ui(pilot, lambda: app.connection.cancelled and app.stopping)
             assert app.stopping and app.is_running
             assert "Stopping" in app.query_one("#status").renderable.plain
     asyncio.run(exercise())

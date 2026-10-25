@@ -1,3 +1,4 @@
+from support.terminal import FakeConnection
 """Exercise real mouse/key events without touching the user's system clipboard."""
 
 import asyncio
@@ -218,7 +219,8 @@ def test_native_clipboard_result_never_cancels_execution(
 ):
     async def exercise():
         app = terminal_app
-        app.busy, app.current_run = True, Run("main")
+        app.connection = FakeConnection(active=True)
+        app.busy, app.current_turn_id = True, "T1"
         app.store.get("main").committed_blocks.append(MessageBlock("copy safely"))
         native_copy = Mock(side_effect=pyperclip.PyperclipException("unavailable") if failure else None)
         monkeypatch.setattr(pyperclip, "copy", native_copy)
@@ -237,7 +239,7 @@ def test_native_clipboard_result_never_cancels_execution(
             monkeypatch.setattr(app, "copy_to_clipboard", copy)
             await pilot.press("ctrl+c")
             native_copy.assert_called_once_with("copy safely")
-            assert not app.current_run.cancelled.is_set()
+            assert not app.connection.cancelled
             assert app.busy and not app.stopping and app.is_running
             assert not notify.called
             hint = app.query_one("#hint", FooterHint)
@@ -251,22 +253,23 @@ def test_native_clipboard_result_never_cancels_execution(
     asyncio.run(exercise())
 
 
-def test_editor_selection_copies_before_cancel_and_no_selection_cancels(terminal_app):
+def test_editor_selection_copies_before_cancel_and_no_selection_cancels(terminal_app, wait_for_ui):
     async def exercise():
         app = terminal_app
-        app.busy, app.current_run = True, Run("main")
+        app.connection = FakeConnection(active=True)
+        app.busy, app.current_turn_id = True, "T1"
         async with app.run_test(size=(80, 26)) as pilot:
             editor = app.query_one(Composer)
             editor.load_draft("草稿也能复制")
             editor.select_all()
             await pilot.press("ctrl+c")
             assert app.clipboard == "草稿也能复制"
-            assert not app.current_run.cancelled.is_set()
+            assert not app.connection.cancelled
             editor.move_cursor(editor.document.end)
             await pilot.press("ctrl+shift+c")
-            assert not app.current_run.cancelled.is_set()
+            assert not app.connection.cancelled
             await pilot.press("ctrl+c")
-            assert app.current_run.cancelled.is_set() and app.stopping
+            await wait_for_ui(pilot, lambda: app.connection.cancelled and app.stopping)
             assert app.is_running and editor.text == "草稿也能复制"
     asyncio.run(exercise())
 

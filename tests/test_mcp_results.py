@@ -16,7 +16,8 @@ from praxis_agent.context.capacity import HeuristicTokenEstimator
 from praxis_agent.context.model_catalog import MODEL_INPUT_CATALOG, MODEL_LIMIT_CATALOG
 from praxis_agent.context.summarizer import summary_input, summary_sources
 from praxis_agent.context.tool_output import preview_tool_outputs
-from praxis_agent.desktop.event_adapter import Transcript, display_event
+from praxis_agent.service.transcript import Transcript
+from praxis_agent.service.events import display_event
 from praxis_agent.events import ToolFinished
 from praxis_agent.mcp import MCPConnections
 from praxis_agent.mcp_results import decode_tool_output, mcp_tool_result

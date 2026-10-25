@@ -5,345 +5,44 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-from concurrent.futures import CancelledError, Future, InvalidStateError
-from dataclasses import dataclass
-from queue import Empty, Queue, SimpleQueue
-from threading import Lock, Thread
-from time import monotonic
-from typing import TYPE_CHECKING, ClassVar
+from concurrent.futures import Future, InvalidStateError
+from pathlib import Path
+from queue import Empty, SimpleQueue
+from threading import Thread
+from typing import ClassVar
 
 import pyperclip
-from rich.console import Group, RenderableType
+from rich.console import RenderableType
 from rich.text import Text
 from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, HorizontalScroll, Vertical, VerticalScroll
-from textual.geometry import Region, Size
-from textual.layouts.vertical import VerticalLayout
-from textual.message import Message
-from textual.screen import ModalScreen, Screen
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.screen import Screen
 from textual.theme import Theme
-from textual.widgets import OptionList, Static
+from textual.widgets import Static
 
-from praxis_agent.execution import ExecutionStopped, Run, current_handle, run_operation
 from praxis_agent.terminal.cells import (
     ACCENT,
     MessageBlock,
-    ToolHeading,
     WelcomeHeader,
-    approval_content,
-    tool_preview,
 )
 from praxis_agent.terminal.composer import Composer
 from praxis_agent.terminal.screen import ConversationScreen
 from praxis_agent.terminal.selection import SelectableText
-from praxis_agent.terminal.views import ToolBlock, ViewEventSink, ViewStore
-
-if TYPE_CHECKING:
-    from praxis_agent.agent import Agent
-
-
-@dataclass
-class Approval:
-    tool: str
-    arguments: dict
-    future: Future
-
-
-class FooterHint(Static):
-    """Temporarily replace a footer hint without a popup or a layout change."""
-
-    def __init__(self, *, id: str) -> None:
-        super().__init__("", id=id)
-        self._hint = Text()
-        self._flash_timer = None
-
-    def update_hint(self, hint: Text) -> None:
-        self._hint = hint
-        if self._flash_timer is None and self.renderable != hint:
-            self.update(hint)
-
-    def flash(self, text: str, *, error: bool = False) -> None:
-        self.clear_flash()
-        self.update(Text(text, style="red" if error else "", no_wrap=True, overflow="ellipsis"))
-        self._flash_timer = self.set_timer(3, self.clear_flash)
-
-    @on(events.Hide)
-    def clear_flash(self) -> None:
-        if self._flash_timer is not None:
-            self._flash_timer.stop()
-            self._flash_timer = None
-        self.update(self._hint)
-
-
-class ApprovalPanel(Vertical):
-    """An inline choice in the bottom pane; decisions still resolve the existing Future."""
-
-    DEFAULT_CSS = """
-    ApprovalPanel { display: none; height: auto; padding: 0 1; }
-    #approval-heading { height: 1; text-style: bold; }
-    #approval-content { height: auto; }
-    #approval-overflow { height: 1; color: $text-muted; }
-    #approval-choices { height: 2; min-height: 2; border: none; padding: 0;
-                        background: transparent; scrollbar-size: 0 0; }
-    #approval-choices > .option-list--option { padding: 0; }
-    #approval-choices > .option-list--option-highlighted {
-        background: transparent; color: $foreground; text-style: bold;
-    }
-    #approval-choices > .option-list--option-hover { background: transparent; }
-    #approval-hint { height: 1; color: $text-muted; }
-    """
-    BINDINGS: ClassVar[list[Binding]] = [
-        Binding("y,1", "allow", "Allow once", show=False),
-        Binding("n,2,escape", "deny", "Deny", show=False),
-    ]
-
-    class Decided(Message):
-        def __init__(self, request: Approval, allowed: bool) -> None:
-            super().__init__()
-            self.request = request
-            self.allowed = allowed
-
-    def __init__(self) -> None:
-        super().__init__(id="approval")
-        self.request: Approval | None = None
-        self.label = ""
-
-    def compose(self) -> ComposeResult:
-        yield Static("", id="approval-heading")
-        yield SelectableText("", id="approval-content")
-        yield Static("", id="approval-overflow")
-        yield OptionList("1. Allow once (y)", "2. Deny (n)", id="approval-choices")
-        yield FooterHint(id="approval-hint")
-
-    def show_request(self, request: Approval, label: str) -> None:
-        self.request = request
-        self.label = label
-        self.display = True
-        self.fit_content()
-        choices = self.query_one(OptionList)
-        choices.highlighted = 0
-        choices.focus()
-
-    def on_resize(self) -> None:
-        self.fit_content()
-
-    def fit_content(self) -> None:
-        if self.request is None:
-            return
-        width = max(1, self.app.size.width - 2)
-        question = "Run this command?" if self.request.tool == "run_command" else "Allow this action?"
-        heading = Text(f"{self.label} · {question}", no_wrap=True, overflow="ellipsis")
-        self.query_one("#approval-heading", Static).update(heading)
-        content = approval_content(self.request.tool, self.request.arguments)
-        rows = self.app.console.render_lines(content, self.app.console.options.update(width=width), pad=False)
-        # Reserve one history row plus question, two choices and confirmation hints.
-        budget = max(0, min(10, self.app.size.height - 5))
-        hidden = len(rows) > budget
-        shown = max(0, budget - int(hidden))
-        self.query_one("#approval-content", Static).update(
-            Group(*(Text.assemble(*((s.text, s.style) for s in row)) for row in rows[:shown]))
-        )
-        self.query_one("#approval-content").display = shown > 0
-        overflow = self.query_one("#approval-overflow", Static)
-        overflow.display = hidden and budget > 0
-        overflow.update(Text(f"… {len(rows) - shown} lines omitted · Ctrl+T for details",
-                             no_wrap=True, overflow="ellipsis"))
-        self.query_one("#approval-hint", FooterHint).update_hint(shortcut_line([
-            ("Enter", "Confirm"), ("Esc", "Stop"), ("↑/↓", "Select"), ("Ctrl+T", "Details"),
-        ], width))
-
-    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        event.stop()
-        self._decide(event.option_index == 0)
-
-    def _decide(self, allowed: bool) -> None:
-        if self.request is not None:
-            self.post_message(self.Decided(self.request, allowed))
-            self.request = None
-
-    def action_allow(self) -> None:
-        self._decide(True)
-
-    def action_deny(self) -> None:
-        self._decide(False)
-
-
-class DetailsScreen(ModalScreen[None]):
-    """A full-screen transcript/parameter viewer, independent of the main scroll position."""
-
-    DEFAULT_CSS = """
-    DetailsScreen { background: $background; padding: 0 1; }
-    #details-heading { height: auto; padding: 1 0; text-style: bold; }
-    #details-scroll { height: 1fr; scrollbar-size: 0 0; }
-    #details-hint { height: 1; color: $text-muted; }
-    """
-    BINDINGS: ClassVar[list[Binding]] = [Binding("escape,q", "close", "Back", show=False)]
-
-    def __init__(self, title: str, content, *, agent_id: str | None = None,
-                 request: Approval | None = None) -> None:
-        super().__init__()
-        self.title = title
-        self.content = content
-        self.agent_id = agent_id
-        self.request = request
-
-    def compose(self) -> ComposeResult:
-        yield Static(Text(self.title), id="details-heading")
-        with VerticalScroll(id="details-scroll"):
-            yield SelectableText(self.content, id="details-content")
-        yield FooterHint(id="details-hint")
-
-    def on_mount(self) -> None:
-        self.query_one("#details-scroll", VerticalScroll).focus()
-        self.on_resize()
-
-    def on_resize(self) -> None:
-        if self.is_mounted:
-            self.query_one("#details-hint", FooterHint).update_hint(shortcut_line([
-                ("Ctrl+T", "Back"), ("Esc", "Stop" if self.app.busy else "Back"),
-                ("↑/↓", "Scroll"), ("Ctrl+C", "Copy selected text"),
-            ], max(1, self.app.size.width - 2)))
-
-    def update_content(self, content) -> None:
-        pane = self.query_one("#details-scroll", VerticalScroll)
-        position = pane.scroll_y
-        self.query_one("#details-content", Static).update(content)
-        self.call_after_refresh(pane.scroll_to, y=position, animate=False, immediate=True)
-
-    def action_close(self) -> None:
-        self.dismiss()
-
-
-def _duration(seconds: float) -> str:
-    minutes, seconds = divmod(int(seconds), 60)
-    return f"{minutes}:{seconds:02d}"
-
-
-def shortcut_line(actions: list[tuple[str, str]], width: int) -> Text:
-    """Keep whole hints in priority order; never clip a key or leave a separator."""
-    line = Text(no_wrap=True)
-    for key, description in actions:
-        item = Text(key, style="bold") + Text((" " if key else "") + description)
-        separator = " · " if line else ""
-        if line.cell_len + len(separator) + item.cell_len <= width:
-            line.append(separator)
-            line.append_text(item)
-    return line
-
-
-class ToolRecord(Vertical):
-    """A selectable activity summary; full results live in the transcript viewer."""
-
-    def __init__(self, calls: tuple[ToolBlock, ...], index: int) -> None:
-        super().__init__(id=f"record-{index}", classes="record")
-        self.calls = calls
-
-    def compose(self) -> ComposeResult:
-        yield SelectableText(self._title(), classes="tool-title")
-        preview = SelectableText(tool_preview(self.calls), classes="tool-preview")
-        preview.display = bool(preview.renderable)
-        yield preview
-
-    def update_calls(self, calls: tuple[ToolBlock, ...]) -> None:
-        self.calls = calls
-        title = self.query_one(".tool-title", Static)
-        content = self._title()
-        if title.renderable != content:
-            title.update(content)
-        preview = tool_preview(calls)
-        widget = self.query_one(".tool-preview", Static)
-        if widget.renderable != preview:
-            widget.update(preview)
-        widget.display = bool(preview)
-
-    def _title(self) -> ToolHeading:
-        # Wrap during rendering, when Rich has the actual layout width, including the first frame.
-        return ToolHeading(self.calls)
-
-class AgentStrip(HorizontalScroll):
-    """Keep agent navigation on one line, including ordinary mouse-wheel input."""
-
-    def move(self, direction: int) -> None:
-        self.scroll_relative(x=direction * max(4, self.size.width // 3),
-                             animate=False, immediate=True)
-
-    def _on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
-        event.stop()
-        event.prevent_default()
-        self.move(1)
-
-    def _on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
-        event.stop()
-        event.prevent_default()
-        self.move(-1)
-
-    def watch_scroll_x(self, old_value: float, new_value: float) -> None:
-        super().watch_scroll_x(old_value, new_value)
-        self.call_after_refresh(self.refresh_edges)
-
-    def on_resize(self) -> None:
-        self.call_after_refresh(self.refresh_edges)
-        self.call_after_refresh(self.reveal_selected)
-
-    def reveal_selected(self) -> None:
-        if self.parent.display:
-            for tab in self.query(".selected"):
-                tab.scroll_visible(animate=False, immediate=True)
-
-    def refresh_edges(self) -> None:
-        self.parent.query_one("#agents-prev").styles.visibility = "visible" if self.scroll_x > 0 else "hidden"
-        self.parent.query_one("#agents-next").styles.visibility = (
-            "visible" if self.scroll_x < self.max_scroll_x else "hidden")
-
-
-class AgentTab(Static, can_focus=True):
-    """An agent selector whose selected appearance is independent of keyboard focus."""
-
-    BINDINGS: ClassVar[list[Binding]] = [
-        Binding("up", "app.previous_agent", show=False),
-        Binding("down", "app.next_agent", show=False),
-        Binding("left", "app.previous_agent", show=False),
-        Binding("right", "app.next_agent", show=False),
-    ]
-
-    class Selected(Message):
-        def __init__(self, agent_id: str) -> None:
-            super().__init__()
-            self.agent_id = agent_id
-
-    def __init__(self, agent_id: str, *, id: str) -> None:
-        super().__init__("", id=id)
-        self.agent_id = agent_id
-
-    def on_focus(self) -> None:
-        self.post_message(self.Selected(self.agent_id))
-
-
-class ConversationLayout(VerticalLayout):
-    """Keep the welcome page at the top; anchor conversation controls at the bottom."""
-
-    def arrange(self, parent, children, size: Size):
-        placements = super().arrange(parent, children, size)
-        if not parent.app.empty_session:
-            return placements
-        for index, placement in enumerate(placements):
-            if placement.widget.id != "transcript":
-                continue
-            pane = placement.widget
-            region = placement.region
-            gutter = pane.styles.gutter
-            content_height = pane.get_content_height(
-                region.size, parent.app.size, max(0, region.width - gutter.width))
-            unused = max(0, region.height - content_height - gutter.height)
-            placements[index] = placement._replace(
-                region=Region(region.x, region.y, region.width, region.height - unused))
-            for following in range(index + 1, len(placements)):
-                item = placements[following]
-                placements[following] = item._replace(region=item.region.translate((0, -unused)))
-            break
-        return placements
+from praxis_agent.terminal.views import ViewEventSink, ViewStore
+from praxis_agent.terminal.widgets import (
+    AgentStrip,
+    AgentTab,
+    Approval,
+    ApprovalPanel,
+    ConversationLayout,
+    DetailsScreen,
+    FooterHint,
+    ToolRecord,
+    _duration,
+    shortcut_line,
+)
 
 
 class PraxisApp(App[int]):
@@ -402,7 +101,7 @@ class PraxisApp(App[int]):
         Binding("alt+down", "jump_message(1)", "Next input", priority=True),
     ]
 
-    def __init__(self, sink: ViewEventSink, *, initial_task: str = "") -> None:
+    def __init__(self, sink: ViewEventSink, *, initial_task: str = "", connection=None) -> None:
         super().__init__()
         self.register_theme(Theme(
             name="praxis", primary=ACCENT, foreground="#f2f2f2",
@@ -412,22 +111,19 @@ class PraxisApp(App[int]):
         self.theme = "praxis"
         self.ansi_color = True
         self.sink = sink
-        self.agent: Agent | None = None
+        self.connection = connection
         self.store = ViewStore()
         self.selected_agent_id = "main"
         self.initial_task = initial_task
         self.busy = False
         self.closing = False
         self.stopping = False
-        self.current_run: Run | None = None
+        self.current_turn_id: str | None = None
         self.paused_inputs: list[str] = []
-        self._runner: Thread | None = None
         self._results: SimpleQueue[tuple[str | None, str, str]] = SimpleQueue()
-        self.user_input: Queue[str] = Queue()
         self._approvals: SimpleQueue[Approval] = SimpleQueue()
         self._approval: Approval | None = None
-        self._approval_lock = Lock()
-        self._approval_handles = set()
+        self._remote_approvals = {}
         self._tab_agents: dict[str, str] = {"agent-0": "main"}
         # Timer callbacks and page events run in separate asyncio tasks.
         self._view_lock = asyncio.Lock()
@@ -521,38 +217,6 @@ class PraxisApp(App[int]):
             self._cursor_visible = True
         super()._end_update()
 
-    def approve_tool_call(self, name: str, arguments: dict) -> bool:
-        """Called by execution threads; the UI owns all user input."""
-        if current_handle() is None:
-            return run_operation("approval", lambda handle: self.approve_tool_call(name, arguments))
-        request = Approval(name, dict(arguments), Future())
-        handle = current_handle()
-        with self._approval_lock:
-            if self.closing:
-                return False
-            self._approval_handles.add(handle)
-        unsubscribe = handle.on_cancel(request.future.cancel)
-        self._approvals.put(request)
-        try:
-            allowed = request.future.result()
-            handle.check()
-            return allowed
-        except CancelledError:
-            if self.closing:
-                return False
-            raise ExecutionStopped("approval cancelled")
-        finally:
-            unsubscribe()
-            request.future.cancel()
-            with self._approval_lock:
-                self._approval_handles.discard(handle)
-
-    def _cancel_approvals(self):
-        with self._approval_lock:
-            handles = tuple(self._approval_handles)
-        for handle in handles:
-            handle.cancel()
-
     async def _tick(self) -> None:
         async with self._view_lock:
             with self.batch_update():
@@ -563,55 +227,40 @@ class PraxisApp(App[int]):
             return
         self._remember_scroll()
         changed = self.sink.drain(self.store)
+        if self.connection is not None:
+            changed.update(self.connection.drain(self.store))
+            active = self.connection.summary.get("active_turn")
+            self.busy = active is not None
+            self.stopping = bool(active and active.get("cancel_requested"))
+            self.current_turn_id = active["id"] if active else None
+            self.paused_inputs = [item["content"] for item in self.connection.pending]
+            current = self._approval.approval_id if self._approval else None
+            if current and current not in self.connection.approvals:
+                self._approval.future.cancel()
+            queued = {getattr(item, "approval_id", "") for item in list(self._remote_approvals.values())}
+            for approval_id, data in self.connection.approvals.items():
+                if approval_id not in queued:
+                    approval = Approval(data["tool_name"], data["arguments"], Future(), approval_id)
+                    self._remote_approvals[approval_id] = approval
+                    self._approvals.put(approval)
+            for approval_id, approval in list(self._remote_approvals.items()):
+                if approval_id not in self.connection.approvals:
+                    approval.future.cancel()
+                    del self._remote_approvals[approval_id]
         while True:
             try:
-                run_id, operation, error = self._results.get_nowait()
+                operation, error = self._results.get_nowait()
             except Empty:
                 break
-            if operation == "closed":
-                self.exit(1 if error else 0)
-                return
-            if run_id is not None and (self.current_run is None or run_id != self.current_run.id):
-                continue
-            self._show_approval()
-            self.busy = False
-            self.stopping = False
-            changed.update(self.sink.drain(self.store))
-            if operation == "cancelled":
-                view = self.store.views["main"]
-                view.state = "cancelled"
-                view.finished_at = monotonic()
-                view._phase = "Stopped"
+            if error:
+                self.notify(error, severity="error")
             if operation == "clear" and not error:
                 self.sink.discard_pending()
                 self.store = ViewStore()
                 self.selected_agent_id = "main"
                 self._mounted_blocks = []
+                changed.add("main")
                 await self._main_screen.query_one("#blocks", Vertical).remove_children()
-                agents = self._main_screen.query_one(AgentStrip)
-                await agents.remove_children()
-                await agents.mount(AgentTab("main", id="agent-0"))
-                self._tab_agents = {"agent-0": "main"}
-            if error:
-                view = self.store.views["main"]
-                if view.state != "failed":
-                    view.committed_blocks.append(Text(error, style="red"))
-                    view.state = "failed"
-                    view.finished_at = monotonic()
-                    view._phase = "Execution failed"
-            changed.add("main")
-            field = self._main_screen.query_one("#task", Composer)
-            field.disabled = self.closing
-            if self.selected_agent_id == "main" and not self.closing and self._approval is None:
-                field.focus()
-        # 最后一次队列检查之后到达的输入，在本轮退出后继续执行。
-        if not self.busy and not self.closing:
-            try:
-                task = self.user_input.get_nowait()
-            except Empty:
-                pass
-            else:
-                self._start(task)
         await self._update_agents()
         if self.selected_agent_id in changed or self._mounted_agent != self.selected_agent_id:
             await self._draw(switching=self._mounted_agent != self.selected_agent_id)
@@ -634,7 +283,8 @@ class PraxisApp(App[int]):
         status = screen.query_one("#status", Static)
         running = view.state in {"running", "closing"} or (
             self.busy and is_main and view.state not in {"ended", "failed", "cancelled"})
-        status.display = not approval and not self.empty_session
+        reconnecting = bool(self.connection and getattr(self.connection, "connection_error", ""))
+        status.display = not approval and (not self.empty_session or reconnecting)
         if status.display:
             settling = view.state == "closing" or running and (self.stopping or self.closing)
             if settling:
@@ -652,15 +302,15 @@ class PraxisApp(App[int]):
                 text.append_text(capacity)
             if status.renderable != text:
                 status.update(text)
+            if reconnecting:
+                status.update("Reconnecting to Praxis…")
         editor = screen.query_one(Composer)
         editor.read_only = not is_main
-        with self.user_input.mutex:
-            queued = list(self.user_input.queue)
         retained = self.paused_inputs
         preview = screen.query_one("#pending", Static)
-        preview.display = is_main and bool(retained or queued) and not approval
+        preview.display = is_main and bool(retained) and not approval
         if preview.display:
-            pending = retained + queued
+            pending = retained
             lines = [Text(f"› {' '.join(item.split())}", no_wrap=True, overflow="ellipsis")
                      for item in pending[:2]]
             if len(pending) > 2:
@@ -675,12 +325,12 @@ class PraxisApp(App[int]):
         if shortcuts.display:
             welcome_space -= int(shortcuts.styles.max_height.value)
         if preview.display:
-            welcome_space -= min(3, len(retained) + len(queued))
+            welcome_space -= min(3, len(retained))
         welcome = screen.query_one("#welcome", Static)
         welcome.display = self.empty_session and welcome_space >= 4
         if welcome.display:
             content = WelcomeHeader(
-                getattr(self.agent, "workspace", None), getattr(self.agent, "session_model", None),
+                (Path(self.connection.summary["workspace"]) if self.connection else None), (self.connection.summary["model"] if self.connection else None),
                 compact=welcome_space < 7,
             )
             if welcome.renderable != content:
@@ -690,10 +340,10 @@ class PraxisApp(App[int]):
         if editor.read_only:
             actions = [("Alt+←/→", "Switch agent")]
         elif self.stopping or self.closing:
-            actions = [("", "Keep editing; send after stopping")]
+            actions = [("Enter", "Save input for later")]
         elif retained and not running:
             actions = [("Ctrl+R", "Send retained input"), ("Shift+←", "Edit pending")]
-        elif queued and not editor.text:
+        elif retained and not editor.text:
             actions = [("Shift+←", "Edit pending"), ("?", "Shortcuts")]
         elif editor.text:
             actions = [("Enter", "Send follow-up" if running else "Send"), ("Shift+Enter", "New line")]
@@ -790,24 +440,20 @@ class PraxisApp(App[int]):
         return True
 
     def action_edit_pending(self) -> None:
-        editor = self._main_screen.query_one(Composer)
-        if self.screen is not self._main_screen or editor.read_only or editor.text or self.closing:
+        editor = self._main_screen.query_one("#task", Composer)
+        if editor.text or not self.connection or not self.connection.pending:
             return
-        if self.paused_inputs:
-            task = self.paused_inputs.pop(0)
-        else:
-            try:
-                task = self.user_input.get_nowait()
-            except Empty:
-                return  # The agent may already have accepted this message.
-        editor.load_draft(task)
-        self._refresh_bottom()
+        item = self.connection.pending[0]
+        def remove():
+            self.connection.delete(item["command_id"])
+            self.call_from_thread(editor.load_draft, item["content"])
+        self._request("delete_input", remove)
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if action == "edit_pending":
             editor = self.focused
             return (isinstance(editor, Composer) and not editor.read_only and not editor.text
-                    and bool(self.paused_inputs or not self.user_input.empty()))
+                    and bool(self.paused_inputs))
         return super().check_action(action, parameters)
 
     @on(events.Click, "#agents-prev")
@@ -994,10 +640,7 @@ class PraxisApp(App[int]):
     @on(Composer.Submitted)
     def on_message_submitted(self, event: Composer.Submitted) -> None:
         task = event.text.strip()
-        if not task or self.closing or self.agent is None or self.selected_agent_id != "main":
-            return
-        if self.stopping and task.lower() != "/exit":
-            self.notify("Stopping. Input retained; press Enter to send after cleanup.")
+        if not task or self.closing or self.connection is None or self.selected_agent_id != "main":
             return
         if task.lower() == "/clear" and self.busy:
             self.notify("Wait for the current task to finish before clearing history.", severity="warning")
@@ -1013,7 +656,7 @@ class PraxisApp(App[int]):
         elif task.lower() == "/help":
             self.action_show_shortcuts()
         elif task.lower() == "/commands":
-            commands = self.agent.command_sessions.summaries()
+            commands = self.connection.commands()
             text = "\n".join(f"{item['session_id']}  {item['status']}  {' '.join(item['argv'])}"
                              for item in commands) or "No command sessions."
             self.push_screen(DetailsScreen("Command sessions · /stop-command <session_id>", Text(text)))
@@ -1023,66 +666,37 @@ class PraxisApp(App[int]):
                 self.notify("Usage: /stop-command <session_id>", severity="warning")
             else:
                 self.run_worker(self._stop_command(parts[1]))
-        elif self.busy:
-            self.user_input.put(task)
         else:
             self._start(task)
         self._refresh_bottom()
 
     async def _stop_command(self, session_id):
-        manager = self.agent.command_sessions
         try:
-            await asyncio.to_thread(manager.stop, session_id)
+            await asyncio.to_thread(self.connection.stop_command, session_id)
         except Exception as error:
             self.notify(str(error), severity="error")
-        else:
-            self.notify(f"Stopped {session_id}. Remaining output is available through wait_command.")
+
+    def _request(self, operation, action):
+        def execute():
+            try:
+                action()
+                self._results.put((operation, ""))
+            except Exception as error:
+                self._results.put((operation, str(error)))
+        Thread(target=execute, name="praxis-request", daemon=True).start()
 
     def _start(self, task: str) -> None:
-        if self.agent is None or self.busy or self.closing:
+        if self.connection is None or self.closing:
             return
-        self.busy = True
-        self.stopping = False
-        operation = "clear" if task.lower() == "/clear" else "run"
-        scope = Run("main") if operation == "run" else None
-        self.current_run = scope
-        self.agent.user_input = self.user_input
-        field = self._main_screen.query_one("#task", Composer)
-        field.disabled = operation == "clear"
-
-        def execute() -> None:
-            error = ""
-            completed_operation = operation
-            try:
-                if operation == "clear":
-                    self.agent.clear_history()
-                else:
-                    scope.execute(lambda: self.agent.run(task))
-            except ExecutionStopped:
-                completed_operation = "cancelled"
-            except Exception as failure:
-                error = f"{type(failure).__name__}: {failure}"
-            finally:
-                self._results.put((scope.id if scope is not None else None, completed_operation, error))
-
-        self._runner = Thread(target=execute, name="praxis-main", daemon=True)
-        self._runner.start()
+        if task.lower() == "/clear":
+            self._request("clear", self.connection.clear)
+        else:
+            self._request("input", lambda: self.connection.send(task))
 
     def action_stop_run(self) -> None:
-        if self.busy and self.current_run is not None:
-            if self.current_run.finished.done() or self.stopping:
-                return
-            self.stopping = True
-            while True:
-                try:
-                    self.paused_inputs.append(self.user_input.get_nowait())
-                except Empty:
-                    break
-            self.current_run.cancel()
-            if isinstance(self.screen, DetailsScreen):
-                self.screen.dismiss()
-            self._show_approval()
-            self._refresh_bottom()
+        if self.busy and self.current_turn_id and not self.stopping:
+            turn_id = self.current_turn_id
+            self._request("cancel", lambda: self.connection.cancel(turn_id))
         elif isinstance(self.screen, DetailsScreen):
             self.screen.dismiss()
         elif self._approval is not None:
@@ -1092,10 +706,8 @@ class PraxisApp(App[int]):
             self._refresh_bottom()
 
     def action_resume_pending(self) -> None:
-        if not self.busy and not self.closing and self.paused_inputs:
-            task = "\n\n".join(self.paused_inputs)
-            self.paused_inputs.clear()
-            self._start(task)
+        if self.connection and not self.busy and self.paused_inputs:
+            self._request("resume", self.connection.resume)
 
     def action_interrupt(self) -> None:
         if self._copy_selection():
@@ -1170,13 +782,17 @@ class PraxisApp(App[int]):
 
     @on(ApprovalPanel.Decided)
     def on_approval_decided(self, event: ApprovalPanel.Decided) -> None:
-        if event.request is self._approval:
-            if not event.request.future.done():
+        if self.connection and event.request is self._approval:
+            def decide():
+                result = self.connection.decide(event.request.approval_id, event.allowed)
                 try:
-                    event.request.future.set_result(event.allowed)
+                    if result["status"] == "cancelled":
+                        event.request.future.cancel()
+                    else:
+                        event.request.future.set_result(result["status"] == "approved")
                 except InvalidStateError:
-                    pass  # A cancellation callback won the approval race.
-            self._hide_approval()
+                    pass  # The SSE result may already have closed this display.
+            self._request("approval", decide)
 
     def _hide_approval(self) -> None:
         self._approval = None
@@ -1188,34 +804,12 @@ class PraxisApp(App[int]):
             self._main_screen.query_one("#task", Composer).focus()
 
     def action_request_exit(self) -> None:
-        if self.closing:
-            return
         self.closing = True
-        self._cancel_approvals()
-        if self.current_run is not None:
-            self.current_run.cancel()
-        if self._approval is not None and not self._approval.future.done():
-            self._approval.future.cancel()
-
-        def close() -> None:
-            error = ""
-            try:
-                if self._runner is not None:
-                    self._runner.join()
-                if self.agent is not None:
-                    self.agent.close()
-            except Exception as failure:
-                error = str(failure)
-            self._results.put((None, "closed", error))
-
-        Thread(target=close, name="praxis-close", daemon=True).start()
+        self.exit(0)
 
     def on_unmount(self) -> None:
         if not self.is_headless and self._driver is not None:
             self._driver.write("\x1b[0 q")
         self.closing = True
-        self._cancel_approvals()
-        if self.current_run is not None:
-            self.current_run.cancel()
-        if self._approval is not None:
-            self._approval.future.cancel()
+        if self.connection:
+            self.connection.close()

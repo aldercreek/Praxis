@@ -1,11 +1,7 @@
 from __future__ import annotations
 
 import json
-import os
-import sqlite3
-from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager
-from datetime import UTC, datetime
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -22,94 +18,40 @@ from praxis_agent.sessions.models import (
 )
 
 if TYPE_CHECKING:
-    from sqlite3 import Connection, Row
+    from sqlite3 import Connection
 
 
-_SCHEMA_VERSION = 5
-_INTERRUPTED_RUN_ERROR = "Praxis stopped before this run completed."
-_INTERRUPTED_TOOL_OUTPUT = (
-    "Tool execution was interrupted. Its completion is unknown.\n"
-    "Inspect the workspace before deciding whether to retry."
+from .codec import (
+    _encode_changed_files,
+    _encode_item,
+    _encode_plan,
+    _interrupted_tool_item,
+    _normalize_workspace,
+    _now_text,
+    _parse_time,
+    _session_from_row,
+    _session_summary_from_row,
+    _title_from_task,
 )
-
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS sessions (
-    id TEXT PRIMARY KEY,
-    workspace TEXT NOT NULL,
-    model TEXT NOT NULL,
-    title TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS sessions_workspace_updated_idx
-    ON sessions(workspace, updated_at DESC);
-
-CREATE TABLE IF NOT EXISTS runs (
-    id TEXT PRIMARY KEY,
-    session_id TEXT NOT NULL,
-    original_task TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (
-        status IN ('running', 'completed', 'failed', 'cancelled')
-    ),
-    error TEXT,
-    plan_json TEXT NOT NULL,
-    changed_files_json TEXT NOT NULL,
-    started_at TEXT NOT NULL,
-    finished_at TEXT,
-    FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE,
-    UNIQUE(session_id, id)
-);
-
-CREATE INDEX IF NOT EXISTS runs_session_started_idx
-    ON runs(session_id, started_at);
-
-CREATE TABLE IF NOT EXISTS conversation_items (
-    session_id TEXT NOT NULL,
-    sequence INTEGER NOT NULL,
-    run_id TEXT NOT NULL,
-    item_type TEXT NOT NULL,
-    payload_json TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    PRIMARY KEY(session_id, sequence),
-    FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE,
-    FOREIGN KEY(session_id, run_id)
-        REFERENCES runs(session_id, id) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS conversation_items_run_idx
-    ON conversation_items(run_id);
-
-CREATE TABLE IF NOT EXISTS context_view_operations (
-    session_id TEXT NOT NULL,
-    sequence INTEGER NOT NULL,
-    payload_json TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    PRIMARY KEY(session_id, sequence),
-    FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
-);
-
-"""
-
-
-def default_database_path() -> Path:
-    """返回 Praxis 默认的本地状态数据库路径。"""
-    return Path.home() / ".praxis" / "state.sqlite3"
+from .database import Database, default_database_path
+from .schema import _INTERRUPTED_RUN_ERROR, _SCHEMA, _SCHEMA_VERSION
 
 
 class SQLiteSessionStore:
     """使用单个 SQLite 数据库持久化会话、Run 和模型上下文。"""
 
-    def __init__(self, database_path: Path | None = None) -> None:
-        path = database_path or default_database_path()
-        self.database_path = path.expanduser().resolve()
-        try:
-            self.database_path.parent.mkdir(parents=True, exist_ok=True)
-        except OSError as error:
-            raise SessionStoreError(
-                f"cannot create session state directory: {error}"
-            ) from error
+    def __init__(self, database_path: Path | None = None, *, database: Database | None = None):
+        self.database = database or Database(database_path or default_database_path())
+        self.database_path = self.database.path
         self._initialize()
+
+    def _connection(self):
+        return self.database.connection()
+
+    def _transaction(self):
+        return self.database.transaction()
+
+    atomic = _transaction
 
     def create_session(
         self,
@@ -393,7 +335,7 @@ class SQLiteSessionStore:
                 UPDATE runs
                 SET status = ?, error = ?, plan_json = ?,
                     changed_files_json = ?, finished_at = ?
-                WHERE session_id = ? AND id = ?
+                WHERE session_id = ? AND id = ? AND status = 'running'
                 """,
                 (
                     run_state.status.value,
@@ -548,38 +490,6 @@ class SQLiteSessionStore:
             connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             connection.commit()
 
-    @contextmanager
-    def _connection(self) -> Iterator[Connection]:
-        connection: Connection | None = None
-        try:
-            connection = sqlite3.connect(
-                self.database_path,
-                timeout=30.0,
-            )
-            connection.row_factory = sqlite3.Row
-            connection.execute("PRAGMA foreign_keys = ON")
-            connection.execute("PRAGMA busy_timeout = 30000")
-            yield connection
-        except sqlite3.Error as error:
-            raise SessionStoreError(
-                f"session database error: {error}"
-            ) from error
-        finally:
-            if connection is not None:
-                connection.close()
-
-    @contextmanager
-    def _transaction(self) -> Iterator[Connection]:
-        with self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            try:
-                yield connection
-            except Exception:
-                connection.rollback()
-                raise
-            else:
-                connection.commit()
-
     @staticmethod
     def _require_session(connection: Connection, session_id: str) -> None:
         row = connection.execute(
@@ -596,7 +506,7 @@ class SQLiteSessionStore:
         run_id: str,
     ) -> None:
         row = connection.execute(
-            "SELECT 1 FROM runs WHERE session_id = ? AND id = ?",
+            "SELECT 1 FROM runs WHERE session_id = ? AND id = ? AND status = 'running'",
             (session_id, run_id),
         ).fetchone()
         if row is None:
@@ -623,12 +533,11 @@ class SQLiteSessionStore:
         cursor = connection.execute(
             """
             UPDATE runs
-            SET status = ?, error = ?, plan_json = ?,
+            SET error = ?, plan_json = ?,
                 changed_files_json = ?
-            WHERE session_id = ? AND id = ?
+            WHERE session_id = ? AND id = ? AND status = 'running'
             """,
             (
-                run_state.status.value,
                 run_state.error,
                 _encode_plan(run_state),
                 _encode_changed_files(run_state),
@@ -717,105 +626,3 @@ class SQLiteSessionStore:
             elif payload.get("type") == "function_call_output":
                 pending.pop(call_id, None)
         return list(pending)
-
-
-def _session_from_row(row: Row) -> SessionRecord:
-    return SessionRecord(
-        id=str(row["id"]),
-        workspace=Path(row["workspace"]),
-        model=str(row["model"]),
-        title=str(row["title"]),
-        created_at=_parse_time(row["created_at"]),
-        updated_at=_parse_time(row["updated_at"]),
-    )
-
-
-def _session_summary_from_row(row: Row) -> SessionSummary:
-    encoded_status = row["latest_run_status"]
-    return SessionSummary(
-        id=str(row["id"]),
-        title=str(row["title"]),
-        updated_at=_parse_time(row["updated_at"]),
-        latest_run_status=(
-            None if encoded_status is None else RunStatus(encoded_status)
-        ),
-    )
-
-
-def _encode_item(item: object) -> tuple[str, str]:
-    if isinstance(item, Mapping):
-        payload = dict(item)
-    else:
-        model_dump = getattr(item, "model_dump", None)
-        if not callable(model_dump):
-            raise SessionStoreError(
-                "conversation item must be a mapping or SDK model"
-            )
-        payload = model_dump(mode="json")
-
-    if not isinstance(payload, Mapping):
-        raise SessionStoreError("conversation item must encode to an object")
-
-    item_type = payload.get("type")
-    if not isinstance(item_type, str) or not item_type:
-        if isinstance(payload.get("role"), str):
-            item_type = "message"
-        else:
-            raise SessionStoreError("conversation item has no type")
-    try:
-        payload_json = json.dumps(
-            payload,
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-    except (TypeError, ValueError) as error:
-        raise SessionStoreError(
-            f"conversation item is not JSON serializable: {error}"
-        ) from error
-    return item_type, payload_json
-
-
-def _encode_plan(run_state: RunState) -> str:
-    return json.dumps(
-        [
-            {"step": step.description, "status": step.status.value}
-            for step in run_state.plan
-        ],
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-
-
-def _encode_changed_files(run_state: RunState) -> str:
-    return json.dumps(
-        sorted(run_state.changed_files),
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-
-
-def _interrupted_tool_item(call_id: str) -> dict[str, object]:
-    return {
-        "type": "function_call_output",
-        "call_id": call_id,
-        "output": json.dumps(
-            {"success": False, "output": _INTERRUPTED_TOOL_OUTPUT},
-            ensure_ascii=False,
-        ),
-    }
-
-
-def _normalize_workspace(workspace: Path) -> str:
-    return os.path.normcase(str(workspace.expanduser().resolve()))
-
-
-def _title_from_task(task: str) -> str:
-    return " ".join(task.split())[:80]
-
-
-def _now_text() -> str:
-    return datetime.now(UTC).isoformat(timespec="microseconds")
-
-
-def _parse_time(value: str) -> datetime:
-    return datetime.fromisoformat(value)

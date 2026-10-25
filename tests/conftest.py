@@ -33,3 +33,5 @@ def drag_selection():
         await pilot.pause()
 
     return drag
+
+pytest_plugins = ["support.service"]
