@@ -3,64 +3,46 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from queue import Empty, SimpleQueue
 from threading import Lock
 from typing import TYPE_CHECKING
 
-from praxis_agent.config import DEFAULT_MAX_PARALLEL_TOOLS, ModelConfig
+from praxis_agent.config import DEFAULT_MAX_PARALLEL_TOOLS
 from praxis_agent.context import (
     ContextManager,
     ContextStatus,
     ConversationHistory,
 )
 from praxis_agent.context.operations import ContextOperation
-from praxis_agent.context.summarizer import SUMMARY_INSTRUCTIONS, ModelContextSummarizer
 from praxis_agent.events import (
     AgentEvent,
     AssistantTextCompleted,
-    AssistantTextDelta,
     EventSink,
     MessagesReceived,
-    ModelRequestCompleted,
-    ModelRequestStarted,
-    PlanUpdated,
     TurnCancelled,
     TurnCompleted,
     TurnFailed,
     TurnStarted,
 )
-from praxis_agent.execution import ExecutionStopped, Run, current_run, run_operation
-from praxis_agent.mcp import MCPConnections
+from praxis_agent.execution import ExecutionStopped, Run, current_run
 from praxis_agent.model import (
     FunctionCall,
     ModelClient,
-    OpenAIModelClient,
 )
-from praxis_agent.multi_agent.models import ExecutionControl, MultiAgentConfig
+from praxis_agent.multi_agent.models import ExecutionControl
 from praxis_agent.multi_agent.runtime import AgentRuntime
-from praxis_agent.multi_agent.tools import (
-    PARENT_INSTRUCTIONS,
-    WORKER_INSTRUCTIONS,
-    register_parent_tools,
-    register_worker_tools,
-)
-from praxis_agent.planning import RunState, build_run_state_context
-from praxis_agent.prompts import build_instructions
-from praxis_agent.runtime import collect_runtime_context
-from praxis_agent.skills import create_skill_tool, discover_skills
-from praxis_agent.tools.command_sessions import CommandSessionManager
+from praxis_agent.planning import RunState
 from praxis_agent.tool_execution import (
     ToolApprovalHandler,
-    ToolCallExecutor,
 )
 from praxis_agent.tools import (
-    ToolContext,
     ToolRegistry,
     ToolResult,
-    create_default_registry,
 )
+from praxis_agent.tools.command_sessions import CommandSessionManager
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -89,6 +71,7 @@ class Agent:
     collaboration: AgentRuntime | None = None
     receive_messages: Callable[[Callable[[Sequence[object]], None]], bool] | None = None
     user_input: SimpleQueue[str] | None = None
+    input_source: object | None = None
     execution_control: ExecutionControl | None = None
     close_callbacks: tuple[Callable[[], None], ...] = ()
     mcp_catalog: str = ""
@@ -165,26 +148,31 @@ class Agent:
         run_persisted = False
 
         try:
-            if self.session_store is not None:
-                self.session_store.start_run(
-                    self._session_id(),
-                    turn_id,
-                    run_state,
-                    user_item,
-                )
-                run_persisted = True
+            with self._atomic():
+                if self.session_store is not None:
+                    self.session_store.start_run(
+                        self._session_id(),
+                        turn_id,
+                        run_state,
+                        user_item,
+                    )
+                    run_persisted = True
+                    if self.input_source is not None:
+                        self.input_source.consume_initial(turn_id)
+                self._emit(TurnStarted(turn_id, normalized_task))
             self._history.append(user_item)
-            self._emit(TurnStarted(turn_id, normalized_task))
             current_run().check()
-            output_text = self._run_model_loop(
+            from praxis_agent.agent_loop import run_model_loop
+            output_text = run_model_loop(self,
                 turn_id,
                 run_state,
             )
             current_run().settle()
             run_state.complete()
-            self._finish_persisted_run(turn_id, run_state)
-            self._emit(AssistantTextCompleted(turn_id, output_text))
-            self._emit(TurnCompleted(turn_id))
+            with self._atomic():
+                self._finish_persisted_run(turn_id, run_state)
+                self._emit(AssistantTextCompleted(turn_id, output_text))
+                self._emit(TurnCompleted(turn_id))
             return output_text
         except (Exception, KeyboardInterrupt) as error:
             current_run().settle(error)
@@ -193,38 +181,31 @@ class Agent:
                 run_state.cancel()
             else:
                 run_state.fail(error)
-            # Interrupted batches must not leave unmatched tool calls on a follow-up.
             try:
-                for call in self._pending_calls:
-                    item = _build_function_call_output(call, ToolResult(
-                        False, "Execution interrupted; completion is unknown. Inspect evidence before retrying.",
-                    ))
-                    if self.session_store is not None:
-                        self.session_store.append_tool_result(
-                            self._session_id(), turn_id, item, run_state,
-                        )
-                    self._history.append(item)
-            except Exception as repair_error:
-                repair_error.add_note(f"While finalizing {type(error).__name__}: {error}")
-                error = repair_error
+                self._finish_failed_run(turn_id, run_state, error, run_persisted)
+            except Exception as persistence_error:
+                persistence_error.add_note(f"While finalizing {type(error).__name__}: {error}")
+                error = persistence_error
                 run_state.fail(error)
+                self._emit(TurnFailed(turn_id, type(error).__name__, str(error)))
             finally:
                 self._pending_calls.clear()
-            if run_persisted:
-                try:
-                    self._finish_persisted_run(turn_id, run_state)
-                except Exception as persistence_error:
-                    persistence_error.add_note(f"While finalizing {type(error).__name__}: {error}")
-                    error = persistence_error
-                    run_state.fail(error)
-            self._emit(
-                TurnCancelled(turn_id) if isinstance(error, ExecutionStopped) else TurnFailed(
-                    turn_id,
-                    type(error).__name__,
-                    str(error),
-                )
-            )
             raise error
+
+    def _finish_failed_run(self, turn_id, run_state, error, run_persisted):
+        # Repair protocol pairs, save the result and publish its event together.
+        with self._atomic():
+            for call in self._pending_calls:
+                item = _build_function_call_output(call, ToolResult(
+                    False, "Execution interrupted; completion is unknown. Inspect evidence before retrying.",
+                ))
+                if self.session_store is not None:
+                    self.session_store.append_tool_result(self._session_id(), turn_id, item, run_state)
+                self._history.append(item)
+            if run_persisted:
+                self._finish_persisted_run(turn_id, run_state)
+            self._emit(TurnCancelled(turn_id) if isinstance(error, ExecutionStopped) else
+                       TurnFailed(turn_id, type(error).__name__, str(error)))
 
     def clear_history(self) -> None:
         """保留旧会话，并切换到一段新的空会话。"""
@@ -275,7 +256,9 @@ class Agent:
 
         return self.receive_messages(lambda items: self._accept_messages(turn_id, items))
 
-    def _receive_user_input(self, turn_id: str) -> bool:
+    def _receive_user_input(self, turn_id: str, *, final=False) -> bool:
+        if self.input_source is not None:
+            return self.input_source.receive(turn_id, lambda items: self._accept_messages(turn_id, items, source="user"), final=final)
         if self.user_input is None:
             return False
         items = []
@@ -308,139 +291,8 @@ class Agent:
             raise RuntimeError("conversation history is already initialized")
         self._history.extend(items)
 
-    def _run_model_loop(
-        self,
-        turn_id: str,
-        run_state: RunState,
-    ) -> str:
-        """持续请求模型并执行工具，直到模型生成最终文本。"""
-        def check_execution():
-            if self._closed:
-                raise RuntimeError("this agent is closing")
-            if self.execution_control is not None:
-                self.execution_control.check()
-
-        tool_executor = ToolCallExecutor(
-            tool_registry=self.tool_registry,
-            context=ToolContext(
-                self.workspace, run_state,
-                context_manager=self.context_manager,
-                history=self._history,
-                command_sessions=self.command_sessions,
-                defer_command_ack=True,
-            ),
-            publish_event=self._emit,
-            approve_tool_call=self.approve_tool_call,
-            bypass_approvals=self.bypass_approvals,
-            max_parallel_tools=self.max_parallel_tools,
-            check_execution=check_execution,
-        )
-
-        request_number = 0
-        while True:
-            if self._closed:
-                raise AgentError("this agent is closing")
-            if self.execution_control is not None:
-                self.execution_control.check()
-            self._pump_worker_events()
-            self._receive_messages(turn_id)
-            self._receive_user_input(turn_id)
-            tool_definitions = self.tool_registry.definitions()
-            request_number += 1
-            transient_items = (build_run_state_context(run_state),)
-            commands = self.command_sessions.summaries()
-            if commands:
-                transient_items += ({"role": "developer", "content":
-                    "Command sessions owned by this agent (use wait_command; do not restart): "
-                    + json.dumps(commands, ensure_ascii=False)},)
-            if self.mcp_catalog:
-                transient_items += ({"role": "developer", "content": self.mcp_catalog},)
-            if self.collaboration is not None:
-                transient_items += (self.collaboration.context_item(),)
-            context_view = run_operation("context", lambda handle: self.context_manager.build_view(
-                self._history, transient_items=transient_items, tool_definitions=tool_definitions,
-            ))
-            self.context_status = context_view.context_status
-            self._emit(
-                ModelRequestStarted(
-                    turn_id,
-                    request_number,
-                    context_view.items,
-                    context_status=context_view.context_status,
-                )
-            )
-            response = run_operation("model", lambda handle: self.model_client.create_response(
-                context_view.items,
-                tool_definitions,
-                on_text_delta=lambda text: self._emit(
-                    AssistantTextDelta(
-                        turn_id,
-                        request_number,
-                        text,
-                    )
-                ),
-            ))
-            self.context_manager.record_actual_input_tokens(
-                None
-                if response.usage is None
-                else response.usage.input_tokens
-            )
-            if self.session_store is not None:
-                self.session_store.append_response_items(
-                    self._session_id(),
-                    turn_id,
-                    response.output_items,
-                )
-            # 官方协议要求把模型本轮输出原样加入下一轮输入。
-            self._history.extend(response.output_items)
-            self._pending_calls = list(response.function_calls)
-            self._emit(
-                ModelRequestCompleted(
-                    turn_id,
-                    request_number,
-                    response,
-                )
-            )
-            check_execution()
-
-            if not response.function_calls:
-                if response.output_text:
-                    if self.collaboration is not None:
-                        if not self.collaboration.can_finalize(
-                            lambda items: self._accept_messages(turn_id, items),
-                        ):
-                            continue
-                    elif self._receive_messages(turn_id):
-                        continue
-                    if self._receive_user_input(turn_id):
-                        continue
-                    return response.output_text
-                raise AgentError(
-                    "model returned no text and no function calls"
-                )
-
-            # 组内可并行，但结果按调用顺序交回主线程；保存完本组才执行下一组。
-            for function_call, result in tool_executor.execute_many(turn_id, response.function_calls):
-                output_item = _build_function_call_output(
-                    function_call,
-                    result,
-                )
-                if self.session_store is not None:
-                    self.session_store.append_tool_result(
-                        self._session_id(),
-                        turn_id,
-                        output_item,
-                        run_state,
-                    )
-                self._history.append(output_item)
-                self._pending_calls.remove(function_call)
-                if result.on_saved is not None:
-                    result.on_saved()
-                if (
-                    result.success
-                    and function_call.name == "update_plan"
-                ):
-                    self._emit(PlanUpdated(turn_id, tuple(run_state.plan)))
+    def _atomic(self):
+        return self.session_store.atomic() if self.session_store is not None else nullcontext()
 
     def _persist_context_operation(self, operation: ContextOperation) -> None:
         if self.session_store is not None:
@@ -499,167 +351,3 @@ def _build_function_call_output(
             ensure_ascii=False,
         ),
     }
-
-
-def create_default_agent(
-    workspace: Path,
-    *,
-    event_sink: EventSink | None = None,
-    approve_tool_call: ToolApprovalHandler | None = None,
-    bypass_approvals: bool = False,
-    resume_latest: bool = False,
-    resume_session_id: str | None = None,
-    session_database_path: Path | None = None,
-    enable_multi_agent: bool = True,
-) -> Agent:
-    """使用环境配置和内置工具创建默认 Agent。"""
-    if resume_latest and resume_session_id is not None:
-        raise ValueError(
-            "resume_latest and resume_session_id are mutually exclusive"
-        )
-
-    from praxis_agent.sessions import (
-        SessionNotFoundError,
-        SQLiteSessionStore,
-    )
-
-    config = ModelConfig.from_env()
-    collaboration_config = MultiAgentConfig.from_env() if enable_multi_agent else None
-    runtime_context = collect_runtime_context(workspace)
-    skills = discover_skills(runtime_context.workspace_root)
-    instructions = build_instructions(
-        runtime_context, skills=skills,
-        collaboration_instructions=PARENT_INSTRUCTIONS if enable_multi_agent else "",
-    )
-    session_store = SQLiteSessionStore(session_database_path)
-    history: list[object] = []
-
-    if resume_session_id is not None:
-        session = session_store.resolve_session(
-            resume_session_id,
-            workspace=runtime_context.workspace_root,
-        )
-    elif resume_latest:
-        session = session_store.latest_session(runtime_context.workspace_root)
-        if session is None:
-            raise SessionNotFoundError(
-                "no session found for the current workspace"
-            )
-    else:
-        session = session_store.create_session(
-            runtime_context.workspace_root,
-            config.model,
-        )
-
-    if resume_latest or resume_session_id is not None:
-        session_store.recover_interrupted_runs(session.id)
-        history = session_store.load_conversation_items(session.id)
-        # 恢复的模型可能属于另一档；重新选默认值，同时保留环境中的显式覆盖。
-        config = ModelConfig.from_env(model=session.model)
-
-    control = ExecutionControl()
-    model_client = OpenAIModelClient(config, instructions=instructions, execution_control=control)
-    summary_client = OpenAIModelClient(config, instructions=SUMMARY_INSTRUCTIONS, reasoning_effort="none",
-                                       execution_control=control)
-    agent = Agent(
-        model_client=model_client,
-        tool_registry=create_default_registry(config.context_policy, check_execution=control.check,
-                                              command_shell=runtime_context.command_shell),
-        execution_control=control,
-        workspace=runtime_context.workspace_root,
-        event_sink=event_sink,
-        approve_tool_call=approve_tool_call,
-        bypass_approvals=bypass_approvals,
-        max_parallel_tools=config.max_parallel_tools,
-        session_store=session_store,
-        session_id=session.id,
-        session_model=session.model,
-        context_manager=_create_context_manager(config, instructions, summary_client),
-        close_callbacks=(model_client.close, summary_client.close),
-    )
-
-    from praxis_agent.tools.code import CodeRuntime
-    code_runtime = CodeRuntime()
-    agent.tool_registry.register(code_runtime.tool("parent"))
-    agent.reset_code_worker = lambda: code_runtime.release_agent("parent")
-    agent.close_callbacks = (code_runtime.close, *agent.close_callbacks)
-    agent.tool_registry.register(create_skill_tool(skills, max_chars=config.context_policy.max_tool_output_chars))
-    mcp = None
-    try:
-        mcp = MCPConnections()
-        mcp.start()
-        release_mcp_tools = mcp.register(agent.tool_registry, check_execution=control.check)
-        agent.mcp_catalog = mcp.catalog()
-    except BaseException:
-        try:
-            if mcp is not None:
-                mcp.close()
-        finally:
-            agent.close()
-        raise
-    agent.close_callbacks = (release_mcp_tools, mcp.close, *agent.close_callbacks)
-
-    if not enable_multi_agent:
-        agent.restore_history(history)
-        return agent
-
-    def create_worker(agent_id: str, control: ExecutionControl, sink: EventSink) -> Agent:
-        handle = collaboration.handles[agent_id]
-        # Skill discovery belongs to the session project, not a worker's output directory.
-        worker_context = collect_runtime_context(handle.workspace)
-        worker_instructions = build_instructions(
-            worker_context, skills=skills,
-            collaboration_instructions=WORKER_INSTRUCTIONS,
-        )
-        registry = ToolRegistry()
-        for tool in create_default_registry(config.context_policy, check_execution=control.check,
-                                            command_shell=worker_context.command_shell).tools:
-            registry.register(tool)
-        registry.register(code_runtime.tool(agent_id))
-        registry.register(create_skill_tool(skills, max_chars=config.context_policy.max_tool_output_chars))
-        release_worker_tools = mcp.register(registry, check_execution=control.check)
-        register_worker_tools(registry, collaboration, agent_id)
-        client = OpenAIModelClient(
-            config, instructions=worker_instructions, execution_control=control,
-        )
-        summary = OpenAIModelClient(
-            config, instructions=SUMMARY_INSTRUCTIONS, reasoning_effort="none",
-            execution_control=control,
-        )
-        return Agent(
-            model_client=client, tool_registry=registry,
-            workspace=handle.workspace, name=agent_id,
-            mcp_catalog=mcp.catalog(),
-            reset_code_worker=lambda: code_runtime.release_agent(agent_id),
-            event_sink=sink, max_parallel_tools=config.max_parallel_tools,
-            execution_control=control,
-            approve_tool_call=lambda name, arguments: collaboration.request_approval(agent_id, name, arguments),
-            bypass_approvals=agent.bypass_approvals,
-            context_manager=_create_context_manager(config, worker_instructions, summary),
-            receive_messages=lambda accept: collaboration.receive(agent_id, accept),
-            close_callbacks=(lambda: code_runtime.release_agent(agent_id), release_worker_tools, client.close, summary.close),
-        )
-
-    collaboration = AgentRuntime(create_worker, collaboration_config, workspace=runtime_context.workspace_root,
-                                 approve_tool_call=approve_tool_call, live_output_sink=event_sink)
-    agent.collaboration = collaboration
-    agent.receive_messages = lambda accept: collaboration.receive("parent", accept)
-    register_parent_tools(agent.tool_registry, collaboration, agent._pump_worker_events)
-    agent.restore_history(history)
-    return agent
-
-
-def _create_context_manager(
-    config: ModelConfig, instructions: str, summary_client: ModelClient,
-) -> ContextManager:
-    return ContextManager(
-        model_limits=config.model_limits,
-        policy=config.context_policy,
-        instructions=instructions,
-        summarizer=ModelContextSummarizer(
-            summary_client,
-            model_limits=config.model_limits,
-            input_limit_tokens=config.context_policy.effective_input_limit(config.model_limits),
-            safety_ratio=config.context_policy.safety_ratio,
-        ),
-    )

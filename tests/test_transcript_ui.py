@@ -1,3 +1,4 @@
+from support.terminal import FakeConnection
 import asyncio
 import json
 from concurrent.futures import Future
@@ -188,7 +189,7 @@ def test_switching_agent_during_refresh_keeps_records_and_cache_consistent(clear
             sink.emit(AssistantTextDelta("root", 1, "Main update"))
             sink.emit(ChildAgentEvent("root", "child", AssistantTextDelta("child_turn", 1, "New text")))
             if clear:
-                app._results.put((None, "clear", ""))
+                app._results.put(("clear", ""))
             operations = [app.on_agent_selected(AgentTab.Selected("child")), app._tick()]
             await asyncio.gather(*(reversed(operations) if refresh_first else operations))
             await pilot.pause()
@@ -292,7 +293,7 @@ def test_shell_display_only_unwraps_known_script_arguments():
                                         (["2"], False), (["escape"], False), (["down", "enter"], False)])
 def test_inline_approval_uses_existing_boolean_decision(keys, allowed):
     async def exercise():
-        app = PraxisApp(ViewEventSink())
+        app = PraxisApp(ViewEventSink(), connection=FakeConnection())
         request = Approval("run_command", {"argv": ["cmd", "/c", "echo hello"],
                            "workdir": ".", "yield_time_ms": 30000}, Future())
         async with app.run_test(size=(70, 28)) as pilot:
@@ -316,7 +317,7 @@ def test_inline_approval_uses_existing_boolean_decision(keys, allowed):
 
 def test_approval_details_do_not_resolve_request_and_queue_resets_selection():
     async def exercise():
-        app = PraxisApp(ViewEventSink())
+        app = PraxisApp(ViewEventSink(), connection=FakeConnection())
         first = Approval("run_command", {"argv": ["cmd", "/c", "echo " + "long " * 60]}, Future())
         second = Approval("write_file", {"relative_path": "test.txt", "content": "hello"}, Future())
         async with app.run_test(size=(48, 25)) as pilot:

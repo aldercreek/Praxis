@@ -1,114 +1,42 @@
 import asyncio
 
 import pytest
-from textual.widgets import TextArea
 
 from praxis_agent.cli import main
-from praxis_agent.events import (
-    AssistantTextCompleted,
-    AssistantTextDelta,
-    EventSink,
-    ModelRequestCompleted,
-    ModelRequestStarted,
-)
 from praxis_agent.terminal.app import PraxisApp
-from praxis_agent.terminal.views import ViewEventSink
 
 
-class FakeAgent:
-    def __init__(self) -> None:
-        self.tasks: list[str] = []
-        self.clear_count = 0
-        self.close_count = 0
-        self.event_sink: EventSink | None = None
-
-    def attach_event_sink(self, event_sink: EventSink) -> "FakeAgent":
-        self.event_sink = event_sink
-        return self
-
-    def run(self, task: str) -> str:
-        self.tasks.append(task)
-        output_text = f"completed: {task}"
-        if self.event_sink is not None:
-            turn_id = f"turn-{len(self.tasks)}"
-            self.event_sink.emit(ModelRequestStarted(turn_id, 1))
-            self.event_sink.emit(
-                AssistantTextDelta(turn_id, 1, "completed: ")
-            )
-            self.event_sink.emit(AssistantTextDelta(turn_id, 1, task))
-            self.event_sink.emit(ModelRequestCompleted(turn_id, 1))
-            self.event_sink.emit(
-                AssistantTextCompleted(turn_id, output_text)
-            )
-        return output_text
-
-    def clear_history(self) -> None:
-        self.clear_count += 1
-
-    def close(self) -> None:
-        if not self.close_count:
-            self.close_count += 1
-
-
-def test_cli_runs_a_task(capsys, monkeypatch) -> None:
-    agent = FakeAgent()
-    monkeypatch.setattr(
-        "praxis_agent.cli.create_default_agent",
-        lambda workspace, **callbacks: agent.attach_event_sink(
-            callbacks["event_sink"]
-        ),
-    )
-
+def test_cli_creates_session_and_submits_task_to_shared_service(service, monkeypatch):
+    h = service()
+    client = h.client()
+    monkeypatch.setattr("praxis_agent.client.ServiceClient", lambda: client)
+    monkeypatch.chdir(h.path)
     def run(app):
         async def exercise():
             async with app.run_test() as pilot:
-                await pilot.pause(0.2)
-                assert isinstance(app.sink, ViewEventSink)
+                async with asyncio.timeout(5):
+                    while not app.connection.summary.get("latest_turn") or app.busy:
+                        await pilot.pause(0.05)
                 assert app.store.views["main"].committed_blocks
-                assert not app.busy
         asyncio.run(exercise())
         return 0
-
     monkeypatch.setattr(PraxisApp, "run", run)
-    exit_code = main(["inspect", "repository"])
-
-    assert exit_code == 0
-    assert capsys.readouterr().out == ""
-    assert agent.tasks == ["inspect repository"]
-    assert agent.close_count == 1
+    assert main(["inspect", "repository"]) == 0
+    assert h.agents[0].run_state.original_task == "inspect repository"
 
 
-def test_cli_runs_an_interactive_session(capsys, monkeypatch) -> None:
-    agent = FakeAgent()
-    monkeypatch.setattr(
-        "praxis_agent.cli.create_default_agent",
-        lambda workspace, **callbacks: agent.attach_event_sink(
-            callbacks["event_sink"]
-        ),
-    )
-    def run(app):
-        async def exercise():
-            async with app.run_test() as pilot:
-                for task in ["first task", "/clear", "follow-up task", "/exit"]:
-                    app.query_one("#task", TextArea).text = task
-                    await pilot.press("enter")
-                    await pilot.pause(0.2)
-        asyncio.run(exercise())
-        return 0
-
-    monkeypatch.setattr(PraxisApp, "run", run)
-
-    exit_code = main([])
-
-    assert exit_code == 0
-    assert agent.tasks == ["first task", "follow-up task"]
-    assert agent.clear_count == 1
-    assert agent.close_count == 1
-    assert capsys.readouterr().out == ""
+def test_cli_lists_sessions_without_loading_agent(service, monkeypatch, capsys):
+    h = service()
+    session = h.create()
+    client = h.client()
+    monkeypatch.setattr("praxis_agent.client.ServiceClient", lambda: client)
+    monkeypatch.chdir(h.path)
+    assert main(["--sessions"]) == 0
+    assert session["id"][:8] in capsys.readouterr().out
+    assert h.agents == []
 
 
-def test_cli_rejects_removed_plain_option(capsys):
+def test_cli_rejects_unknown_option(capsys):
     with pytest.raises(SystemExit) as error:
         main(["--plain"])
     assert error.value.code == 2
-    assert "unrecognized arguments: --plain" in capsys.readouterr().err

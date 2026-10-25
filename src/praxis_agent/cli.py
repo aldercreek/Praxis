@@ -4,8 +4,8 @@ import argparse
 from collections.abc import Sequence
 from pathlib import Path
 
-from praxis_agent.agent import create_default_agent
-from praxis_agent.sessions import SessionStoreError, SQLiteSessionStore
+import httpx
+
 from praxis_agent.terminal.sessions import print_session_list
 
 
@@ -36,21 +36,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--bypass",
         action="store_true",
-        help="Run tools without approval prompts for this process",
+        help="Enable approval bypass on the shared local service (requires no active turns)",
     )
     parser.add_argument("task", nargs="*", help="Task for the agent")
     return parser
-
-
-def _list_sessions(workspace: Path) -> int:
-    """列出当前工作区会话，不初始化模型。"""
-    try:
-        sessions = SQLiteSessionStore().list_sessions(workspace)
-    except (SessionStoreError, ValueError) as error:
-        print(f"error: {error}")
-        return 1
-    print_session_list(sessions, workspace.resolve())
-    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -58,35 +47,45 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.list_sessions and args.task:
         parser.error("--sessions cannot be used with a task")
+    from datetime import datetime
+    from urllib.parse import urlencode
 
-    task = " ".join(args.task).strip()
-    workspace = Path.cwd()
-    if args.list_sessions:
-        return _list_sessions(workspace)
-
+    from praxis_agent.client import ServiceClient
+    from praxis_agent.planning.state import RunStatus
+    from praxis_agent.sessions.models import SessionSummary
     from praxis_agent.terminal.app import PraxisApp
+    from praxis_agent.terminal.connection import TerminalSession
     from praxis_agent.terminal.views import ViewEventSink
 
-    display_sink = ViewEventSink()
-    app = PraxisApp(display_sink, initial_task=task)
-
+    client = None
     try:
-        agent = create_default_agent(
-            workspace,
-            event_sink=display_sink,
-            approve_tool_call=app.approve_tool_call,
-            bypass_approvals=args.bypass,
-            resume_latest=args.resume_latest,
-            resume_session_id=args.resume,
-        )
-    except (SessionStoreError, ValueError) as error:
+        client = ServiceClient()
+        workspace = Path.cwd().resolve()
+        sessions = client.request("GET", "/api/sessions?" + urlencode({"workspace": str(workspace)}))["sessions"]
+        if args.list_sessions:
+            print_session_list([SessionSummary(item["id"], item["title"], datetime.fromisoformat(item["updated_at"]),
+                                RunStatus(item["latest_turn"]["status"]) if item.get("latest_turn") else None)
+                                for item in sessions], workspace)
+            return 0
+        if args.bypass:
+            client.request("PUT", "/api/settings", {"bypass_approvals": True})
+        if args.resume:
+            matches = [item for item in sessions if item["id"].startswith(args.resume)]
+            if len(matches) != 1:
+                raise ValueError("Session ID does not identify one session in this workspace")
+            session = matches[0]
+        elif args.resume_latest:
+            if not sessions:
+                raise ValueError("No session found for this workspace")
+            session = sessions[0]
+        else:
+            session = client.create(workspace)
+        connection = TerminalSession(client, session)
+        app = PraxisApp(ViewEventSink(), initial_task=" ".join(args.task).strip(), connection=connection)
+        return app.run() or 0
+    except (RuntimeError, ValueError, OSError, httpx.HTTPError) as error:
         print(f"error: {error}")
         return 1
-
-    app.agent = agent
-    try:
-        if args.resume_latest or args.resume is not None:
-            app.store.views["main"].restore_history(agent.session_store.load_conversation_items(agent.session_id))
-        return app.run() or 0
     finally:
-        agent.close()
+        if client:
+            client.close()

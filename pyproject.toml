@@ -9,6 +9,9 @@ description = "A small coding agent built while learning Python."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "starlette>=0.47,<2",
+    "uvicorn>=0.35,<1",
+    "httpx>=0.28,<1",
     "charset-normalizer>=3.4,<4",
     "openai>=3.7,<4",
     "PyYAML>=6,<7",
