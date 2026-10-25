@@ -127,6 +127,8 @@ flowchart LR
 
 **Ordered updates.** Each session has a durable, increasing event sequence. A client subscribes before loading a snapshot, buffers incoming events, and applies only those after the snapshot's sequence. Each SSE connection reads replayed and live events through one ordered database loop. Heartbeats detect stale connections; reconnects start after the last event successfully applied by the client.
 
+**Saved history.** Snapshots also restore finished turns saved in the conversation tables before an event journal existed. Both clients receive their messages and tool results in turn order. This display reconstruction does not execute an agent, rewrite history, or change the SSE cursor.
+
 **Explicit outcomes.** Turns use `running`, `completed`, `cancelled`, or `failed`. A cancellation names its turn, so a delayed request cannot stop a newer turn. The first valid approval decision wins. On service restart, unfinished turns become failed, pending approvals close, and unknown tool outcomes are recorded without automatic retries.
 
 Session events currently remain in SQLite without retention cleanup. Subagent processes, background commands, and Monty variables are not restored after service restart. See the [reference](docs/reference.md) for execution boundaries and configuration.

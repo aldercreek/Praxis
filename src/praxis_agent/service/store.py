@@ -7,6 +7,7 @@ import json
 from praxis_agent.sessions import SQLiteSessionStore
 
 from .errors import ServiceError
+from .history import session_view_events
 from .schema import SCHEMA
 from .transcript import Transcript
 
@@ -187,8 +188,9 @@ class ServiceStore:
                     (session_id,),
                 )
             ]
+            view_events = session_view_events(connection, session_id, frames)
             transcript = Transcript()
-            for frame in frames:
+            for frame in view_events:
                 transcript.consume(
                     frame["event"], frame["turn_id"], frame["agent_id"], frame["data"]
                 )
@@ -206,7 +208,7 @@ class ServiceStore:
                 pending_inputs=self.pending(session_id),
                 sequence=frames[-1]["sequence"] if frames else 0,
                 # Typed terminal presentation is reconstructed without creating an Agent.
-                view_events=frames,
+                view_events=view_events,
             )
 
     @staticmethod
