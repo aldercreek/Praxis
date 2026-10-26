@@ -111,8 +111,10 @@ def ensure_service(directory=None, *, timeout=15):
     args = [sys.executable, "-m", "praxis_agent.service", "--data-dir", str(directory)]
     options = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, close_fds=True)
     if os.name == "nt":
+        # DETACHED_PROCESS lets the virtualenv launcher create a visible console
+        # for the real interpreter. Start without a console window instead.
         options["creationflags"] = (
-            subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+            subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
         )
     else:
         options["start_new_session"] = True

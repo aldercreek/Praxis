@@ -39,6 +39,33 @@ def test_simultaneous_launchers_discover_one_detached_service_and_restart(tmp_pa
         assert {item["instance_id"] for item in records} == {record["instance_id"]}
         assert {item["pid"] for item in records} == {record["pid"]}
         assert discover(tmp_path)["instance_id"] == record["instance_id"]
+        if os.name == "nt":
+            # Probe the actual service interpreter, including the virtualenv
+            # redirector, rather than just checking Popen's creation flags.
+            probe = subprocess.run(
+                [sys.executable, "-c", """
+import ctypes
+import sys
+kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+user = ctypes.WinDLL('user32', use_last_error=True)
+kernel.GetConsoleWindow.restype = ctypes.c_void_p
+user.IsWindowVisible.argtypes = [ctypes.c_void_p]
+kernel.FreeConsole()
+attached = kernel.AttachConsole(int(sys.argv[1]))
+error = ctypes.get_last_error()
+if attached:
+    window = kernel.GetConsoleWindow()
+    visible = bool(window and user.IsWindowVisible(window))
+    kernel.FreeConsole()
+    assert not visible, 'Service created a visible console window'
+else:
+    assert error == 6, error  # ERROR_INVALID_HANDLE: no console to attach to.
+""", str(record["pid"])],
+                capture_output=True,
+                timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            assert probe.returncode == 0, probe.stderr.decode(errors="replace")
         # This PID comes only from the service launched in this test directory.
         os.kill(record["pid"], signal.SIGTERM)
         wait_until(lambda: discover(tmp_path) is None, timeout=10)
