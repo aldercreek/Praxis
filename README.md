@@ -101,11 +101,14 @@ praxis --resume a3f21c8d              # Full session ID or unique prefix
 | Switch between agent views | Alt+Left / Alt+Right |
 | Approve / deny a tool call | y / n in the approval panel |
 | Start a new session | `/clear` while idle |
+| Delete the current session | `/delete`, then confirm |
 | Inspect / stop a background command | `/commands` / `/stop-command ID` |
 | View MCP service status | `/mcp` |
 | Disconnect the terminal | `/exit` or Ctrl+Q |
 
 Closing the terminal or desktop **does not cancel its tasks**. Use the stop control to cancel a turn. Cancellation waits for owned work to finish cleaning up, then leaves unconsumed input available to resume, edit, or delete.
+
+Deleting a session closes it to new input and approvals, stops its running tasks and background commands, and removes its conversation history. Workspace files are preserved. Other connected clients remove the session too. Deletion intent is saved in SQLite before cleanup; if the service exits midway, the next startup finishes cleanup in the background without restoring that session's Agent.
 
 `praxis --bypass` enables approval bypass for the shared service when no turns are active. It affects all connected clients and lasts until changed or the service exits; parameter validation still applies.
 

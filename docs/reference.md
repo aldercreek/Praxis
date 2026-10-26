@@ -11,6 +11,7 @@ All endpoints are local HTTP, authenticated with `Authorization: Bearer <service
 | GET | `/api/health` | Check identity, protocol, readiness, and configuration |
 | PUT | `/api/settings` | Change shared settings while no turns are active |
 | GET / POST | `/api/sessions` | List / create sessions |
+| DELETE | `/api/sessions/{id}` | Stop owned work, then permanently delete the session |
 | GET | `/api/sessions/{id}/snapshot` | Read the current projection and its sequence |
 | POST | `/api/sessions/{id}/inputs` | Submit `{command_id, text}` |
 | POST | `/api/sessions/{id}/inputs/resume` | Resume pending input with a new command ID |
@@ -26,6 +27,8 @@ Session creation accepts `{command_id, workspace, model?}` and returns a server-
 All business events are persisted before streaming. Per-session sequences order events across clients and survive restarts. Snapshots include transcript messages, pending approvals, pending input, the active/latest turn, and the sequence of the projection. Initial clients buffer events while requesting a snapshot and discard buffered events at or below that sequence. Only an applied event advances the reconnect cursor.
 
 The service sends an SSE heartbeat every 15 seconds; native clients reconnect after a 45-second read timeout. Replay and live data use the same ordered SQL reader per connection, with no transaction held while sending to a slow client. Events currently have no retention limit.
+
+Deletion first persists a SQLite marker and closes admission under the session lock. Concurrent deletion requests wait for the same cleanup outside the lock. The response is `{deleted: true, session_id}` after cleanup; deleting an absent session also succeeds. Marked sessions disappear from lists and reject operations with HTTP 410, while removed sessions return 404. Existing SSE streams end with an unsequenced `event: deleted` transport control; clients also treat HTTP 404/410 on reconnect as terminal. Workspace files and the shared MCP manager are preserved. Startup loads deletion markers before accepting requests and finishes their cleanup asynchronously, without restoring Agents or replaying work. A failed cleanup keeps its marker for explicit retry or the next startup; there is no periodic cleanup scanner.
 
 ## Execution boundaries
 

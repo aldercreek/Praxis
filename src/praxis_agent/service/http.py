@@ -62,6 +62,16 @@ def create_app(manager, *, token, instance_id, heartbeat=15.0, poll_interval=0.1
             await asyncio.to_thread(store.snapshot, request.path_params["session_id"])
         )
 
+    async def delete_session(request):
+        try:
+            return JSONResponse(
+                await asyncio.to_thread(manager.delete, request.path_params["session_id"])
+            )
+        except ServiceError:
+            raise
+        except Exception as error:
+            raise ServiceError("session_delete_failed", "Could not finish deleting this session. Retry deletion.", 500) from error
+
     async def inputs(request):
         data = await body(request)
         runtime = await asyncio.to_thread(
@@ -114,17 +124,20 @@ def create_app(manager, *, token, instance_id, heartbeat=15.0, poll_interval=0.1
         runtime = await asyncio.to_thread(
             manager.runtime, request.path_params["session_id"]
         )
+        with runtime.lock:
+            runtime.ensure_open()
+            command_sessions = runtime.agent.command_sessions if runtime.agent else None
         if request.method == "POST":
-            if runtime.agent is None:
+            if command_sessions is None:
                 raise ServiceError("command_not_found", "Command does not exist", 404)
             await asyncio.to_thread(
-                runtime.agent.command_sessions.stop, request.path_params["command_id"]
+                command_sessions.stop, request.path_params["command_id"]
             )
             return JSONResponse({"stopped": True})
         return JSONResponse(
             {
-                "commands": runtime.agent.command_sessions.summaries()
-                if runtime.agent
+                "commands": command_sessions.summaries()
+                if command_sessions
                 else []
             }
         )
@@ -135,7 +148,7 @@ def create_app(manager, *, token, instance_id, heartbeat=15.0, poll_interval=0.1
 
     async def events(request):
         session_id = request.path_params["session_id"]
-        await asyncio.to_thread(store.sessions.get_session, session_id)
+        await asyncio.to_thread(store.require_available, session_id)
         try:
             after = int(
                 request.query_params.get(
@@ -165,6 +178,14 @@ def create_app(manager, *, token, instance_id, heartbeat=15.0, poll_interval=0.1
             # Readiness is transport control, not a persisted business event.
             yield "event: ready\ndata: {}\n\n"
             while not manager.closed:
+                try:
+                    await asyncio.to_thread(store.require_available, session_id)
+                except ServiceError as error:
+                    if error.status not in (404, 410):
+                        raise
+                    # A terminal transport control survives removal of the event journal.
+                    yield f"event: deleted\ndata: {json.dumps({'session_id': session_id})}\n\n"
+                    return
                 batch = await asyncio.to_thread(store.events, session_id, cursor)
                 for frame in batch:
                     yield f"id: {frame['sequence']}\nevent: {frame['event']}\ndata: {json.dumps(frame, ensure_ascii=False)}\n\n"
@@ -206,6 +227,7 @@ def create_app(manager, *, token, instance_id, heartbeat=15.0, poll_interval=0.1
         Route("/api/mcp/servers", mcp_servers),
         Route("/api/settings", configure, methods=["PUT"]),
         Route("/api/sessions", sessions, methods=["GET", "POST"]),
+        Route("/api/sessions/{session_id}", delete_session, methods=["DELETE"]),
         Route("/api/sessions/{session_id}/snapshot", snapshot),
         Route("/api/sessions/{session_id}/inputs", inputs, methods=["POST"]),
         Route("/api/sessions/{session_id}/inputs/resume", resume, methods=["POST"]),

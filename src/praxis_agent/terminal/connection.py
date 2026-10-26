@@ -17,6 +17,7 @@ class TerminalSession:
         self.subscription = None
         self.connection_error = ""
         self.initial_events = []
+        self.deleted = False
         self.open(summary)
 
     @property
@@ -27,6 +28,7 @@ class TerminalSession:
         if self.subscription:
             self.subscription.close()
         self.summary = summary
+        self.deleted = False
         self.frames = SimpleQueue()
         self.subscription = self.client.subscribe(
             self.id, self.frames.put, on_error=self._error, on_ready=self._connected
@@ -56,6 +58,15 @@ class TerminalSession:
                 frame = self.frames.get_nowait()
             except Empty:
                 break
+            if frame["event"] == "SessionDeleted":
+                self.deleted = True
+                self.summary = {**self.summary, "active_turn": None}
+                self.pending = []
+                self.approvals.clear()
+                self.connection_error = ""
+                break
+            if self.deleted:
+                continue
             if frame["sequence"] <= self.sequence:
                 continue
             data, kind = frame["data"], frame["event"]
@@ -103,6 +114,9 @@ class TerminalSession:
         return self.client.request(
             "DELETE", f"/api/sessions/{self.id}/inputs/{command_id}"
         )
+
+    def delete_session(self):
+        return self.client.request("DELETE", f"/api/sessions/{self.id}")
 
     def clear(self):
         self.open(

@@ -28,6 +28,7 @@ from praxis_agent.terminal.cells import (
     WelcomeHeader,
 )
 from praxis_agent.terminal.composer import Composer
+from praxis_agent.terminal.delete_dialog import DeleteSessionDialog
 from praxis_agent.terminal.screen import ConversationScreen
 from praxis_agent.terminal.selection import SelectableText
 from praxis_agent.terminal.views import ViewEventSink, ViewStore
@@ -230,6 +231,15 @@ class PraxisApp(App[int]):
         changed = self.sink.drain(self.store)
         if self.connection is not None:
             changed.update(self.connection.drain(self.store))
+            if getattr(self.connection, "deleted", False) and getattr(self, "_deleted_session_id", None) != self.connection.id:
+                self._deleted_session_id = self.connection.id
+                self.sink.discard_pending()
+                self.store = ViewStore()
+                self.selected_agent_id = "main"
+                self._mounted_blocks = []
+                changed.add("main")
+                await self._main_screen.query_one("#blocks", Vertical).remove_children()
+                self.notify("Chat deleted. Use /clear to start a new chat.")
             active = self.connection.summary.get("active_turn")
             self.busy = active is not None
             self.stopping = bool(active and active.get("cancel_requested"))
@@ -418,6 +428,7 @@ class PraxisApp(App[int]):
             ("/clear", "Clear current chat"), ("/help", "Keyboard shortcuts"), ("/exit", "Quit Praxis"),
             ("/commands", "List command sessions"), ("/stop-command", "Stop a command by its session ID"),
             ("/mcp", "Show MCP service status"),
+            ("/delete", "Delete this chat"),
         ) if text.startswith("/") and name.startswith(text)]
 
     def action_complete_command(self) -> None:
@@ -644,6 +655,12 @@ class PraxisApp(App[int]):
         task = event.text.strip()
         if not task or self.closing or self.connection is None or self.selected_agent_id != "main":
             return
+        if getattr(self, "_deleting_session", False):
+            self.notify("Deleting this chat…")
+            return
+        if getattr(self.connection, "deleted", False) and task.lower() not in {"/clear", "/delete", "/exit", "/help", "/mcp"}:
+            self.notify("This chat was deleted. Use /clear to start a new chat.", severity="warning")
+            return
         if task.lower() == "/clear" and self.busy:
             self.notify("Wait for the current task to finish before clearing history.", severity="warning")
             return
@@ -659,6 +676,8 @@ class PraxisApp(App[int]):
             self.action_show_shortcuts()
         elif task.lower() == "/mcp":
             self.run_worker(self._show_mcp(), group="mcp-status", exclusive=True)
+        elif task.lower() == "/delete":
+            self.push_screen(DeleteSessionDialog(self.connection.summary), self._confirm_delete)
         elif task.lower() == "/commands":
             commands = self.connection.commands()
             text = "\n".join(f"{item['session_id']}  {item['status']}  {' '.join(item['argv'])}"
@@ -688,6 +707,19 @@ class PraxisApp(App[int]):
         except Exception as error:
             self.notify(str(error), severity="error")
 
+    def _confirm_delete(self, confirmed):
+        if confirmed:
+            self.run_worker(self._delete_session(), group="delete-session", exclusive=True)
+
+    async def _delete_session(self):
+        self._deleting_session = True
+        try:
+            await asyncio.to_thread(self.connection.delete_session)
+        except Exception as error:
+            self.notify(f"Could not finish deletion: {error}. Use /delete to retry.", severity="error")
+        finally:
+            self._deleting_session = False
+
     async def _stop_command(self, session_id):
         try:
             await asyncio.to_thread(self.connection.stop_command, session_id)
@@ -712,6 +744,9 @@ class PraxisApp(App[int]):
             self._request("input", lambda: self.connection.send(task))
 
     def action_stop_run(self) -> None:
+        if isinstance(self.screen, DeleteSessionDialog):
+            self.screen.dismiss(False)
+            return
         if self.busy and self.current_turn_id and not self.stopping:
             turn_id = self.current_turn_id
             self._request("cancel", lambda: self.connection.cancel(turn_id))

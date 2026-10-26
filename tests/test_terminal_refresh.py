@@ -97,8 +97,11 @@ def test_tool_title_is_correct_in_first_frame_and_completion_keeps_widget(
             await wait_for_ui(pilot, lambda: bool(app.query(ToolRecord)))
             record = app.query_one(ToolRecord)
             title = record.query_one(".tool-title", Static)
-            assert frames
-            assert all(any("• Run python demo.py" in row for row in rows) for rows, _, _ in frames)
+            # A queued welcome-screen repaint may precede consumption of the events.
+            # From the first task frame onward, the complete tool title must be present.
+            task_frames = [rows for rows, _, _ in frames if any("检查项目" in row for row in rows)]
+            assert task_frames
+            assert all(any("• Run python demo.py" in row for row in rows) for rows in task_frames)
             assert_title_marker_color(title, "#a0a0a0")
             app.sink.emit(ToolOutputDelta("turn", "cmd", "stdout", "line-1\nline-2\n"))
             await wait_for_ui(pilot, lambda: record.query_one(".tool-preview").size.height == 2)

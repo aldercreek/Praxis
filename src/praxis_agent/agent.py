@@ -79,6 +79,7 @@ class Agent:
     command_sessions: CommandSessionManager = field(default_factory=CommandSessionManager, init=False, repr=False)
     _run_lock: Lock = field(default_factory=Lock, init=False, repr=False)
     _closed: bool = field(default=False, init=False)
+    _resources_closed: bool = field(default=False, init=False)
     _pending_calls: list[FunctionCall] = field(default_factory=list, init=False, repr=False)
     run_state: RunState | None = field(default=None, init=False)
     context_status: ContextStatus | None = field(default=None, init=False)
@@ -229,7 +230,7 @@ class Agent:
 
     def close(self) -> None:
         """Close children before releasing this agent's model clients."""
-        if self._closed:
+        if self._resources_closed:
             return
         self._closed = True
         if self.execution_control is not None:
@@ -238,6 +239,7 @@ class Agent:
             self.command_sessions.close()
             if self.collaboration is not None:
                 self.collaboration.shutdown(self._pump_worker_events)
+            self._resources_closed = True
         finally:
             with self._run_lock:
                 for close in self.close_callbacks:

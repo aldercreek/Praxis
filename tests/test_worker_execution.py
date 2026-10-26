@@ -202,9 +202,10 @@ def test_parent_shutdown_cancels_running_command_and_queued_worker(tmp_path):
         second = runtime.spawn("queued task", working_directory=str(queued_path))
         deadline = monotonic() + 5
         partial = Path(first["workspace"]) / "partial.txt"
-        while not partial.exists() and monotonic() < deadline:
+        # Creation precedes the write: wait for saved content before cancelling.
+        while monotonic() < deadline and (not partial.exists() or partial.read_text() != "saved"):
             sleep(0.02)
-        assert partial.exists()
+        assert partial.read_text() == "saved"
         before = monotonic()
         runtime.shutdown(lambda: None)
         assert monotonic() - before < 5

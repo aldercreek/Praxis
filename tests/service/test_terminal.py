@@ -11,6 +11,7 @@ from praxis_agent.terminal.app import PraxisApp
 from praxis_agent.terminal.connection import TerminalSession
 from praxis_agent.terminal.views import ViewEventSink
 from praxis_agent.terminal.widgets import DetailsScreen
+from praxis_agent.terminal.delete_dialog import DeleteSessionDialog
 
 
 def test_terminal_can_submit_supplementary_input_and_disconnect_without_cancel(service):
@@ -69,6 +70,46 @@ def test_two_terminals_cancel_and_resume_same_session(service):
                     await pilot.pause(0.05)
             assert not app.paused_inputs
 
+    asyncio.run(exercise())
+
+
+def test_terminal_delete_confirms_and_other_terminal_receives_removal(service):
+    h = service()
+    session = h.create()
+    h.submit(session, "delete this chat")
+    h.settled(session)
+    connection = TerminalSession(h.client(), session)
+    other = TerminalSession(h.client(), session)
+
+    async def exercise():
+        app = PraxisApp(ViewEventSink(), connection=connection)
+        async with app.run_test() as pilot:
+            editor = app.query_one("#task", TextArea)
+            editor.text = "/delete"
+            await pilot.press("enter")
+            assert isinstance(app.screen, DeleteSessionDialog)
+            await pilot.press("escape")
+            assert h.manager.list()["sessions"]
+            editor.text = "/delete"
+            await pilot.press("enter")
+            await pilot.click("#delete-chat")
+            async with asyncio.timeout(5):
+                while not connection.deleted:
+                    await pilot.pause(0.02)
+            assert h.manager.list()["sessions"] == []
+            async with asyncio.timeout(5):
+                while not other.deleted or getattr(app, "_deleting_session", False):
+                    other.drain(app.store)
+                    await pilot.pause(0.02)
+            editor.text = "must not start a turn"
+            await pilot.press("enter")
+            assert len(h.agents) == 1
+            editor.text = "/clear"
+            await pilot.press("enter")
+            async with asyncio.timeout(5):
+                while connection.id == session["id"]:
+                    await pilot.pause(0.02)
+            assert not connection.deleted
     asyncio.run(exercise())
 
 

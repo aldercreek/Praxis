@@ -22,7 +22,49 @@ class ServiceStore:
         self.db = sessions.database
         with self.db.connection() as connection:
             connection.executescript(SCHEMA)
+            if "delete_requested_at" not in {
+                row["name"] for row in connection.execute("PRAGMA table_info(sessions)")
+            }:
+                connection.execute("ALTER TABLE sessions ADD COLUMN delete_requested_at TEXT")
             connection.commit()
+
+    def require_available(self, session_id):
+        with self.db.connection() as connection:
+            row = connection.execute(
+                "SELECT delete_requested_at FROM sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+        if row is None:
+            raise ServiceError("session_not_found", "Session does not exist", 404)
+        if row["delete_requested_at"] is not None:
+            raise ServiceError("session_deleted", "Session is being deleted", 410)
+
+    def deleting_sessions(self):
+        with self.db.connection() as connection:
+            return [row[0] for row in connection.execute(
+                "SELECT id FROM sessions WHERE delete_requested_at IS NOT NULL"
+            )]
+
+    def mark_for_deletion(self, session_id):
+        with self.db.transaction() as connection:
+            return connection.execute(
+                "UPDATE sessions SET delete_requested_at = COALESCE(delete_requested_at, "
+                "strftime('%Y-%m-%dT%H:%M:%f+00:00','now')) WHERE id = ?", (session_id,)
+            ).rowcount > 0
+
+    def delete_session(self, session_id):
+        with self.db.transaction() as connection:
+            for table in ("inputs", "active_turns", "approvals", "events", "tool_calls"):
+                connection.execute(f"DELETE FROM {table} WHERE session_id = ?", (session_id,))
+            connection.execute(
+                "DELETE FROM commands WHERE json_extract(payload, '$.session_id') = ?", (session_id,)
+            )
+            # Retain only the creation receipt: a lost reply must not recreate a deleted chat.
+            connection.execute(
+                "UPDATE commands SET result = ? WHERE kind = 'create' "
+                "AND json_extract(result, '$.session.id') = ?",
+                (encode({"deleted": True, "session_id": session_id}), session_id),
+            )
+            connection.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
 
     def command(self, command_id, kind, payload, operation):
         """Dedupe the mutation and its reply in the same transaction."""
@@ -37,7 +79,12 @@ class ServiceStore:
                         "Command ID was used for different content",
                         409,
                     )
-                return json.loads(row["result"]), False
+                result = json.loads(row["result"])
+                if kind == "create":
+                    if result.get("deleted"):
+                        raise ServiceError("session_deleted", "Session has been deleted", 410)
+                    self.require_available(result["session"]["id"])
+                return result, False
             # The FK from inputs requires the command to exist before operation().
             connection.execute(
                 "INSERT INTO commands VALUES (?, ?, ?, '{}')",
@@ -180,6 +227,7 @@ class ServiceStore:
         # One short unit of work freezes the projection and its sequence together.
         # Replay is local SQL only; never hold this transaction while streaming.
         with self.db.transaction(write=False) as connection:
+            self.require_available(session_id)
             summary = self.summary(session_id)
             frames = [
                 json.loads(row[0])
@@ -232,6 +280,11 @@ class ServiceStore:
             ).fetchall()
             for row in rows:
                 session_id, turn_id = row["session_id"], row["turn_id"]
+                if connection.execute(
+                    "SELECT 1 FROM sessions WHERE id = ? AND delete_requested_at IS NOT NULL",
+                    (session_id,),
+                ).fetchone():
+                    continue
                 saved = connection.execute(
                     "SELECT status FROM runs WHERE id = ?", (turn_id,)
                 ).fetchone()

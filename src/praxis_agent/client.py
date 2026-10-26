@@ -139,6 +139,9 @@ class Subscription:
                                     if self.on_ready:
                                         self.on_ready()
                                     self.ready.set()
+                                elif event_type == "deleted":
+                                    self._deleted()
+                                    return
                                 elif data:
                                     frame = json.loads("\n".join(data))
                                     if frame["sequence"] > self.applied:
@@ -147,6 +150,9 @@ class Subscription:
                                 failures = 0
                 raise ConnectionError("SSE stream ended")
             except (httpx.HTTPError, ConnectionError, ValueError, APIError) as error:
+                if isinstance(error, APIError) and error.status in (404, 410):
+                    self._deleted()
+                    return
                 if self.on_error:
                     self.on_error(str(error))
                 if isinstance(error, APIError) and error.status not in (401, 503):
@@ -160,6 +166,11 @@ class Subscription:
                     failures = 0
                 await asyncio.sleep(min(0.5 * 2**failures, 2))
                 failures += 1
+
+    def _deleted(self):
+        self.closed.set()
+        self.ready.set()
+        self.callback({"event": "SessionDeleted", "session_id": self.session_id, "data": {}})
 
     def close(self):
         self.closed.set()

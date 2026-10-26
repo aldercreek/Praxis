@@ -291,15 +291,15 @@ def test_shell_display_only_unwraps_known_script_arguments():
 
 @pytest.mark.parametrize("keys,allowed", [(["y"], True), (["1"], True), (["n"], False),
                                         (["2"], False), (["escape"], False), (["down", "enter"], False)])
-def test_inline_approval_uses_existing_boolean_decision(keys, allowed):
+def test_inline_approval_uses_existing_boolean_decision(keys, allowed, wait_for_ui):
     async def exercise():
         app = PraxisApp(ViewEventSink(), connection=FakeConnection())
         request = Approval("run_command", {"argv": ["cmd", "/c", "echo hello"],
                            "workdir": ".", "yield_time_ms": 30000}, Future())
         async with app.run_test(size=(70, 28)) as pilot:
             app._approvals.put(request)
-            await pilot.pause(0.15)
             panel = app.query_one(ApprovalPanel)
+            await wait_for_ui(pilot, lambda: panel.display)
             assert panel.display
             assert app.screen is app._main_screen
             assert not app.query_one("#composer").display
@@ -308,7 +308,7 @@ def test_inline_approval_uses_existing_boolean_decision(keys, allowed):
             assert "$ echo hello" in content and "argv" not in content
             assert "Directory: ." in content
             await pilot.press(*keys)
-            await pilot.pause(0.1)
+            await wait_for_ui(pilot, lambda: request.future.done() and not panel.display)
             assert request.future.result(timeout=0) is allowed
             assert not panel.display
             assert app.query_one("#composer").display

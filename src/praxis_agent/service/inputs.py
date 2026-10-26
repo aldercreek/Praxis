@@ -21,6 +21,8 @@ class TurnInputs:
         runtime = self.runtime
         with runtime.lock:
             current_run().check()
+            if runtime.closed:
+                return False
             pending = runtime.store.pending(runtime.id)
             if not pending:
                 return False

@@ -22,7 +22,7 @@ class ApprovalBroker:
             )
         runtime, approval_id, future = self.runtime, uuid4().hex, Future()
         with runtime.lock:
-            if runtime.run is None:
+            if runtime.run is None or runtime.closed:
                 raise ExecutionStopped("approval cancelled")
             scope = runtime.run
             scope.check()
@@ -91,6 +91,7 @@ class ApprovalBroker:
 
     def decide(self, approval_id, approved):
         with self.runtime.lock:
+            self.runtime.ensure_open()
             scope = self.runtime.run
             desired = "approved" if approved else "denied"
             if scope is None or scope.cancelled.is_set():

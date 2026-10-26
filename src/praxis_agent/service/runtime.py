@@ -27,15 +27,21 @@ class SessionRuntime:
         self.worker = None
         self.agent = None
         self.closed = False
+        self.deleting = False
         self.approvals = ApprovalBroker(self)
 
     def publish(self, event, turn_id="", agent_id="main", data=None):
         return self.store.append_event(self.id, event, turn_id, agent_id, data)
 
+    def ensure_open(self):
+        if self.deleting:
+            raise ServiceError("session_deleted", "Session is being deleted", 410)
+        if self.closed:
+            raise ServiceError("closing", "Service is shutting down", 503)
+
     def submit(self, command_id, text):
         with self.lock:
-            if self.closed:
-                raise ServiceError("closing", "Service is shutting down", 503)
+            self.ensure_open()
 
             def accept(connection):
                 connection.execute(
@@ -54,8 +60,7 @@ class SessionRuntime:
 
     def resume(self, command_id):
         with self.lock:
-            if self.closed:
-                raise ServiceError("closing", "Service is shutting down", 503)
+            self.ensure_open()
             result, created = self.store.command(
                 command_id,
                 "resume",
@@ -68,6 +73,7 @@ class SessionRuntime:
 
     def delete_input(self, command_id):
         with self.lock, self.store.db.transaction() as connection:
+            self.ensure_open()
             row = connection.execute(
                 "SELECT * FROM inputs WHERE command_id = ? AND session_id = ?",
                 (command_id, self.id),
@@ -132,7 +138,11 @@ class SessionRuntime:
                     self.agent.close()
                 except Exception:
                     logger.exception("Could not close failed session %s", self.id)
-                self.agent = None
+                    # Keep ownership until deletion/shutdown can retry cleanup.
+                    with self.lock:
+                        self.closed = True
+                else:
+                    self.agent = None
         finally:
             with self.lock:
                 self.run = None
@@ -164,8 +174,10 @@ class SessionRuntime:
                 if status == "completed":
                     self._start_pending()
 
-    def cancel(self, turn_id):
+    def cancel(self, turn_id, *, closing=False):
         with self.lock:
+            if not closing:
+                self.ensure_open()
             scope = self.run
             if scope is None or scope.id != turn_id:
                 with self.store.db.connection() as connection:
@@ -190,7 +202,7 @@ class SessionRuntime:
         with self.lock:
             self.closed = True
             if self.run:
-                self.cancel(self.run.id)
+                self.cancel(self.run.id, closing=True)
             worker = self.worker
         if worker:
             worker.join()
