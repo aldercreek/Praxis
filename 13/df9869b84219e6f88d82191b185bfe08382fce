@@ -1,0 +1,23 @@
+tests/service/test_discovery.py
+  s_da4263abd40288::t_5745c4f681734f 42-49,53-56,59,63-68
+  s_da4263abd40288::t_3bc127a1fb363f 50-52,57-58,60-62
+src/praxis_agent/service/discovery.py
+  s_da4263abd40288::t_3bc127a1fb363f 115
+  s_da4263abd40288::t_5745c4f681734f 114,117
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.51-trip",
+  "base_commit_sha": "13df9869b84219e6f88d82191b185bfe08382fce",
+  "prompts": {},
+  "sessions": {
+    "s_da4263abd40288": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a17135-e366-75a1-bfc8-4f1cd0fdd2e7",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "aldercreek <57739268+aldercreek@users.noreply.github.com>"
+    }
+  }
+}
