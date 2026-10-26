@@ -1,0 +1,64 @@
+src/praxis_agent/service/manager.py
+  s_da4263abd40288::t_a621b66d9111bd 137-138,140,146,155
+  s_da4263abd40288::t_25f3103a6efedd 13,26-30,74,79,87-89,162-163
+src/praxis_agent/service/http.py
+  s_da4263abd40288::t_df44da48239b02 65,74,127-129,131,134,139-140,151,181-188,230
+  s_da4263abd40288::t_a26d700cc576f9 66-73
+tests/test_worker_execution.py
+  s_da4263abd40288::t_fe96ee8ac0d62a 205-206,208
+src/praxis_agent/terminal/delete_dialog.py
+  s_da4263abd40288::t_a26d700cc576f9 1-40
+tests/service/test_deletion.py
+  s_da4263abd40288::t_4822f455552f65 209-227,229-234
+  s_da4263abd40288::t_a621b66d9111bd 186-187
+  s_da4263abd40288::t_4f55f6f8117d53 228
+  s_da4263abd40288::t_fe329ae61e98df 1,3-175
+  s_da4263abd40288::t_d19c289496dda3 2,176-185,188-208
+src/praxis_agent/service/approvals.py
+  s_da4263abd40288::t_25f3103a6efedd 25,94
+src/praxis_agent/service/runtime.py
+  s_da4263abd40288::t_a621b66d9111bd 141-145
+  s_da4263abd40288::t_25f3103a6efedd 30,36-41,44,63,76,177,179-180,205
+tests/test_terminal_refresh.py
+  s_da4263abd40288::t_e692965cfb396e 100-104
+src/praxis_agent/agent.py
+  s_da4263abd40288::t_df44da48239b02 82,233,242
+src/praxis_agent/service/store.py
+  s_da4263abd40288::t_25f3103a6efedd 25-28,31-68,82-87,230,283-287
+README.md
+  s_da4263abd40288::t_898391fd14d1fd 104,111
+src/praxis_agent/service/inputs.py
+  s_da4263abd40288::t_25f3103a6efedd 24-25
+src/praxis_agent/terminal/connection.py
+  s_da4263abd40288::t_a26d700cc576f9 20,31,61-69,118-119
+tests/service/test_terminal.py
+  s_da4263abd40288::t_d19c289496dda3 14,76-99,104-112
+  s_da4263abd40288::t_3a1dadef135326 100-103
+docs/reference.md
+  s_da4263abd40288::t_0afeb03d5d8c15 14,31
+tests/test_transcript_ui.py
+  s_da4263abd40288::t_e692965cfb396e 294,302,311
+src/praxis_agent/terminal/app.py
+  s_da4263abd40288::t_a26d700cc576f9 31,234-242,431,658-663,679-680,710-722,747-749
+src/praxis_agent/service/deletion.py
+  s_da4263abd40288::t_a621b66d9111bd 66
+  s_da4263abd40288::t_25f3103a6efedd 1-65,67-82
+src/praxis_agent/client.py
+  s_da4263abd40288::t_df44da48239b02 142-144,153-155,170-173
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.51-trip",
+  "base_commit_sha": "0b2ee146c6e7e6ff33e7457a01dc155cc543abf6",
+  "prompts": {},
+  "sessions": {
+    "s_da4263abd40288": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a17135-e366-75a1-bfc8-4f1cd0fdd2e7",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "aldercreek <57739268+aldercreek@users.noreply.github.com>"
+    }
+  }
+}
