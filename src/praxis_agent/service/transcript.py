@@ -4,6 +4,8 @@ import json
 
 from praxis_agent.mcp_results import decode_tool_output
 
+from .collaboration import collaboration_messages
+
 
 def content_text(content) -> str:
     if isinstance(content, str):
@@ -45,6 +47,7 @@ class Transcript:
         self.responses: dict[tuple, dict] = {}
         self.last_response: dict[tuple, dict] = {}
         self.tools: dict[tuple, dict] = {}
+        self.agents: dict[tuple, dict] = {}
         for item in history:
             self._restore(item)
 
@@ -108,11 +111,14 @@ class Transcript:
         if data.get("child_turn_id"):
             common["child_turn_id"] = data["child_turn_id"]
         if event == "TurnStarted":
+            task = data["task"]
+            envelope = collaboration_messages(task) if agent_id not in {"main", "root"} else None
             self.append(
                 "user",
-                data["task"],
+                "\n\n".join(item["content"] for item in envelope) if envelope else task,
                 **common,
                 status="completed",
+                source="user" if agent_id in {"main", "root"} else "agent",
                 id=f"user:{turn_id}:{agent_id}:{execution_id}",
             )
         elif event in {"AssistantTextDelta", "ModelRequestCompleted"}:
@@ -201,15 +207,35 @@ class Transcript:
                     message["structured_output"] = result["structured_output"]
                 if result.get("file_change"):
                     message["file_change"] = result["file_change"]
+        elif event == "ChildAgentStatus":
+            agent_key = (turn_id, agent_id)
+            message = self.agents.get(agent_key)
+            if message is None:
+                message = self.append("system", "Subtask", **common, id=f"agent:{turn_id}:{agent_id}")
+                self.agents[agent_key] = message
+            message.update(status=data.get("status", ""), content=data.get("task_summary") or message["content"])
+        elif event == "ChildAgentMessage":
+            self.append("assistant", data.get("content", ""), **common, source="agent", status="completed")
         elif event == "MessagesReceived":
             for item in data.get("items", []):
                 if isinstance(item, dict) and item.get("role") != "developer":
                     text = content_text(item.get("content"))
+                    envelope = collaboration_messages(text) if data.get("source") != "user" else None
+                    if envelope:
+                        for report in envelope:
+                            sender = report["sender_id"]
+                            if agent_id in {"main", "root"} and report["recipient_id"] == "parent":
+                                if not any(m.get("agent_id") == sender and m.get("turn_id") == turn_id and m["content"] == report["content"] for m in self.messages):
+                                    self.append("assistant", report["content"], turn_id=turn_id, agent_id=sender, source="agent", status="completed")
+                            elif agent_id not in {"main", "root"}:
+                                self.append("user", report["content"], **common, source="agent", status="completed")
+                        continue
                     if text:
                         self.append(
                             "user" if data.get("source") == "user" else "system",
                             text,
                             **common,
+                            source=data.get("source"),
                             status="completed",
                         )
         elif event in {"TurnCompleted", "TurnFailed", "TurnCancelled", "TurnSettled"}:

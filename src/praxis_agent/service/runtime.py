@@ -28,6 +28,7 @@ class SessionRuntime:
         self.agent = None
         self.closed = False
         self.deleting = False
+        self.restart_input_id = None
         self.approvals = ApprovalBroker(self)
 
     def publish(self, event, turn_id="", agent_id="main", data=None):
@@ -47,6 +48,12 @@ class SessionRuntime:
                 connection.execute(
                     "INSERT INTO inputs(command_id, session_id, content) VALUES (?, ?, ?)",
                     (command_id, self.id, text),
+                )
+                connection.execute(
+                    "UPDATE inputs SET position = ("
+                    "SELECT COALESCE(MAX(COALESCE(position, rowid)), 0) + 1 "
+                    "FROM inputs WHERE session_id = ?) WHERE command_id = ?",
+                    (self.id, command_id),
                 )
                 self.store.pending_changed(self.id)
                 return {"command_id": command_id, "accepted": True}
@@ -80,8 +87,10 @@ class SessionRuntime:
             ).fetchone()
             if row is None:
                 raise ServiceError("input_not_found", "Input not found", 404)
-            if row["consumed_turn_id"] is not None or (
-                self.run and getattr(self, "first_id", None) == command_id
+            if (
+                row["consumed_turn_id"] is not None
+                or command_id == self.store.sending_input(self.id)
+                or (self.run and command_id == self.first_id)
             ):
                 raise ServiceError(
                     "input_consumed", "Input is already being processed", 409
@@ -93,6 +102,87 @@ class SessionRuntime:
                 self.store.pending_changed(self.id)
             return {"deleted": True}
 
+    def _editable_input(self, connection, input_id):
+        row = connection.execute(
+            "SELECT * FROM inputs WHERE command_id = ? AND session_id = ? AND deleted = 0",
+            (input_id, self.id),
+        ).fetchone()
+        if row is None:
+            raise ServiceError("input_not_found", "This queued message is no longer available.", 404)
+        if (
+            row["consumed_turn_id"] is not None
+            or input_id == self.store.sending_input(self.id)
+            or (self.run and input_id == self.first_id)
+        ):
+            raise ServiceError(
+                "input_consumed", "This message has already been received by the agent.", 409
+            )
+        return row
+
+    def edit_input(self, command_id, input_id):
+        """Move a queued message back to the caller's draft atomically."""
+        with self.lock:
+            self.ensure_open()
+
+            def edit(connection):
+                row = self._editable_input(connection, input_id)
+                connection.execute("UPDATE inputs SET deleted = 1 WHERE command_id = ?", (input_id,))
+                self.store.pending_changed(self.id)
+                return {"content": row["content"]}
+
+            return self.store.command(
+                command_id, "edit_input", {"session_id": self.id, "input_id": input_id}, edit
+            )[0]
+
+    def reorder_inputs(self, command_id, input_ids):
+        with self.lock:
+            self.ensure_open()
+
+            def reorder(connection):
+                sending = self.store.sending_input(self.id)
+                pending = [
+                    item["command_id"] for item in self.store.pending(self.id)
+                    if item["command_id"] != sending
+                ]
+                if len(input_ids) != len(pending) or set(input_ids) != set(pending):
+                    raise ServiceError("queue_changed", "The message queue changed. Please try again.", 409)
+                connection.executemany("UPDATE inputs SET position = ? WHERE command_id = ?", enumerate(input_ids, 1))
+                self.store.pending_changed(self.id)
+                return {"reordered": True}
+
+            return self.store.command(
+                command_id, "reorder_inputs", {"session_id": self.id, "input_ids": input_ids}, reorder
+            )[0]
+
+    def send_input_now(self, command_id, input_id):
+        """Prioritize one input, then hand over only after the active run settles."""
+        with self.lock:
+            self.ensure_open()
+
+            def prioritize(connection):
+                self._editable_input(connection, input_id)
+                connection.execute(
+                    "UPDATE inputs SET position = ("
+                    "SELECT COALESCE(MIN(COALESCE(position, rowid)), 0) - 1 "
+                    "FROM inputs WHERE session_id = ?) WHERE command_id = ?",
+                    (self.id, input_id),
+                )
+                if self.run:
+                    connection.execute("UPDATE active_turns SET input_id = ? WHERE session_id = ?", (input_id, self.id))
+                self.store.pending_changed(self.id)
+                return {"accepted": True}
+
+            result, created = self.store.command(
+                command_id, "send_input_now", {"session_id": self.id, "input_id": input_id}, prioritize
+            )
+            if created:
+                if self.run:
+                    self.cancel(self.run.id)
+                    self.restart_input_id = input_id
+                else:
+                    self._start_pending()
+            return result
+
     def _start_pending(self):
         pending = self.store.pending(self.id)
         if not pending or self.closed:
@@ -102,9 +192,10 @@ class SessionRuntime:
         self.first_id = pending[0]["command_id"]
         with self.store.db.transaction() as connection:
             connection.execute(
-                "INSERT INTO active_turns(session_id, turn_id) VALUES (?, ?)",
-                (self.id, scope.id),
+                "INSERT INTO active_turns(session_id, turn_id, input_id) VALUES (?, ?, ?)",
+                (self.id, scope.id, self.first_id),
             )
+            self.store.pending_changed(self.id)
             self.store.updated(self.id)
         self.worker = Thread(
             target=self._execute,
@@ -171,7 +262,9 @@ class SessionRuntime:
                     self.store.updated(self.id)
                 # Inputs admitted after the final check are picked up here. A stop
                 # or failure always retains them for an explicit user action.
-                if status == "completed":
+                restart = self.restart_input_id is not None
+                self.restart_input_id = None
+                if status == "completed" or restart:
                     self._start_pending()
 
     def cancel(self, turn_id, *, closing=False):
@@ -188,6 +281,7 @@ class SessionRuntime:
                 if row is None:
                     raise ServiceError("turn_not_found", "Turn does not exist", 404)
                 return {"turn_id": turn_id, "status": row["status"]}
+            self.restart_input_id = None
             if not scope.cancelled.is_set():
                 with self.store.db.transaction() as connection:
                     connection.execute(

@@ -17,6 +17,25 @@ def answer(text):
     return ModelResponse(({"role": "assistant", "content": text},), text, ())
 
 
+def test_collaboration_reports_are_grouped_deduplicated_and_keep_user_examples():
+    report = dict(sender_id="reviewer", recipient_id="parent", content="Review complete.")
+    envelope = "[Agent collaboration messages; source-labelled task data]\n" + json.dumps([report])
+    transcript = Transcript()
+    transcript.consume("TurnStarted", "turn", "main", {"task": envelope})
+    transcript.consume("ChildAgentStatus", "turn", "reviewer", {"task_summary": "Review", "status": "running"})
+    transcript.consume("ChildAgentMessage", "turn", "reviewer", {"content": report["content"]})
+    transcript.consume("MessagesReceived", "turn", "main", {"source": "agent", "items": [{"role": "user", "content": envelope}]})
+    transcript.consume("ChildAgentStatus", "turn", "reviewer", {"status": "idle"})
+    assert len(transcript.messages) == 3
+    assert transcript.messages[0]["content"] == envelope
+    assert transcript.messages[0]["source"] == "user"
+    assert transcript.messages[1]["content"] == "Review"
+    assert transcript.messages[1]["status"] == "idle"
+    assert transcript.messages[2]["agent_id"] == "reviewer"
+    assert transcript.messages[2]["content"] == "Review complete."
+    assert transcript.messages[2]["source"] == "agent"
+
+
 def test_event_adapter_omits_prompts_and_does_not_duplicate_child_events():
     received = []
 

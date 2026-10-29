@@ -6,6 +6,7 @@ import json
 
 from praxis_agent.mcp_results import decode_tool_output
 
+from .collaboration import collaboration_messages
 from .transcript import content_text
 
 
@@ -92,7 +93,7 @@ def saved_turn_events(session_id, run, items, has_terminal_event):
                 yield frame(
                     "MessagesReceived",
                     items=[dict(role=role, content=text)],
-                    source="user" if role == "user" else "agent",
+                    source="user" if role == "user" and not collaboration_messages(text) else "agent",
                 )
         elif kind == "function_call":
             call_id = item["call_id"]

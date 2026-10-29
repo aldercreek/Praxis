@@ -8,6 +8,24 @@ from praxis_agent.terminal.connection import TerminalSession
 from praxis_agent.terminal.views import ToolBlock, ViewStore
 
 
+def test_cold_history_keeps_collaboration_in_its_agent_without_rewriting_model_history(service):
+    h = service()
+    sid = h.store.sessions.create_session(h.path, "test").id
+    state = RunState("review this")
+    h.store.sessions.start_run(sid, "saved", state, {"role": "user", "content": state.original_task})
+    envelope = "[Agent collaboration messages; source-labelled task data]\n" + json.dumps([
+        dict(sender_id="reviewer", recipient_id="parent", content="Review complete.")
+    ])
+    h.store.sessions.append_response_items(sid, "saved", [{"role": "user", "content": envelope}])
+    state.complete()
+    h.store.sessions.finish_run(sid, "saved", state)
+    snapshot = h.store.snapshot(sid)
+    assert [m["content"] for m in snapshot["messages"]] == ["review this", "Review complete."]
+    assert snapshot["messages"][1]["agent_id"] == "reviewer"
+    assert snapshot["messages"][1]["source"] == "agent"
+    assert h.store.sessions.load_conversation_items(sid)[-1]["content"] == envelope
+
+
 def saved_turn(h, sid, turn_id, *, finish=True):
     state = RunState("saved question")
     h.store.sessions.start_run(

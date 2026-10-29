@@ -22,6 +22,12 @@ class ServiceStore:
         self.db = sessions.database
         with self.db.connection() as connection:
             connection.executescript(SCHEMA)
+            for table, column, declaration in (
+                ("inputs", "position", "INTEGER"),
+                ("active_turns", "input_id", "TEXT"),
+            ):
+                if column not in {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}:
+                    connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
             if "delete_requested_at" not in {
                 row["name"] for row in connection.execute("PRAGMA table_info(sessions)")
             }:
@@ -184,14 +190,19 @@ class ServiceStore:
                 dict(row)
                 for row in connection.execute(
                     "SELECT command_id, content FROM inputs WHERE session_id = ? "
-                    "AND consumed_turn_id IS NULL AND deleted = 0 ORDER BY rowid",
+                    "AND consumed_turn_id IS NULL AND deleted = 0 ORDER BY COALESCE(position, rowid), rowid",
                     (session_id,),
                 )
             ]
 
+    def sending_input(self, session_id):
+        with self.db.connection() as connection:
+            row = connection.execute("SELECT input_id FROM active_turns WHERE session_id = ?", (session_id,)).fetchone()
+            return row[0] if row else None
+
     def pending_changed(self, session_id):
         self.append_event(
-            session_id, "InputsChanged", data={"inputs": self.pending(session_id)}
+            session_id, "InputsChanged", data={"inputs": self.pending(session_id), "sending_input_id": self.sending_input(session_id)}
         )
 
     def summary(self, session_id):
@@ -254,6 +265,7 @@ class ServiceStore:
                 messages=transcript.messages,
                 approvals=approvals,
                 pending_inputs=self.pending(session_id),
+                sending_input_id=self.sending_input(session_id),
                 sequence=frames[-1]["sequence"] if frames else 0,
                 # Typed terminal presentation is reconstructed without creating an Agent.
                 view_events=view_events,

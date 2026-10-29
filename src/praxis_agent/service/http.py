@@ -112,6 +112,23 @@ def create_app(manager, *, token, instance_id, heartbeat=15.0, poll_interval=0.1
             await asyncio.to_thread(runtime.cancel, request.path_params["turn_id"])
         )
 
+    async def queue_action(request):
+        data = await body(request)
+        runtime = await asyncio.to_thread(manager.runtime, request.path_params["session_id"])
+        command_id = required_text(data, "command_id")
+        action = request.path_params["action"]
+        if action == "reorder":
+            ids = data.get("input_ids")
+            if not isinstance(ids, list) or not all(isinstance(item, str) and item for item in ids):
+                raise ServiceError("invalid_inputs", "input_ids must be an array of message IDs")
+            result = await asyncio.to_thread(runtime.reorder_inputs, command_id, ids)
+        elif action in {"edit", "send"}:
+            operation = runtime.edit_input if action == "edit" else runtime.send_input_now
+            result = await asyncio.to_thread(operation, command_id, required_text(data, "input_id"))
+        else:
+            raise ServiceError("unknown_action", "Unknown queue action", 404)
+        return JSONResponse(result)
+
     async def decide(request):
         data = await body(request)
         return JSONResponse(
@@ -231,6 +248,7 @@ def create_app(manager, *, token, instance_id, heartbeat=15.0, poll_interval=0.1
         Route("/api/sessions/{session_id}/snapshot", snapshot),
         Route("/api/sessions/{session_id}/inputs", inputs, methods=["POST"]),
         Route("/api/sessions/{session_id}/inputs/resume", resume, methods=["POST"]),
+        Route("/api/sessions/{session_id}/queue/{action}", queue_action, methods=["POST"]),
         Route(
             "/api/sessions/{session_id}/inputs/{command_id}",
             delete_input,

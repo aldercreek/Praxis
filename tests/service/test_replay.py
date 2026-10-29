@@ -120,7 +120,7 @@ def test_recovery_fails_unfinished_turn_preserves_events_and_pending_input(tmp_p
         data={"call_id": "unknown", "tool_name": "run_command"},
     )
     with store.db.transaction() as connection:
-        connection.execute("INSERT INTO active_turns VALUES (?, 'old-turn', 0)", (sid,))
+        connection.execute("INSERT INTO active_turns(session_id, turn_id, cancel_requested) VALUES (?, 'old-turn', 0)", (sid,))
         connection.execute(
             "INSERT INTO approvals VALUES ('A1', ?, 'old-turn', 'main', 'run_command', '{}', 'pending')",
             (sid,),
@@ -170,7 +170,7 @@ def test_recovery_preserves_result_committed_before_runtime_settled(tmp_path, st
         state.fail(ValueError("original error"))
     sessions.finish_run(sid, "turn", state)
     with store.db.transaction() as connection:
-        connection.execute("INSERT INTO active_turns VALUES (?, 'turn', 0)", (sid,))
+        connection.execute("INSERT INTO active_turns(session_id, turn_id, cancel_requested) VALUES (?, 'turn', 0)", (sid,))
     store.recover()
     snapshot = store.snapshot(sid)
     assert snapshot["session"]["latest_turn"]["status"] == status
