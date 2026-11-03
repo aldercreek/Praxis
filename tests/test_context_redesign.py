@@ -12,6 +12,7 @@ from praxis_agent.context.operations import ContextOperation, ContextOperations
 from praxis_agent.context.retrieval import read_history
 from praxis_agent.context.tool_output import preview_tool_outputs
 from praxis_agent.context.tools import create_context_tools
+from praxis_agent.model_errors import SummaryTooLongError
 
 
 class SummaryModel:
@@ -20,7 +21,7 @@ class SummaryModel:
         self.text = text
 
     def summarize(self, messages, instructions, **kwargs):
-        self.calls.append((deepcopy(messages), instructions))
+        self.calls.append((deepcopy(messages), instructions, deepcopy(kwargs)))
         return self.text
 
 
@@ -43,7 +44,7 @@ def test_direct_summary_needs_no_model_preserves_history_and_has_one_visible_cop
     assert history.snapshot() == saved
     assert read_history(history, manager.operations.records, "m1")["text"] == original
     replay = ContextOperations()
-    replay.replay([ContextOperation.from_dict({**op.to_dict(), "message_ids": list(op.message_ids)})
+    replay.replay([ContextOperation.from_dict(json.loads(json.dumps(op.to_dict())))
                    for op in manager.operations.records])
     assert json.dumps(replay.project(history.snapshot())).count(summary) == 1
     # Original function-call arguments are retained in the full history too.
@@ -98,54 +99,69 @@ def test_preview_notice_is_first_and_history_remains_fully_readable():
     assert read_history(history, [], "m1", character_limit=None)["text"] == raw
 
 
-def test_usage_is_only_percentage_and_counts_all_request_parts():
+def test_usage_has_one_transient_status_region_and_counts_all_request_parts():
     limits = ModelLimits(128000, max_output_tokens=16384)
     manager = ContextManager(model_limits=limits, instructions="system instructions " * 30)
     history = ConversationHistory([{"role": "user", "content": "task " * 90}])
     tools = [{"type": "function", "name": "example", "description": "tool information " * 40}]
     transient = [{"role": "developer", "content": "run state " * 20}]
     view = manager.build_view(history, transient_items=transient, tool_definitions=tools)
-    assert view.items[-1]["content"] == f"Context usage: {view.context_status.usage_percent:g}%"
+    assert view.items[-1]["content"] == (
+        f"<context_status>\nContext usage: {view.context_status.usage_percent:g}%\n</context_status>"
+    )
+    assert "context_status" not in json.dumps(history.snapshot())
     estimate = HeuristicTokenEstimator().estimate_request(
         instructions=manager._instructions, input_items=view.items, tools=tools)
     assert abs(view.context_status.estimated_input_tokens - estimate) <= 2
     assert view.context_status.usage_percent == round(estimate / 105600 * 100, 1)
 
 
-@pytest.mark.parametrize("ratio", [0.15, 0.25, 0.4])
-def test_automatic_compaction_retains_token_budgeted_complete_tool_groups(ratio):
+@pytest.mark.parametrize("text_history", [False, True])
+def test_automatic_compaction_trims_all_tool_bodies_then_summarizes_if_needed(text_history):
     model = SummaryModel()
-    policy = ContextPolicy(desired_output_tokens=1000, recent_history_ratio=ratio)
+    policy = ContextPolicy(output_reserve_tokens=1000, summary_output_tokens=1000)
     manager = ContextManager(model_limits=ModelLimits(12000), policy=policy,
                              instructions="fixed " * 200, summarizer=model)
     history = ConversationHistory()
-    for i in range(50):
+    for i in range(8):
+        if text_history:
+            history.append({"role": "assistant", "content": "verified observation " * 300})
         history.extend([
             {"type": "function_call", "call_id": str(i), "name": "read_file", "arguments": "{}"},
-            {"type": "function_call_output", "call_id": str(i), "output": "evidence " * 100},
+            {"type": "function_call_output", "call_id": str(i),
+             "output": json.dumps({"success": True, "output": "evidence " * 1000})},
         ])
+    history.append({"role": "user", "content": "Latest correction: tolerance is 0.001."})
     original = deepcopy(history.snapshot())
     transient = [{"role": "developer", "content": "state " * 60}]
     view = manager.build_view(history, transient_items=transient)
-    assert len(model.calls) == len(manager.operations.records) == 1
+    assert len(model.calls) == int(text_history)
+    assert len(manager.operations.records) == 1
+    assert manager.operations.records[0].action == ("compress" if text_history else "trim")
     assert history.snapshot() == original
-    assert view.context_status.estimated_input_tokens < view.context_status.effective_input_limit_tokens
+    assert view.context_status.usage_percent < 95
+    assert "Latest correction: tolerance is 0.001." in json.dumps(view.items)
     retained = [m for m in manager._current_messages if m["message_id"].startswith("m")
                 and m["payload"].get("type") in ("function_call", "function_call_output")]
-    assert retained
+    assert bool(retained) is (not text_history)
     assert [m["payload"]["call_id"] for m in retained[::2]] == [m["payload"]["call_id"] for m in retained[1::2]]
-    fixed = manager._estimate_view(tuple(transient), ())[0].context_status
-    target = int((fixed.effective_input_limit_tokens - fixed.estimated_input_tokens) * ratio)
-    from praxis_agent.context.operations import render_message
-    tail = tuple(render_message(m) for m in retained) + tuple(transient)
-    size = manager._estimate_view(tail, ())[0].context_status.estimated_input_tokens - fixed.estimated_input_tokens
-    assert 0 < size <= target
-    assert target - size < 450  # Less than one additional complete interaction.
+    assert "evidence evidence" not in json.dumps(view.items)
+    if text_history:
+        sources = json.dumps(model.calls[0][0])
+        assert "evidence evidence" in sources
+        assert "context_omitted" not in sources
+        assert "context_status" not in sources
+        assert "Latest correction" not in sources
+        assert model.calls[0][2]["reference_context"] == (original[-1], *transient)
+        assert manager._current_messages[-1]["payload"]["role"] == "user"
+    else:
+        assert view.context_status.usage_percent <= 20
 
 
 def test_oversized_summary_is_not_committed():
     manager = ContextManager(model_limits=ModelLimits(8000), summarizer=SummaryModel("x" * 30000))
-    history = ConversationHistory([{"role": "user", "content": "x" * 30000}])
-    with pytest.raises(ValueError, match="compacted context"):
+    history = ConversationHistory([{"role": "assistant", "content": "x" * 30000},
+                                   {"role": "user", "content": "continue"}])
+    with pytest.raises(SummaryTooLongError, match="compacted context"):
         manager.build_view(history)
     assert not manager.operations.records

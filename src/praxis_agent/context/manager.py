@@ -13,6 +13,7 @@ from praxis_agent.context.capacity import (
     TokenEstimator,
 )
 from praxis_agent.context.model_catalog import ModelLimits
+from praxis_agent.context.compaction import trim_tool_messages
 from praxis_agent.context.model_context import build_context_status_context
 from praxis_agent.context.models import (
     ConversationHistory,
@@ -29,6 +30,7 @@ from praxis_agent.context.summarizer import ContextSummarizer
 from praxis_agent.context.tool_output import preview_tool_outputs
 from praxis_agent.events import ContextCompaction, EventSink
 from praxis_agent.execution import ExecutionStopped
+from praxis_agent.model_errors import ModelClientError, PromptTooLongError, SummaryError, SummaryTooLongError
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +67,7 @@ class ContextManager:
         self._view_operation_count = 0
         self._history_snapshot = ()
         self._transient_items = ()
+        self._summary_context = ()
         self._tool_definitions = ()
         self.event_sink: EventSink | None = None
         self.turn_id = ""
@@ -92,6 +95,7 @@ class ContextManager:
 
         self._current_messages = []
         self._view_operation_count = 0
+        self._summary_context = ()
 
     def build_view(
         self,
@@ -99,6 +103,7 @@ class ContextManager:
         *,
         transient_items: Sequence[object] = (),
         tool_definitions: Sequence[dict[str, object]] = (),
+        summary_context: Sequence[dict[str, object]] | None = None,
     ) -> ModelContextView:
         """构建完整历史、运行时状态和可选容量状态组成的视图。"""
         if self._view_operation_count != len(self.operations.records):
@@ -107,40 +112,57 @@ class ContextManager:
         self._transient_items = tuple(transient_items)
         self._tool_definitions = tuple(tool_definitions)
         self._current_messages = self.operations.project(self._history_snapshot)
+        if summary_context is None:
+            latest_user = next((m["payload"] for m in reversed(self._current_messages)
+                                if m["payload"].get("role") == "user"), None)
+            summary_context = (() if latest_user is None else (latest_user,)) + tuple(transient_items)
+        self._summary_context = tuple(summary_context)
         self._view_operation_count = len(self.operations.records)
-        origins = {
-            op.replacement["message_id"]: op.operation_id
-            for op in self.operations.records if op.replacement is not None
-        }
-
-        def render(messages: Sequence[dict[str, object]]) -> tuple[object, ...]:
-            return tuple(
-                render_message(message, origins.get(message["message_id"]))
-                for message in messages
-            ) + tuple(transient_items)
-
-        previews = preview_tool_outputs(
-            self._current_messages, self._policy.max_tool_output_chars,
-        )
-        base_items = render(previews)
+        base_items = self._render_current_messages() + tuple(transient_items)
         if self._model_limits is None:
             self._pending_heuristic_input_tokens = None
             return ModelContextView(items=base_items)
 
         view, heuristic_input_tokens = self._estimate_view(base_items, tool_definitions)
-        if view.context_status.estimated_input_tokens > view.context_status.effective_input_limit_tokens:
+        if view.context_status.estimated_input_tokens >= self._trigger_tokens(view.context_status):
             self._observe_compaction(
                 transient_items, tool_definitions, view.context_status.estimated_input_tokens,
             )
-            return self.build_view(history, transient_items=transient_items,
-                                   tool_definitions=tool_definitions)
-
-        if view.context_status.estimated_input_tokens > view.context_status.effective_input_limit_tokens:
-            raise ValueError("model input exceeds the context budget; shorten the input or start a new session")
+            self._current_messages = self.operations.project(self._history_snapshot)
+            self._view_operation_count = len(self.operations.records)
+            view, heuristic_input_tokens = self._estimate_view(
+                self._render_current_messages() + tuple(transient_items), tool_definitions,
+            )
         self._pending_heuristic_input_tokens = heuristic_input_tokens
         return view
 
-    def _observe_compaction(self, transient_items, tool_definitions, before_tokens) -> None:
+    def _render_current_messages(self) -> tuple[object, ...]:
+        origins = {op.replacement["message_id"]: op.operation_id
+                   for op in self.operations.records if op.replacement is not None}
+        previews = preview_tool_outputs(self._current_messages, self._policy.max_tool_output_chars)
+        return tuple(render_message(m, origins.get(m["message_id"])) for m in previews)
+
+    def _trigger_tokens(self, status: ContextStatus) -> int:
+        return int(status.effective_input_limit_tokens * self._policy.auto_compact_ratio)
+
+    def recover_from_ptl(
+        self, error: PromptTooLongError | SummaryTooLongError, *, previous_summary: str | None = None,
+    ) -> str:
+        """Return a complete recovery summary; later rounds only refine that summary."""
+        if self._model_limits is None:
+            raise ValueError("PTL recovery requires model context limits")
+        before = self._estimate_view(
+            self._render_current_messages() + self._transient_items, self._tool_definitions,
+        )[0].context_status.estimated_input_tokens
+        summary = self._observe_compaction(
+            self._transient_items, self._tool_definitions, before,
+            error=error, previous_summary=previous_summary,
+        )
+        assert summary is not None
+        return summary
+
+    def _observe_compaction(self, transient_items, tool_definitions, before_tokens,
+                            *, error=None, previous_summary=None) -> str | None:
         started = monotonic()
         request_count = 0
 
@@ -164,7 +186,11 @@ class ContextManager:
 
         emit("started")
         try:
-            status = self._compact_overflow(transient_items, tool_definitions, progress)
+            status, summary = self._compact_context(
+                transient_items, tool_definitions, progress,
+                on_fallback=lambda failure: emit("fallback", error=str(failure)),
+                error=error, previous_summary=previous_summary,
+            )
         except ExecutionStopped:
             emit("cancelled")
             raise
@@ -172,79 +198,124 @@ class ContextManager:
             emit("failed", error=str(error))
             raise
         emit("completed", after_tokens=status.estimated_input_tokens)
+        return summary
 
-    def _compact_overflow(self, transient_items, tool_definitions, on_progress=None) -> ContextStatus:
-        """仅在超限时按历史 token 预算保留近期完整交互，压缩旧前缀。"""
-        if self._summarizer is None:
-            raise ValueError("context budget exceeded and no summary model is configured")
+    def _compact_context(self, transient_items, tool_definitions, on_progress,
+                         *, on_fallback, error, previous_summary) -> tuple[ContextStatus, str | None]:
+        """Trim every tool body, then summarize all history except the latest user request."""
+        force_summary = error is not None
         messages = self._current_messages
-        previews = preview_tool_outputs(messages, self._policy.max_tool_output_chars)
-        # 摘要会改变大部分输入，不沿用旧请求的 token 校准偏差。
-        self._input_token_anchor = None
-        # 不拆开工具调用和结果，也不把 reasoning 与后续调用拆开。
-        cuts, pending = [], set()
-        for index, message in enumerate(messages):
+        pending = set()
+        for message in messages:
             payload = message["payload"]
-            kind = payload.get("type")
-            if kind == "function_call":
+            if payload.get("type") == "function_call":
                 pending.add(payload.get("call_id"))
-            elif kind == "function_call_output":
+            elif payload.get("type") == "function_call_output":
                 pending.discard(payload.get("call_id"))
-            if not pending and kind != "reasoning":
-                cuts.append(index + 1)
+        if pending:
+            raise ValueError("cannot compact before pending tool results")
+        latest_user = next((m for m in reversed(messages) if m["payload"].get("role") == "user"), None)
+        kept = [m for m in messages if m is latest_user or m["payload"].get("role") in {"system", "developer"}]
+        selected = [m for m in messages if m not in kept]
+        selected_ids = {m["message_id"] for m in selected}
+        trimmed = trim_tool_messages(messages)
+        updates = tuple(new for old, new in zip(messages, trimmed) if new != old)
+        if updates or force_summary:
+            self._input_token_anchor = None
+        items = tuple(render_message(m) for m in trimmed) + tuple(transient_items)
+        status = self._estimate_view(items, tool_definitions)[0].context_status
 
+        def save_trim():
+            if updates:
+                self.operations.record(ContextOperation(
+                    self.operations.next_id, "trim", tuple(m["message_id"] for m in updates), updates=updates,
+                ))
+            return status, None
+
+        if not force_summary:
+            history_tokens = self._token_estimator.estimate_request(
+                instructions="", tools=(),
+                input_items=tuple(render_message(m) for m in trimmed if m["message_id"] in selected_ids),
+            )
+            if (history_tokens <= int(self._model_limits.context_window_tokens * self._policy.engineering_sufficiency_ratio)
+                    and status.estimated_input_tokens < self._trigger_tokens(status)):
+                return save_trim()
+        try:
+            try:
+                return self._summarize_context(
+                    selected, kept, transient_items, tool_definitions, on_progress,
+                    error=error, previous_summary=previous_summary,
+                )
+            except SummaryTooLongError as oversized:
+                if force_summary:
+                    raise  # Main PTL recovery owns its two rounds in the request loop.
+                return self._summarize_context(
+                    selected, kept, transient_items, tool_definitions, on_progress,
+                    error=oversized, previous_summary=oversized.summary,
+                )
+        except ModelClientError as failure:
+            if force_summary or status.estimated_input_tokens >= self._trigger_tokens(status):
+                raise
+            # Automatic compaction can continue with a complete trimmed request.
+            # Provider PTL recovery must still produce a valid summary.
+            on_fallback(failure)
+            return save_trim()
+
+    def _summarize_context(self, selected, kept, transient_items, tool_definitions, on_progress,
+                           *, error, previous_summary) -> tuple[ContextStatus, str]:
+        if self._summarizer is None:
+            raise ValueError("context requires compression but no summary model is configured")
+        if not selected:
+            raise ValueError("current user request and fixed context cannot be compacted; shorten the input")
+        ids = tuple(m["message_id"] for m in selected)
+        header = (f"Conversation summary of {len(ids)} records (first {ids[0]}, last {ids[-1]}). "
+                  "Use search_history/read_history for original details.\n")
         replacement = {"message_id": f"m{uuid4().hex}",
-                       "payload": {"role": "assistant", "content": ""}}
-        origins = {op.replacement["message_id"]: op.operation_id
-                   for op in self.operations.records if op.replacement is not None}
+                       "payload": {"role": "assistant", "content": header}}
 
-        def estimate(cut, content):
-            replacement["payload"]["content"] = content
+        def estimate(summary=""):
+            replacement["payload"]["content"] = header + summary
             items = (render_message(replacement, self.operations.next_id),
-                     *(render_message(message, origins.get(message["message_id"]))
-                       for message in previews[cut:]),
-                     *transient_items)
-            return self._estimate_view(items, tool_definitions)[0].context_status
+                     *(render_message(m) for m in kept), *transient_items)
+            return self._estimate_view(items, tool_definitions, calibrate=False)[0].context_status
 
-        fixed_status = self._estimate_view(tuple(transient_items), tool_definitions)[0].context_status
-        history_budget = fixed_status.effective_input_limit_tokens - fixed_status.estimated_input_tokens
-        recent_budget = max(0, int(history_budget * self._policy.recent_history_ratio))
-        selected_cut = None
-        # 从最新完整交互向前扩展；不为凑足预算拆开一次工具交互。
-        for cut in reversed(cuts):
-            tail_items = tuple(
-                render_message(message, origins.get(message["message_id"]))
-                for message in previews[cut:]
-            ) + tuple(transient_items)
-            tail_status = self._estimate_view(tail_items, tool_definitions)[0].context_status
-            if tail_status.estimated_input_tokens - fixed_status.estimated_input_tokens > recent_budget:
-                break
-            ids = tuple(message["message_id"] for message in messages[:cut])
-            header = f"Messages {', '.join(ids)} summarized:\n"
-            status = estimate(cut, header)
-            if status.estimated_input_tokens > status.effective_input_limit_tokens:
-                break
-            selected_cut = cut
-        if selected_cut is None:
-            raise ValueError("context budget cannot fit recent messages and summary header; shorten the input")
-
-        selected = messages[:selected_cut]
-        ids = tuple(message["message_id"] for message in selected)
+        self._input_token_anchor = None
+        fixed = estimate()
+        room = self._trigger_tokens(fixed) - fixed.estimated_input_tokens - 1
+        output_limit = self._policy.summary_output_tokens
+        if self._model_limits.max_output_tokens is not None:
+            output_limit = min(output_limit, self._model_limits.max_output_tokens)
+        target_tokens = min(room, int(self._model_limits.context_window_tokens * self._policy.engineering_sufficiency_ratio))
+        if target_tokens < 1:
+            raise SummaryError("fixed context leaves insufficient summary space; shorten the current input or fixed context")
+        sources = preview_tool_outputs(selected, self._policy.max_tool_output_chars)
+        if previous_summary is not None:
+            previous_status = estimate(previous_summary)
+            sources = [{"role": "assistant", "content": previous_summary}]
+            summary_tokens = self._token_estimator.estimate_request(
+                instructions="", input_items=sources, tools=(),
+            )
+            required = error.required_reduction
+            if required is None:
+                required = max(0, previous_status.estimated_input_tokens - self._trigger_tokens(previous_status) + 1)
+            if summary_tokens <= required:
+                raise SummaryError("fixed context is too large; even removing the entire summary cannot fit the request")
+            target_tokens = min(max(1, target_tokens // 2), max(1, summary_tokens // 2), summary_tokens - required)
         summary = self._summarizer.summarize(
-            selected, "", runtime_state=transient_items, on_progress=on_progress,
+            sources, "", on_progress=on_progress,
+            reference_context=self._summary_context,
+            target_tokens=target_tokens, max_output_tokens=output_limit,
         )
         if not summary.strip():
-            raise ValueError("summary model returned an empty summary")
-        content = f"Messages {', '.join(ids)} summarized:\n{summary.strip()}"
-        status = estimate(selected_cut, content)
-        if status.estimated_input_tokens > status.effective_input_limit_tokens:
-            raise ValueError("compacted context still exceeds the budget; no operation was saved")
-        # 中间分块摘要不进入历史；只在完整请求检查通过后保存一次操作。
+            raise SummaryError("summary model returned an empty summary")
+        summary = summary.strip()
+        status = estimate(summary)
+        if status.estimated_input_tokens >= self._trigger_tokens(status):
+            raise SummaryTooLongError(summary, status.estimated_input_tokens - self._trigger_tokens(status) + 1)
         self.operations.record(ContextOperation(
-            self.operations.next_id, "compress", ids,
-            replacement=replacement,
+            self.operations.next_id, "compress", ids, replacement=replacement, prepend=True,
         ))
-        return status
+        return status, summary
 
     def _estimate_view(
         self,
@@ -252,25 +323,27 @@ class ContextManager:
         tool_definitions: Sequence[dict[str, object]],
         *, calibrate: bool = True,
     ) -> tuple[ModelContextView, int]:
-        """包含临时容量消息进行两次估算；超限交由展示兜底处理。"""
-        initial_status, _ = self._estimate_status(
+        """计入最终提醒正文，跨提醒等级时重新核算新增的文字。"""
+        status, _ = self._estimate_status(
             base_items,
             tool_definitions, calibrate=calibrate,
         )
-        items_with_status = (
-            *base_items,
-            build_context_status_context(initial_status),
-        )
-        final_status, heuristic_input_tokens = self._estimate_status(
-            items_with_status,
-            tool_definitions, calibrate=calibrate,
-        )
-
-        # 使用完整请求的结果更新容量消息，不再为这条小消息循环估算。
-        items = (*base_items, build_context_status_context(final_status))
+        while True:
+            marker = build_context_status_context(status, self._policy)
+            items = (*base_items, marker)
+            measured, heuristic_input_tokens = self._estimate_status(
+                items, tool_definitions, calibrate=calibrate,
+            )
+            # A rounded percentage can shorten its own text by a character; retain
+            # the conservative estimate so boundary rounding cannot oscillate.
+            status = self._policy.assess(self._model_limits, max(
+                status.estimated_input_tokens, measured.estimated_input_tokens,
+            ))
+            if build_context_status_context(status, self._policy) == marker:
+                break
         return ModelContextView(
             items=items,
-            context_status=final_status,
+            context_status=status,
         ), heuristic_input_tokens
 
     def _select(
@@ -335,7 +408,10 @@ class ContextManager:
             if summary is None:
                 if self._summarizer is None:
                     raise ValueError("summary model is not configured")
-                summary = self._summarizer.summarize(sources, instructions)
+                summary = self._summarizer.summarize(
+                    sources, instructions, reference_context=self._summary_context,
+                    max_output_tokens=self._policy.summary_output_tokens,
+                )
                 if not isinstance(summary, str) or not summary.strip():
                     raise ValueError("summary model returned an empty summary")
                 summary = summary.strip()
@@ -397,7 +473,7 @@ class ContextManager:
         )
 
     def _calibrate(self, heuristic_input_tokens: int) -> int:
-        """以上一轮真实输入量加本轮估算增量得到当前估算值。"""
+        """用真实用量补偿低估，但不让上一轮的高估降低本轮预算。"""
         anchor = self._input_token_anchor
         if anchor is None:
             return heuristic_input_tokens
@@ -405,4 +481,4 @@ class ContextManager:
         estimated_new_tokens = (
             heuristic_input_tokens - anchor.heuristic_input_tokens
         )
-        return max(anchor.actual_input_tokens + estimated_new_tokens, 0)
+        return max(anchor.actual_input_tokens + estimated_new_tokens, heuristic_input_tokens)

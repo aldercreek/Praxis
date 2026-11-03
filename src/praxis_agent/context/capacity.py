@@ -35,12 +35,15 @@ class ContextStatus:
 class ContextPolicy:
     """定义 Praxis 使用模型上下文容量的策略。"""
 
-    desired_output_tokens: int = DEFAULT_BUDGETS["desired_output_tokens"]
+    output_reserve_tokens: int = DEFAULT_BUDGETS["output_reserve_tokens"]
+    summary_output_tokens: int = DEFAULT_BUDGETS["summary_output_tokens"]
     safety_ratio: float = 0.95
     soft_ratio: float = 0.65
     hard_ratio: float = 0.80
-    emergency_ratio: float = 0.92
-    recent_history_ratio: float = 0.25
+    emergency_ratio: float = 0.90
+    auto_compact_ratio: float = 0.95
+    # 删减后的历史和摘要提示目标均以完整模型窗口为分母。
+    engineering_sufficiency_ratio: float = 0.20
     # 仅限制模型视图中的单条工具结果正文，完整历史仍保留原文。
     max_tool_output_chars: int = DEFAULT_BUDGETS["max_tool_output_chars"]
     max_file_read_chars: int = DEFAULT_BUDGETS["max_file_read_chars"]
@@ -54,17 +57,17 @@ class ContextPolicy:
 
     def __post_init__(self) -> None:
         for name in DEFAULT_BUDGETS:
-            if name != "desired_output_tokens" and getattr(self, name) < 1:
+            if name != "output_reserve_tokens" and getattr(self, name) < 1:
                 raise ValueError(f"{name} must be positive")
-        if self.desired_output_tokens < 0:
-            raise ValueError("desired_output_tokens must not be negative")
-        if not 0 < self.recent_history_ratio < 1:
-            raise ValueError("recent_history_ratio must be between 0 and 1")
+        if self.output_reserve_tokens < 0:
+            raise ValueError("output_reserve_tokens must not be negative")
+        if not 0 < self.engineering_sufficiency_ratio < self.auto_compact_ratio:
+            raise ValueError("engineering_sufficiency_ratio must be below auto_compact_ratio")
         if not 0 < self.safety_ratio <= 1:
             raise ValueError("safety_ratio must be greater than 0 and at most 1")
         if not (
             0 < self.soft_ratio < self.hard_ratio
-            < self.emergency_ratio < 1
+            < self.emergency_ratio < self.auto_compact_ratio < 1
         ):
             raise ValueError(
                 "context pressure ratios must be ordered between 0 and 1"
@@ -72,7 +75,7 @@ class ContextPolicy:
 
     def effective_input_limit(self, limits: ModelLimits) -> int:
         """计算应用安全余量和输出预留后的实际输入上限。"""
-        output_budget = self.desired_output_tokens
+        output_budget = self.output_reserve_tokens
         if limits.max_output_tokens is not None:
             output_budget = min(output_budget, limits.max_output_tokens)
 

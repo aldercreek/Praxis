@@ -5,7 +5,9 @@ from types import SimpleNamespace
 import pytest
 from rich.console import Console
 
-from praxis_agent.agent import Agent
+from praxis_agent.agent import Agent, _build_function_call_output
+from praxis_agent.context.compaction import trim_tool_messages
+from praxis_agent.context.operations import ContextOperations
 from praxis_agent.model import FunctionCall, ModelResponse
 from praxis_agent.planning import RunState
 from praxis_agent.sessions import SQLiteSessionStore
@@ -79,3 +81,11 @@ def test_search_no_match_keeps_exit_one_without_marking_tool_failed(tmp_path):
     assert result.structured_output["exit_code"] == 1
     assert result.structured_output["stdout"] == result.structured_output["stderr"] == ""
     assert "The meaning of a nonzero exit code depends on the program" in result.structured_output["error"]
+    call = FunctionCall("search", "run_command", "{}")
+    items = [{"type": "function_call", "call_id": call.call_id, "name": call.name, "arguments": "{}"},
+             _build_function_call_output(call, result)]
+    trimmed = json.loads(trim_tool_messages(ContextOperations().project(items))[1]["payload"]["output"])
+    assert trimmed["success"] is True
+    assert trimmed["status"] == "exited"
+    assert trimmed["exit_code"] == 1
+    assert "The meaning of a nonzero exit code depends on the program" in trimmed["error"]

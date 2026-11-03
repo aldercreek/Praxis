@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from threading import Event, Lock, Thread
 from typing import Protocol
 
+from httpx2 import TransportError
 from openai import AsyncOpenAI, OpenAIError
 from openai.types.responses import (
     Response,
@@ -22,6 +23,7 @@ from praxis_agent.deepseek import DeepSeekResponseNormalizer
 from praxis_agent.execution import await_cancellable, current_handle, run_operation
 from praxis_agent.multi_agent.models import ExecutionControl
 from praxis_agent.prompts import BASE_INSTRUCTIONS
+from praxis_agent.model_errors import IncompleteResponseError, ModelClientError, OutputTruncatedError, model_request_error
 
 TextDeltaHandler = Callable[[str], None]
 
@@ -69,10 +71,6 @@ class ModelClient(Protocol):
     ) -> ModelResponse:
         """根据对话输入和工具定义生成下一次模型响应。"""
         ...
-
-
-class ModelClientError(RuntimeError):
-    """表示模型请求或响应处理失败。"""
 
 
 class OpenAIModelClient:
@@ -129,7 +127,10 @@ class OpenAIModelClient:
             try:
                 return asyncio.run_coroutine_threadsafe(consume(), self._loop).result()
             except OpenAIError as error:
-                raise ModelClientError(f"model request failed: {error}") from error
+                raise model_request_error(
+                    f"model request failed: {error}", getattr(error, "code", None),
+                    details=getattr(error, "body", None),
+                ) from error
 
         handle = current_handle()
         response = request(handle) if handle is not None else run_operation("model request", request)
@@ -158,13 +159,23 @@ class OpenAIModelClient:
                 elif isinstance(event, ResponseCompletedEvent):
                     completed = event.response
                 elif isinstance(event, ResponseIncompleteEvent):
-                    raise ModelClientError(f"model response incomplete: {event.response.incomplete_details}")
+                    reason = getattr(event.response.incomplete_details, "reason", None)
+                    error_type = (OutputTruncatedError if reason in {"length", "max_output_tokens"}
+                                  else ModelClientError if reason == "content_filter" else IncompleteResponseError)
+                    raise error_type(f"model response incomplete: {event.response.incomplete_details}", code=reason)
                 elif isinstance(event, (ResponseErrorEvent, ResponseFailedEvent)):
-                    raise ModelClientError(f"model request failed: {_stream_error_message(event)}")
+                    detail = event if isinstance(event, ResponseErrorEvent) else event.response.error
+                    raise model_request_error(
+                        f"model request failed: {_stream_error_message(event)}",
+                        getattr(detail, "code", None),
+                        details=detail.model_dump() if detail is not None else None,
+                    )
+        except TransportError as error:
+            raise IncompleteResponseError(f"model stream interrupted: {error}") from error
         finally:
             await stream.close()
         if completed is None:
-            raise ModelClientError("model stream ended without a completed response")
+            raise IncompleteResponseError("model stream ended without a completed response")
         return completed
 
     def _ensure_loop(self):

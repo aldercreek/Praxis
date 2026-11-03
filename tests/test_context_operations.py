@@ -1,4 +1,5 @@
 from copy import deepcopy
+import json
 
 import pytest
 
@@ -56,7 +57,7 @@ def test_replayed_operations_can_target_deferred_replacement_across_batches():
     records = [operation("delete", ["m3"]),
                operation("compress", ["replacement-1", "m8"], 2)]
     replayed = ContextOperations()
-    replayed.replay([ContextOperation.from_dict({**r.to_dict(), "message_ids": list(r.message_ids)})
+    replayed.replay([ContextOperation.from_dict(json.loads(json.dumps(r.to_dict())))
                      for r in records])
     view = replayed.project(history)
     assert_tool_sequence(view)

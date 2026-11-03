@@ -77,6 +77,32 @@ def test_views_keep_background_streams_isolated_and_commit_once():
     assert "corrected beta" in text_of(view)
 
 
+def test_response_retry_finishes_partial_stream_and_keeps_new_response_separate():
+    view = AgentView("main", "Main")
+    view.consume(ModelRequestStarted("turn", 1))
+    view.consume(AssistantTextDelta("turn", 1, "partial"))
+    partial = view._response
+    view.consume(ModelRequestStarted("turn", 2))
+    assert not partial.streaming
+    assert "Response interrupted; retrying" in text_of(view)
+    view.consume(AssistantTextDelta("turn", 2, "complete"))
+    view.consume(ModelRequestCompleted("turn", 2, ModelResponse((), "complete", ())))
+    assert view._response is not partial
+    assert not view._response.streaming
+    view.consume(ModelRequestStarted("turn", 3))
+    assert text_of(view).count("Response interrupted; retrying") == 1
+
+
+def test_safe_compaction_fallback_is_visible_as_continuation():
+    view = AgentView("main", "Main")
+    view.consume(ContextCompaction("turn", "started", 20000))
+    view.consume(ContextCompaction("turn", "fallback", 20000, error="empty summary"))
+    view.consume(ContextCompaction("turn", "completed", 20000, after_tokens=5000))
+    assert "Summary unavailable; continuing with trimmed context" in text_of(view)
+    assert "20,000 → 5,000" in text_of(view)
+    assert view.phase == "Waiting for model response"
+
+
 def test_parallel_tools_keep_remaining_activity_and_full_results():
     view = AgentView("a", "A")
     view.consume(TurnStarted("t", "task", occurred_at=10))

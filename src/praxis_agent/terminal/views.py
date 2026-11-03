@@ -132,6 +132,9 @@ class AgentView:
                 self.task = event.task.splitlines()[0][:200] if event.task else ""
             self._phase = "Waiting for model response"
         elif isinstance(event, ModelRequestStarted):
+            if self._response is not None and self._response.streaming:
+                self._response.update(self._response.text)
+                self.committed_blocks.append(Text("· Response interrupted; retrying", style="dim"))
             self._response = None
             self._phase = "Waiting for model response"
             self._capacity = capacity_footer(event.context_status)
@@ -263,9 +266,11 @@ class AgentView:
             self.committed_blocks.append(Text(f"· Context exceeds budget; compacting history (≈ {event.before_tokens:,} tokens)", style="dim"))
             self._phase = "Compacting context"
         elif event.stage == "chunk_started":
-            phase = "Summary" if event.round_number == 1 else f"Shortening pass {event.round_number - 1}"
+            phase = "Summary" if event.round_number == 1 else f"Summary retry {event.round_number - 1}"
             progress = f"{event.chunk_number}/{event.chunk_count}" if event.chunk_count else f"Chunk {event.chunk_number}"
             self._phase = f"Compacting context · {phase} {progress}"
+        elif event.stage == "fallback":
+            self.committed_blocks.append(Text("· Summary unavailable; continuing with trimmed context", style="dim"))
         elif event.stage == "completed":
             self.committed_blocks.append(Text(
                 f"• Context compacted · ≈ {event.before_tokens:,} → {event.after_tokens:,} tokens", style="dim",

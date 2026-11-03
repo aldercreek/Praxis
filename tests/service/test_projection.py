@@ -112,6 +112,19 @@ def test_child_response_numbers_can_restart_within_a_parent_turn():
     ]
 
 
+def test_response_retry_preserves_partial_as_failed_without_affecting_other_agents():
+    transcript = Transcript()
+    transcript.consume("AssistantTextDelta", "turn", "main", {"request_number": 1, "text": "partial"})
+    transcript.consume("AssistantTextDelta", "turn", "worker", {"request_number": 1, "text": "working"})
+    transcript.consume("ModelRequestStarted", "turn", "main", {"request_number": 2})
+    assert [message["status"] for message in transcript.messages] == ["failed", "streaming"]
+    transcript.consume("ModelRequestCompleted", "turn", "main", {"request_number": 2, "output_text": "done"})
+    transcript.consume("TurnCompleted", "turn", "main", {})
+    assert [(message["content"], message["status"]) for message in transcript.messages] == [
+        ("partial", "failed"), ("working", "completed"), ("done", "completed"),
+    ]
+
+
 @pytest.mark.parametrize("failure", ["multi_agent_config", "mcp_constructor"])
 def test_factory_initialization_failures_do_not_leak_model_clients(
     tmp_path, monkeypatch, failure

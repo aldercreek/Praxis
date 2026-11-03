@@ -66,6 +66,7 @@ def create_default_agent(
         runtime_context,
         skills=skills,
         collaboration_instructions=PARENT_INSTRUCTIONS if enable_multi_agent else "",
+        context_policy=config.context_policy,
     )
     session_store = session_store or SQLiteSessionStore(session_database_path)
     history: list[object] = []
@@ -161,6 +162,7 @@ def create_default_agent(
             worker_context,
             skills=skills,
             collaboration_instructions=WORKER_INSTRUCTIONS,
+            context_policy=config.context_policy,
         )
         registry = ToolRegistry()
         for tool in create_default_registry(
@@ -240,9 +242,6 @@ def _create_context_manager(
         summarizer=ModelContextSummarizer(
             summary_client,
             model_limits=config.model_limits,
-            input_limit_tokens=config.context_policy.effective_input_limit(
-                config.model_limits
-            ),
             safety_ratio=config.context_policy.safety_ratio,
         ),
     )

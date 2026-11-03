@@ -14,13 +14,15 @@ def item_payload(item: object) -> dict[str, object]:
 
 @dataclass(frozen=True, slots=True)
 class ContextOperation:
-    """一条可持久化的视图操作：把目标消息替换成一条新消息。"""
+    """可持久化的摘要、隐藏或工具正文裁剪操作。"""
 
     operation_id: str
     action: str
     message_ids: tuple[str, ...] = ()
     instructions: str = ""
     replacement: dict[str, object] | None = None
+    updates: tuple[dict[str, object], ...] = ()
+    prepend: bool = False
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -34,6 +36,13 @@ class ContextOperation:
         ):
             raise ValueError("invalid context operation message_ids")
         values["message_ids"] = tuple(ids)
+        updates = values.get("updates", [])
+        if not isinstance(updates, list) or any(
+            not isinstance(update, Mapping) or not isinstance(update.get("message_id"), str)
+            or not isinstance(update.get("payload"), Mapping) for update in updates
+        ):
+            raise ValueError("invalid context operation updates")
+        values["updates"] = tuple(dict(update) for update in updates)
         replacement = values.get("replacement")
         if replacement is not None:
             if not isinstance(replacement, Mapping):
@@ -44,10 +53,15 @@ class ContextOperation:
                 raise ValueError("replacement requires message_id and payload")
             values["replacement"] = dict(replacement)
         operation = cls(**values)
-        if operation.action not in {"delete", "compress"}:
+        if operation.action not in {"delete", "compress", "trim"}:
             raise ValueError("invalid context operation action")
-        if operation.replacement is None or not operation.message_ids:
+        if operation.action == "trim":
+            if operation.replacement is not None or tuple(u["message_id"] for u in operation.updates) != operation.message_ids:
+                raise ValueError("trim requires one update per target")
+        elif operation.replacement is None or operation.updates:
             raise ValueError("context operation requires targets and a replacement")
+        if not operation.message_ids or len(set(operation.message_ids)) != len(operation.message_ids):
+            raise ValueError("context operation requires unique targets")
         return operation
 
 
@@ -168,6 +182,10 @@ class ContextOperations:
             positions = [i for i, message in enumerate(messages) if message["message_id"] in targets]
             if len(positions) != len(targets) or not positions:
                 raise ValueError(f"context operation has missing targets: {operation.operation_id}")
+            if operation.action == "trim":
+                updates = {message["message_id"]: message for message in operation.updates}
+                messages = [updates.get(message["message_id"], message) for message in messages]
+                continue
             if operation.replacement is None:
                 raise ValueError("context operation has no replacement message")
             # 工具结果被替换时，一起从视图移除对应调用，避免留下未配对调用。
@@ -196,9 +214,12 @@ class ContextOperations:
                     replacement_pending = True
                 # 部分工具结果被替换时，摘要必须等其余调用结果全部返回后再插入。
                 # 否则普通 assistant 消息会切断网关要求连续的工具调用/结果序列。
-                if replacement_pending and not pending_calls:
+                if replacement_pending and not pending_calls and not operation.prepend:
                     projected.append(operation.replacement)
                     replacement_pending = False
+            if operation.prepend and not pending_calls:
+                projected.insert(0, operation.replacement)
+                replacement_pending = False
             if replacement_pending:
                 raise ValueError("cannot insert context replacement before pending tool results")
             messages = projected

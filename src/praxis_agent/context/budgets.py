@@ -1,12 +1,12 @@
 """按上下文窗口选择默认预算；显式配置由调用方覆盖。"""
 
 _FIELDS = (
-    "desired_output_tokens",
+    "summary_output_tokens",
     "max_tool_output_chars", "max_file_read_chars",
     "max_history_read_chars",
 )
 
-# 窗口上界、输出预留、工具/文件字符、历史字符。
+# 窗口上界、摘要生成上限、工具/文件字符、历史字符。
 _TIERS = (
     (32_000,  (4_000, 16_000, 16_000, 8_000)),
     (64_000,  (8_000, 24_000, 24_000, 12_000)),
@@ -20,7 +20,13 @@ _TIERS = (
 def context_budgets(window_tokens: int) -> dict[str, int]:
     """返回独立字典；没有模型信息的独立工具使用最小档。"""
     values = next(values for ceiling, values in _TIERS if window_tokens <= ceiling)
-    return dict(zip(_FIELDS, values))
+    budgets = dict(zip(_FIELDS, values))
+    # Smaller windows scale the reserve down; from 128k it is 10%, bounded by 16k/32k.
+    budgets["output_reserve_tokens"] = (
+        max(1, window_tokens // 8) if window_tokens < 128_000
+        else min(32_000, max(16_000, window_tokens // 10))
+    )
+    return budgets
 
 
 DEFAULT_BUDGETS = context_budgets(32_000)

@@ -9,7 +9,24 @@ from praxis_agent.context.budgets import DEFAULT_BUDGETS
 from praxis_agent.context.operations import ContextOperation, item_payload
 
 
+_HISTORY_TOOLS = {"search_history", "read_history"}
+
+
+def _only_history_calls(output: object) -> bool:
+    """A run_code result that only retrieves history is another copy of that history."""
+    try:
+        result = json.loads(json.loads(output)["output"])
+    except (ValueError, TypeError, KeyError):
+        return False
+    calls = result.get("calls") if isinstance(result, dict) else None
+    return isinstance(calls, list) and bool(calls) and all(
+        isinstance(call, dict) and call.get("tool") in _HISTORY_TOOLS for call in calls
+    )
+
+
 def _body(payload: dict[str, object]) -> str | None:
+    if payload.get("type") == "function_call":
+        return payload.get("arguments")
     if payload.get("type") == "function_call_output":
         content = payload.get("output")
     elif payload.get("role") in {"user", "assistant"}:
@@ -27,46 +44,78 @@ def _body(payload: dict[str, object]) -> str | None:
     return None
 
 
-def _messages(
+def _payloads(
     history: ConversationHistory, operations: Sequence[ContextOperation],
-) -> Iterator[tuple[str, str]]:
+) -> Iterator[tuple[str, dict[str, object]]]:
     # 先查替代消息，再查原始历史；两组内部都从新到旧。
     for operation in reversed(operations):
         replacement = operation.replacement
         if replacement is not None:
-            text = _body(replacement["payload"])
-            if text is not None:
-                yield replacement["message_id"], text
+            yield replacement["message_id"], replacement["payload"]
     items = history.snapshot()
     for index in range(len(items) - 1, -1, -1):
-        text = _body(item_payload(items[index]))
+        yield f"m{index + 1}", item_payload(items[index])
+
+
+def _messages(history, operations) -> Iterator[tuple[str, str]]:
+    for message_id, payload in _payloads(history, operations):
+        text = _body(payload)
         if text is not None:
-            yield f"m{index + 1}", text
+            yield message_id, text
+
+
+def read_history_media(history, operations, message_id: str) -> list[dict[str, object]]:
+    """Restore original media blocks without serializing their binary data as text."""
+    for current_id, payload in _payloads(history, operations):
+        if current_id == message_id:
+            content = payload.get("output" if payload.get("type") == "function_call_output" else "content")
+            return [dict(block) for block in content
+                    if block.get("type") in {"input_image", "input_file"}] if isinstance(content, list) else []
+    raise ValueError(f"message not found: {message_id}")
 
 
 def search_history(
     history: ConversationHistory, operations: Sequence[ContextOperation],
     query: str, max_results: int = 10,
 ) -> dict[str, object]:
-    """字面匹配返回附近正文；offset 是片段起点，不是命中词起点。"""
+    """每条来源返回首个命中，跳过历史回查本身；offset 是片段起点。"""
     if not isinstance(query, str) or not 1 <= len(query) <= 200:
         raise ValueError("query must contain 1-200 characters")
     if not isinstance(max_results, int) or not 1 <= max_results <= 20:
         raise ValueError("max_results must be between 1 and 20")
     # 不先 lower/casefold 正文，避免 Unicode 转换改变字符位置。
     pattern = re.compile(re.escape(query), re.IGNORECASE)
+    payloads = list(_payloads(history, operations))
+    calls = {payload["call_id"]: payload.get("name") for _, payload in payloads
+             if payload.get("type") == "function_call" and payload.get("call_id")}
+    completed = {payload.get("call_id") for _, payload in payloads
+                 if payload.get("type") == "function_call_output"}
+    retrieval_calls = {
+        call_id for call_id, name in calls.items() if name in _HISTORY_TOOLS or call_id not in completed
+    }
+    retrieval_calls.update(
+        payload["call_id"] for _, payload in payloads
+        if payload.get("type") == "function_call_output"
+        and calls.get(payload.get("call_id")) == "run_code"
+        and _only_history_calls(payload.get("output"))
+    )
     matches = []
-    for message_id, text in _messages(history, operations):
-        for match in pattern.finditer(text):
-            if len(matches) == max_results:
-                return {"matches": matches, "truncated": True}
-            offset = max(0, match.start() - 80)
-            end = min(len(text), match.end() + 80)
-            matches.append({
-                "message_id": message_id,
-                "offset": offset,
-                "text": text[offset:end],
-            })
+    for message_id, payload in payloads:
+        if payload.get("call_id") in retrieval_calls:
+            continue
+        text = _body(payload)
+        match = pattern.search(text) if text is not None else None
+        if match is None:
+            continue
+        if len(matches) == max_results:
+            return {"matches": matches, "truncated": True}
+        offset = max(0, match.start() - 80)
+        end = min(len(text), match.end() + 80)
+        matches.append({
+            "message_id": message_id,
+            "offset": offset,
+            "text": text[offset:end],
+        })
     return {"matches": matches, "truncated": False}
 
 
@@ -85,14 +134,15 @@ def read_history(
     for current_id, text in _messages(history, operations):
         if current_id != message_id:
             continue
-        end = len(text) if end_offset is None else end_offset
-        if start_offset > len(text) or end > len(text):
+        end = len(text) if end_offset is None else min(end_offset, len(text))
+        if start_offset > len(text):
             raise ValueError(f"range exceeds message length {len(text)}")
 
         def render(stop):
             truncated = stop < end
             return {
                 "text": text[start_offset:stop],
+                "total_chars": len(text),
                 "truncated": truncated,
                 "next_offset": stop if truncated else None,
                 "note": ("Only part of the requested range is shown. Continue with start_offset=next_offset "

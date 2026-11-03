@@ -121,6 +121,10 @@ class Transcript:
                 source="user" if agent_id in {"main", "root"} else "agent",
                 id=f"user:{turn_id}:{agent_id}:{execution_id}",
             )
+        elif event == "ModelRequestStarted":
+            previous = self.last_response.get(key)
+            if previous is not None and previous.get("status") == "streaming":
+                previous["status"] = "failed"
         elif event in {"AssistantTextDelta", "ModelRequestCompleted"}:
             response_key = (*key, data["request_number"])
             text = (

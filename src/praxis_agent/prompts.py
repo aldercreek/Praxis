@@ -2,9 +2,10 @@ import json
 
 from praxis_agent.runtime import RuntimeContext
 from praxis_agent.skills import Skill, format_skill_catalog
+from praxis_agent.context.capacity import ContextPolicy
 
 
-BASE_INSTRUCTIONS = """You are Praxis. Use tools in the local workspace to help the user complete tasks.
+_BASE_INSTRUCTIONS_TEMPLATE = """You are Praxis. Use tools in the local workspace to help the user complete tasks.
 
 <tools>
 1. Finding files
@@ -43,12 +44,17 @@ BASE_INSTRUCTIONS = """You are Praxis. Use tools in the local workspace to help 
 2. Capacity information
    Context usage is the percentage of the effective input budget used by the complete request,
    including system instructions, tool definitions, conversation history, and runtime state.
-   It reports capacity and does not instruct you to compact immediately.
+   A single temporary <context_status> region reports current usage and reminders.
+   It is updated or removed by the program, not saved as conversation history.
 
 3. When to compact
    Manage context proactively based on upcoming work, expected new content, and the value of reusing history.
    Long material whose conclusions have been extracted, duplicates, and outdated information
    can be removed from the current view or replaced with summaries before space runs out.
+   __CONTEXT_COMPACTION_POLICY__
+   Extract important tool conclusions and preserve source references before they are omitted.
+   Prefer compress(summary=...) when you can supply the summary directly. Do not discard
+   essential information merely to lower usage, or repeatedly compact unchanged content.
 
 4. Deleting and compressing
    delete removes selected content from the current view.
@@ -70,9 +76,25 @@ BASE_INSTRUCTIONS = """You are Praxis. Use tools in the local workspace to help 
 </context>
 """
 
+
+def _context_policy_instructions(policy: ContextPolicy) -> str:
+    return (
+        f"At {policy.soft_ratio * 100:g}% usage, proactively review and manage context, especially before large outputs. "
+        f"At {policy.auto_compact_ratio * 100:g}%, the program automatically omits tool result bodies across all rounds, "
+        "preserving execution states, key errors and original-history references. "
+        f"If the complete request still exceeds {policy.engineering_sufficiency_ratio * 100:g}% afterward, "
+        "it summarizes the conversation history. The latest user request and current runtime state are preserved."
+    )
+
+
+BASE_INSTRUCTIONS = _BASE_INSTRUCTIONS_TEMPLATE.replace(
+    "__CONTEXT_COMPACTION_POLICY__", _context_policy_instructions(ContextPolicy()),
+)
+
 def build_instructions(
     runtime_context: RuntimeContext, *, skills: tuple[Skill, ...] = (),
     collaboration_instructions: str = "",
+    context_policy: ContextPolicy | None = None,
 ) -> str:
     """Combine base instructions, the skill catalog, and startup environment facts."""
     available_shells = _format_shells(runtime_context.available_shells)
@@ -106,7 +128,9 @@ def build_instructions(
         f"3. {catalog}\n"
         "</skills>"
     )
-    instructions = BASE_INSTRUCTIONS
+    instructions = _BASE_INSTRUCTIONS_TEMPLATE.replace(
+        "__CONTEXT_COMPACTION_POLICY__", _context_policy_instructions(context_policy or ContextPolicy()),
+    )
     if collaboration_instructions:
         instructions = instructions.replace(
             "</tools>", "</tools>\n\n" + collaboration_instructions.strip(), 1,

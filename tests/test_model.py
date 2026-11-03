@@ -1,4 +1,5 @@
 import asyncio
+import json
 from collections.abc import Iterator
 from threading import Event, Thread
 
@@ -9,6 +10,7 @@ from openai.types.responses import (
     Response,
     ResponseCompletedEvent,
     ResponseFunctionToolCall,
+    ResponseIncompleteEvent,
     ResponseOutputMessage,
     ResponseOutputText,
     ResponseStreamEvent,
@@ -24,6 +26,7 @@ from praxis_agent.config import ModelConfig
 from praxis_agent.context.model_catalog import MODEL_INPUT_CATALOG
 from praxis_agent.execution import ExecutionControl, ExecutionStopped, Run
 from praxis_agent.model import ModelClientError, OpenAIModelClient
+from praxis_agent.model_errors import IncompleteResponseError
 
 
 @pytest.mark.parametrize("model", list(MODEL_INPUT_CATALOG) + ["auto(free)", "custom-model"])
@@ -246,6 +249,81 @@ def _successful_stream_body():
     return "".join("data: " + event.model_dump_json() + "\n\n" for event in events.events).encode()
 
 
+def test_main_http_request_omits_output_limit_but_summary_keeps_its_limit(monkeypatch):
+    requests = []
+    body = _successful_stream_body()
+
+    def handle(request):
+        requests.append(json.loads(request.content))
+        return httpx2.Response(200, headers={"content-type": "text/event-stream"}, content=body)
+
+    client = _model_with_http_transport(monkeypatch, handle)
+    try:
+        client.create_response([], [])
+        client.create_response([], [], max_output_tokens=4096)
+    finally:
+        client.close()
+    assert "max_output_tokens" not in requests[0]
+    assert requests[1]["max_output_tokens"] == 4096
+
+
+def test_stream_ending_without_completion_is_recoverable(monkeypatch):
+    event = next(asyncio.run(FakeResponses().create()).events)
+    body = ("data: " + event.model_dump_json() + "\n\n").encode()
+    client = _model_with_http_transport(monkeypatch, lambda request: httpx2.Response(
+        200, headers={"content-type": "text/event-stream"}, content=body))
+    try:
+        with pytest.raises(IncompleteResponseError, match="without a completed response"):
+            client.create_response([], [])
+    finally:
+        client.close()
+
+
+def test_agent_regenerates_truncated_tool_arguments_without_executing_partial_calls(monkeypatch, tmp_path):
+    from praxis_agent.agent import Agent
+    from praxis_agent.tools.registry import Tool, ToolRegistry
+
+    events = list(asyncio.run(FakeResponses().create()).events)
+    complete = events[-1].response
+    broken_call = complete.output[-1].model_copy(update={"arguments": '{"relative_path": "UNFINISHED'})
+    incomplete = ResponseIncompleteEvent.model_validate({
+        "type": "response.incomplete", "sequence_number": 2,
+        "response": {
+            **complete.model_dump(), "status": "incomplete", "output": [broken_call.model_dump()],
+            "incomplete_details": {"reason": "max_output_tokens"},
+        },
+    })
+    final = complete.model_copy(update={"output": [complete.output[0]]})
+    streams = [[events[0], incomplete], events, [ResponseCompletedEvent(
+        type="response.completed", sequence_number=0, response=final)]]
+    requests, tool_runs = [], []
+
+    def handle(request):
+        requests.append(json.loads(request.content))
+        body = "".join("data: " + event.model_dump_json() + "\n\n" for event in streams[len(requests) - 1])
+        return httpx2.Response(200, headers={"content-type": "text/event-stream"}, content=body)
+
+    registry = ToolRegistry()
+    registry.register(Tool(
+        "read_file", "read file", {"type": "object", "properties": {"relative_path": {"type": "string"}}},
+        lambda context, relative_path: tool_runs.append(relative_path) or "file contents",
+    ))
+    client = _model_with_http_transport(monkeypatch, handle)
+    agent = Agent(client, registry, tmp_path, bypass_approvals=True, close_callbacks=(client.close,))
+    try:
+        assert agent.run("Read the file") == "Reading README"
+        assert tool_runs == ["README.md"]
+        assert len(requests) == 3
+        assert all("max_output_tokens" not in request for request in requests)
+        assert "UNFINISHED" not in json.dumps(requests)
+        assert "UNFINISHED" not in json.dumps(
+            agent._history.snapshot(), default=lambda item: item.model_dump(mode="json"))
+        assert "previous response was incomplete" in json.dumps(requests[1])
+        assert "previous response was incomplete" not in json.dumps(requests[2])
+    finally:
+        agent.close()
+
+
 @pytest.mark.parametrize("failure", ["connection", "timeout", 408, 409, 429, 500, 503])
 def test_model_retries_five_times_with_exponential_backoff(monkeypatch, failure):
     body = _successful_stream_body()
@@ -343,7 +421,7 @@ def test_cancel_during_retry_after_stops_retry_and_keeps_client_reusable(monkeyp
         client.close()
 
 
-def test_stream_failure_after_text_is_not_retried(monkeypatch):
+def test_stream_failure_after_text_is_classified_for_outer_recovery(monkeypatch):
     calls, text = [], []
     event = next(asyncio.run(FakeResponses().create()).events)
 
@@ -358,8 +436,9 @@ def test_stream_failure_after_text_is_not_retried(monkeypatch):
 
     client = _model_with_http_transport(monkeypatch, handle)
     try:
-        with pytest.raises(httpx2.ReadError, match="stream disconnected"):
+        with pytest.raises(IncompleteResponseError, match="stream disconnected") as error:
             Run().execute(lambda: client.create_response([], [], on_text_delta=text.append))
+        assert isinstance(error.value.__cause__, httpx2.ReadError)
         assert len(calls) == 1
         assert text == ["Reading "]
     finally:
