@@ -80,8 +80,15 @@ def run_model_loop(
             transient_items += (
                 {
                     "role": "developer",
-                    "content": "Command sessions owned by this agent (use wait_command; do not restart): "
-                    + json.dumps(commands, ensure_ascii=False),
+                    "content": (
+                        "<command_sessions>\n"
+                        "1. Continuing execution\n"
+                        "   These command sessions belong to this agent. Use wait_command(session_id)\n"
+                        "   for later output; do not restart an existing command.\n"
+                        "2. Snapshot\n"
+                        + json.dumps(commands, ensure_ascii=False)
+                        + "\n</command_sessions>"
+                    ),
                 },
             )
         mcp_catalog = agent.mcp_catalog() if agent.mcp_catalog else ""
@@ -144,10 +151,15 @@ def run_model_loop(
                     raise
                 response_retries += 1
                 response_hint = ({"role": "developer", "content": (
-                    "The previous response was incomplete; none of its tool calls were executed. "
-                    "Return a complete, concise response with fewer or smaller tool calls. "
-                    "For a large file, create a small skeleton and fill it with separate edit_file calls; "
-                    "write_file replaces the whole file."
+                    "<response_recovery>\n"
+                    "1. Previous attempt\n"
+                    "   The previous response was incomplete; none of its tool calls were executed.\n"
+                    "2. Next response\n"
+                    "   Return a complete, concise response with fewer or smaller tool calls.\n"
+                    "3. Large files\n"
+                    "   Create a small skeleton and fill it with separate edit_file calls;\n"
+                    "   write_file replaces the whole file.\n"
+                    "</response_recovery>"
                 )},)
                 continue
             break

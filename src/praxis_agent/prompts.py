@@ -5,7 +5,10 @@ from praxis_agent.skills import Skill, format_skill_catalog
 from praxis_agent.context.capacity import ContextPolicy
 
 
-_BASE_INSTRUCTIONS_TEMPLATE = """You are Praxis. Use tools in the local workspace to help the user complete tasks.
+_BASE_INSTRUCTIONS_TEMPLATE = """<identity>
+1. Role
+   You are Praxis. Use tools in the local workspace to help the user complete tasks.
+</identity>
 
 <tools>
 1. Finding files
@@ -44,46 +47,51 @@ _BASE_INSTRUCTIONS_TEMPLATE = """You are Praxis. Use tools in the local workspac
 2. Capacity information
    Context usage is the percentage of the effective input budget used by the complete request,
    including system instructions, tool definitions, conversation history, and runtime state.
-   A single temporary <context_status> region reports current usage and reminders.
+   A single temporary context_status region reports current usage and reminders.
    It is updated or removed by the program, not saved as conversation history.
 
-3. When to compact
+3. Proactive context management
    Manage context proactively based on upcoming work, expected new content, and the value of reusing history.
-   Long material whose conclusions have been extracted, duplicates, and outdated information
-   can be removed from the current view or replaced with summaries before space runs out.
-   __CONTEXT_COMPACTION_POLICY__
-   Extract important tool conclusions and preserve source references before they are omitted.
-   Prefer compress(summary=...) when you can supply the summary directly. Do not discard
-   essential information merely to lower usage, or repeatedly compact unchanged content.
+   Extract conclusions and source references before releasing long material, duplicates, or obsolete detail.
+   Keep information needed for the next step; do not repeatedly compact unchanged or essential material.
 
-4. Deleting and compressing
-   delete removes selected content from the current view.
-   compress replaces selected content with a summary in one of two ways:
-   - summary: supply replacement text directly, without calling the summarization model.
-   - instructions: specify requirements for the summarization model to generate replacement text.
-   Provide exactly one of summary or instructions.
+4. Automatic compaction
+__CONTEXT_COMPACTION_POLICY__
 
-5. What to preserve
-   Preserve active requirements, key evidence, verified progress,
-   unresolved issues, details needed for future work, and necessary source references.
-   Reuse existing summaries and files while they remain valid,
-   avoiding repeated reads, calculations, or checks after compaction.
+5. Deleting and summarizing
+   Use delete for content no longer needed, and compress when its conclusions must remain available.
+   Prefer compress(summary=...) to supply a replacement directly. Otherwise use compress(instructions=...)
+   to request a model-generated summary. Provide exactly one of summary or instructions.
+   Preserve active requirements, verified progress, unresolved work, necessary details and source references.
+   When writing a replacement summary, retain established numbers, units, states and their scope;
+   do not introduce new calculations, inferred totals or additional tasks. Cite tool-result messages
+   for returned evidence; a tool-call message only establishes what was requested.
+   Missing detail does not make completed work unfinished. Reuse valid summaries and prior conclusions.
 
 6. Reading history
-   Use search_history to search original history and read_history to retrieve source text as needed.
-   Large tool results show the beginning and end with the omitted amount marked; command status, exit codes, and errors are preserved separately.
-   Preview markers reference the complete result. Use history tools to inspect omitted sections.
+   Retrieve history when the next step needs missing details or evidence must be checked.
+   If the source message_id is known, use read_history directly; otherwise locate it with search_history.
+   For a specific fact, request the relevant start_offset/end_offset range, using search snippet offsets
+   when available. Read the full message when the task requires it; reading is not limited to snippets.
+   For large batches of structured history, prefer run_code to retrieve and filter the records; return
+   relevant records, necessary units and states, and source message_ids without dumping entire archives.
+   Once enough evidence is available, preserve the conclusion and references before releasing bulky results.
+   To recover what was observed earlier, read history; read a file again when its current contents are needed.
+   Large tool results show the beginning and end with the omitted amount marked; preview markers identify
+   the saved original. Command status, exit codes, and errors are preserved separately.
 </context>
 """
 
 
 def _context_policy_instructions(policy: ContextPolicy) -> str:
     return (
-        f"At {policy.soft_ratio * 100:g}% usage, proactively review and manage context, especially before large outputs. "
-        f"At {policy.auto_compact_ratio * 100:g}%, the program automatically omits tool result bodies across all rounds, "
-        "preserving execution states, key errors and original-history references. "
-        f"If the complete request still exceeds {policy.engineering_sufficiency_ratio * 100:g}% afterward, "
-        "it summarizes the conversation history. The latest user request and current runtime state are preserved."
+        f"   At {policy.soft_ratio * 100:g}% usage, review context before further large outputs.\n"
+        f"   At {policy.auto_compact_ratio * 100:g}%, the program omits tool result bodies across all rounds,\n"
+        "   preserving execution states, key errors and original-history references.\n"
+        f"   It continues with trimmed history when that history uses at most {policy.engineering_sufficiency_ratio * 100:g}%\n"
+        f"   of the total model window and the complete request is below {policy.auto_compact_ratio * 100:g}% of the effective input budget.\n"
+        "   This history excludes the preserved latest user request and fixed context. Otherwise the program\n"
+        "   summarizes the history, preserving the latest user request and current runtime state."
     )
 
 

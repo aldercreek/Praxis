@@ -16,7 +16,7 @@ from praxis_agent.planning.state import RunState
 
 
 def snapshot(runtime):
-    return json.loads(runtime.context_item()["content"].split("\n", 1)[1])
+    return json.loads(runtime.context_item()["content"].splitlines()[-2])
 
 
 def wait_idle(runtime, agent_id):

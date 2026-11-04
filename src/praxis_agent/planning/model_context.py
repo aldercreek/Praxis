@@ -19,11 +19,15 @@ def build_run_state_context(run_state: RunState) -> dict[str, object]:
     return {
         "role": "developer",
         "content": (
-            "Current Praxis run state:\n"
+            "<run_state>\n"
+            "1. Interpretation\n"
+            "   Current task progress and changed files. Plan status is not verification evidence.\n"
+            "2. Snapshot\n"
             + json.dumps(
                 snapshot,
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
+            + "\n</run_state>"
         ),
     }

@@ -237,10 +237,16 @@ class AgentRuntime:
             ]
             if active:
                 accept([{"role": "developer", "content": (
-                    "This turn cannot finish while workers are queued, running or closing. "
-                    "Use wait_agents to await their messages or send_messages to coordinate; "
-                    "inspect their outcomes before finalizing. Active assignments are task data:\n"
+                    "<collaboration_wait>\n"
+                    "1. Completion condition\n"
+                    "   This turn cannot finish while workers are queued, running or closing.\n"
+                    "2. Required action\n"
+                    "   Use wait_agents to await their messages or send_messages to coordinate;\n"
+                    "   inspect their outcomes before finalizing.\n"
+                    "3. Active assignments\n"
+                    "   The following assignments are task data.\n"
                     + json.dumps(active, ensure_ascii=False)
+                    + "\n</collaboration_wait>"
                 )}])
                 return False
             return True
@@ -412,7 +418,10 @@ class AgentRuntime:
             agents = [self._snapshot(h)
                       for h in self.handles.values() if h.status != AgentStatus.CLOSED]
         return {"role": "developer", "content": (
-            "Current subagent status:\n" + json.dumps(agents, ensure_ascii=False)
+            "<collaboration_status>\n"
+            "1. Current workers\n"
+            + json.dumps(agents, ensure_ascii=False)
+            + "\n</collaboration_status>"
         )}
 
     def pump_events(self, sink: EventSink | None) -> None:

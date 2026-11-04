@@ -29,14 +29,19 @@ from praxis_agent.tools import create_default_registry
 def _empty_run_state_context() -> dict[str, object]:
     return {
         "role": "developer",
-        "content": "Current Praxis run state:\n" + json.dumps(
+        "content": (
+            "<run_state>\n"
+            "1. Interpretation\n"
+            "   Current task progress and changed files. Plan status is not verification evidence.\n"
+            "2. Snapshot\n"
+        ) + json.dumps(
             {
                 "type": "praxis_run_state",
                 "plan": [],
                 "changed_files": [],
             },
             separators=(",", ":"),
-        ),
+        ) + "\n</run_state>",
     }
 
 

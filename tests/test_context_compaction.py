@@ -197,7 +197,7 @@ def test_pressure_boundaries(tokens, pressure, reminder):
     status = policy.assess(ModelLimits(10000), tokens)
     assert status.pressure == pressure
     text = build_context_status_context(status, policy)["content"]
-    assert ("Reminder:" in text) is reminder
+    assert ("2. Reminder" in text) is reminder
     if reminder:
         assert "95%" in text
 
@@ -210,10 +210,10 @@ def test_reminder_is_replaced_and_removed_after_context_shrinks():
     # Add enough history to cross soft but stay below automatic compaction.
     history.append({"role": "assistant", "content": "x" * 1000})
     view = manager.build_view(history)
-    assert "Reminder:" in view.items[-1]["content"]
+    assert "2. Reminder" in view.items[-1]["content"]
     manager.change_messages("compress", ["m1", "m3"], summary="verified facts")
     reduced = manager.build_view(history)
-    assert "Reminder:" not in reduced.items[-1]["content"]
+    assert "2. Reminder" not in reduced.items[-1]["content"]
     assert json.dumps(reduced.items).count("<context_status>") == 1
     assert "context_status" not in json.dumps(history.snapshot())
 

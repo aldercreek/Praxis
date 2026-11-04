@@ -313,7 +313,7 @@ def test_agent_retains_command_across_turns_and_saves_each_increment_once(tmp_pa
         assert isinstance(results[1], dict), results
         assert results[0]["status"] == "running" and results[1]["status"] == "exited"
         assert "".join(result["stdout"] for result in results) == "first\nlast\n"
-        assert any("Command sessions owned" in str(item) for item in requests[2])
+        assert any("<command_sessions>" in str(item) for item in requests[2])
         assert not agent.command_sessions.summaries()
     finally:
         agent.close()

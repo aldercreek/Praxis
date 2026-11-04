@@ -41,7 +41,7 @@ def test_parent_rejects_early_answer_and_reads_results_before_finishing(tmp_path
             if len(inputs) == 2:
                 reminder = next(item for item in input_items if isinstance(item, dict)
                                 and "This turn cannot finish" in item.get("content", ""))
-                workers = json.loads(reminder["content"].split("\n", 1)[1])
+                workers = json.loads(reminder["content"].splitlines()[-2])
                 assert {w["status"] for w in workers} == {"running", "queued"}
                 release.set()
                 with runtime.condition:

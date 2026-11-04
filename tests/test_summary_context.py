@@ -69,7 +69,7 @@ def test_agent_keeps_current_task_corrections_and_progress_in_each_summary_chunk
                 {"role": "user", "content": "Fix expiry handling and verify it."},
                 {"role": "user", "content": "Correction: keep the public API unchanged."},
             ]
-            state = json.loads(reference[2]["content"].split("\n", 1)[1])
+            state = json.loads(reference[2]["content"].splitlines()[-2])
             assert state["plan"] == [{"step": "Inspect expiry", "status": "completed"},
                                      {"step": "Run tests", "status": "pending"}]
             assert state["changed_files"] == ["auth.py"]
@@ -86,7 +86,7 @@ def test_agent_keeps_current_task_corrections_and_progress_in_each_summary_chunk
             reference = data["reference_context"]
             assert len(reference) == 2
             assert reference[0] == {"role": "user", "content": "Now review the deployment plan."}
-            state = json.loads(reference[1]["content"].split("\n", 1)[1])
+            state = json.loads(reference[1]["content"].splitlines()[-2])
             assert state["plan"] == [] and state["changed_files"] == []
     finally:
         agent.close()

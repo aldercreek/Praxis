@@ -107,7 +107,7 @@ def test_usage_has_one_transient_status_region_and_counts_all_request_parts():
     transient = [{"role": "developer", "content": "run state " * 20}]
     view = manager.build_view(history, transient_items=transient, tool_definitions=tools)
     assert view.items[-1]["content"] == (
-        f"<context_status>\nContext usage: {view.context_status.usage_percent:g}%\n</context_status>"
+        f"<context_status>\n1. Usage\n   Context usage: {view.context_status.usage_percent:g}%\n</context_status>"
     )
     assert "context_status" not in json.dumps(history.snapshot())
     estimate = HeuristicTokenEstimator().estimate_request(
