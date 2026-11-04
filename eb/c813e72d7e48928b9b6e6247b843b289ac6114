@@ -1,0 +1,47 @@
+src/praxis_agent/agent_loop.py
+  s_249d03db8d84b9::t_2287eda20f31ec 83-91,154-162
+tests/test_context_redesign.py
+  s_249d03db8d84b9::t_8bfb5c89c28c2e 110
+src/praxis_agent/context/model_context.py
+  s_249d03db8d84b9::t_2287eda20f31ec 9,13,15,17,19,21-26
+  s_249d03db8d84b9::t_097a5a5d67ab94 20
+src/praxis_agent/context/summarizer.py
+  s_249d03db8d84b9::t_7c035cc0ec7cc7 18-23,25-29,31,33-36,38-43,45-47,49-59
+  s_249d03db8d84b9::t_097a5a5d67ab94 32
+src/praxis_agent/prompts.py
+  s_249d03db8d84b9::t_7c035cc0ec7cc7 8-11,50,53,55-69,72-75,78-81,88-94
+  s_249d03db8d84b9::t_097a5a5d67ab94 76-77
+src/praxis_agent/multi_agent/runtime.py
+  s_249d03db8d84b9::t_2287eda20f31ec 240-247,249,421-424
+tests/test_multi_agent_finalization.py
+  s_249d03db8d84b9::t_8bfb5c89c28c2e 44
+tests/test_command_sessions.py
+  s_249d03db8d84b9::t_8bfb5c89c28c2e 316
+tests/test_multi_agent_coordination.py
+  s_249d03db8d84b9::t_8bfb5c89c28c2e 19
+tests/test_summary_context.py
+  s_249d03db8d84b9::t_8bfb5c89c28c2e 72,89
+src/praxis_agent/planning/model_context.py
+  s_249d03db8d84b9::t_2287eda20f31ec 22-25,31
+tests/test_agent.py
+  s_249d03db8d84b9::t_8bfb5c89c28c2e 32-37,44
+tests/test_context_compaction.py
+  s_249d03db8d84b9::t_57476fb41a6e8c 213,216
+  s_249d03db8d84b9::t_097a5a5d67ab94 200
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.51-trip",
+  "base_commit_sha": "ebc813e72d7e48928b9b6e6247b843b289ac6114",
+  "prompts": {},
+  "sessions": {
+    "s_249d03db8d84b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a199e4-19c8-70c1-a2e2-2cbf74b9e0da",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "aldercreek <57739268+aldercreek@users.noreply.github.com>"
+    }
+  }
+}
