@@ -1,5 +1,3 @@
-<p align="center"><img src="docs/assets/overview.svg" alt="Praxis: a local service connects clients, agent teams and persistent sessions" width="100%" /></p>
-
 <h1 align="center">Praxis</h1>
 
 **A local coding agent. One session across your terminals and desktop.**
@@ -20,8 +18,6 @@ Praxis helps you explore a codebase, edit files, run commands, and coordinate ag
 - **Manage long conversations.** Search saved history and compress the model's context while retaining the original records.
 
 ## Agent collaboration
-
-![Main agent delegates focused tasks, teammates exchange messages, and the runtime supplies live team context](docs/assets/collaboration.svg)
 
 Give the main agent an objective and clear boundaries. For example:
 
