@@ -7,7 +7,6 @@ import json
 from praxis_agent.sessions import SQLiteSessionStore
 
 from .errors import ServiceError
-from .history import session_view_events
 from .schema import SCHEMA
 from .transcript import Transcript
 
@@ -22,16 +21,6 @@ class ServiceStore:
         self.db = sessions.database
         with self.db.connection() as connection:
             connection.executescript(SCHEMA)
-            for table, column, declaration in (
-                ("inputs", "position", "INTEGER"),
-                ("active_turns", "input_id", "TEXT"),
-            ):
-                if column not in {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}:
-                    connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
-            if "delete_requested_at" not in {
-                row["name"] for row in connection.execute("PRAGMA table_info(sessions)")
-            }:
-                connection.execute("ALTER TABLE sessions ADD COLUMN delete_requested_at TEXT")
             connection.commit()
 
     def require_available(self, session_id):
@@ -190,7 +179,7 @@ class ServiceStore:
                 dict(row)
                 for row in connection.execute(
                     "SELECT command_id, content FROM inputs WHERE session_id = ? "
-                    "AND consumed_turn_id IS NULL AND deleted = 0 ORDER BY COALESCE(position, rowid), rowid",
+                    "AND consumed_turn_id IS NULL AND deleted = 0 ORDER BY position, rowid",
                     (session_id,),
                 )
             ]
@@ -247,7 +236,7 @@ class ServiceStore:
                     (session_id,),
                 )
             ]
-            view_events = session_view_events(connection, session_id, frames)
+            view_events = frames
             transcript = Transcript()
             for frame in view_events:
                 transcript.consume(

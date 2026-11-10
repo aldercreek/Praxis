@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import json
 
-from praxis_agent.mcp_results import decode_tool_output
-
 from .collaboration import collaboration_messages
 
 
@@ -51,14 +49,12 @@ def tool_result_status(result: dict, previous: str = "", tool_name: str = "") ->
 class Transcript:
     """A plain display snapshot, independent of Textual and model prompt internals."""
 
-    def __init__(self, history=()):
+    def __init__(self):
         self.messages: list[dict] = []
         self.responses: dict[tuple, dict] = {}
         self.last_response: dict[tuple, dict] = {}
         self.tools: dict[tuple, dict] = {}
         self.agents: dict[tuple, dict] = {}
-        for item in history:
-            self._restore(item)
 
     def append(self, role, content, **extra):
         message = {
@@ -70,49 +66,6 @@ class Transcript:
         self.messages.append(message)
         return message
 
-    def _restore(self, item):
-        if not isinstance(item, dict):
-            return
-        role, kind = item.get("role"), item.get("type")
-        if role in {"user", "assistant", "system"}:
-            text = content_text(item.get("content"))
-            if text:
-                self.append(role, text, agent_id="main", status="completed")
-        elif kind == "function_call":
-            try:
-                arguments = json.loads(item.get("arguments", "{}"))
-            except (ValueError, TypeError):
-                arguments = {"raw": item.get("arguments", "")}
-            self.tools[("main", item["call_id"])] = self.append(
-                "tool",
-                "",
-                tool_name=item.get("name", ""),
-                call_id=item["call_id"],
-                agent_id="main",
-                arguments=arguments,
-                status="completed",
-                tool_finished=False,
-            )
-        elif kind == "function_call_output":
-            message = self.tools.get(("main", item.get("call_id")))
-            if message is not None:
-                try:
-                    result = decode_tool_output(item.get("output", "{}"))
-                except (ValueError, TypeError):
-                    result = {"output": item.get("output", ""), "success": False}
-                output = (
-                    result.get("output", "") if isinstance(result, dict) else result
-                )
-                message["content"] = (
-                    output
-                    if isinstance(output, str)
-                    else json.dumps(output, ensure_ascii=False)
-                )
-                message["status"] = (
-                    tool_result_status(result, tool_name=message.get("tool_name", "")) if isinstance(result, dict) else "failed"
-                )
-                message["tool_finished"] = True
-
     def consume(self, event: str, turn_id: str, agent_id: str, data: dict):
         common = {"turn_id": turn_id, "agent_id": agent_id}
         execution_id = data.get("child_turn_id") or turn_id
@@ -121,7 +74,7 @@ class Transcript:
             common["child_turn_id"] = data["child_turn_id"]
         if event == "TurnStarted":
             task = data["task"]
-            envelope = collaboration_messages(task) if agent_id not in {"main", "root"} else None
+            envelope = collaboration_messages(task) if agent_id != "main" else None
             if envelope:
                 for index, report in enumerate(envelope):
                     self.append(
@@ -135,7 +88,7 @@ class Transcript:
                 task,
                 **common,
                 status="completed",
-                source="user" if agent_id in {"main", "root"} else "agent",
+                source="user" if agent_id == "main" else "agent",
                 id=f"user:{turn_id}:{agent_id}:{execution_id}",
             )
         elif event == "ModelRequestStarted":
@@ -245,11 +198,11 @@ class Transcript:
                     if envelope:
                         for report in envelope:
                             sender = report["sender_id"]
-                            if agent_id in {"main", "root"} and report["recipient_id"] == "parent":
+                            if agent_id == "main" and report["recipient_id"] == "parent":
                                 if not any(m.get("agent_id") == sender and m.get("turn_id") == turn_id and m["content"] == report["content"] for m in self.messages):
                                     self.append("assistant", report["content"], turn_id=turn_id, agent_id=sender, source="agent", status="completed",
                                                 sender_id=sender, recipient_id=report["recipient_id"])
-                            elif agent_id not in {"main", "root"}:
+                            elif agent_id != "main":
                                 self.append("user", report["content"], **common, source="agent", status="completed",
                                             sender_id=sender, recipient_id=report["recipient_id"])
                         continue

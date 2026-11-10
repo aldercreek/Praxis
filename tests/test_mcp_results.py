@@ -206,9 +206,10 @@ def test_agent_persists_media_and_restores_both_interfaces(tmp_path, is_error):
         return ModelResponse(({"role": "assistant", "content": "done"},), "done", ())
     store = SQLiteSessionStore(tmp_path / "history.sqlite3")
     session = store.create_session(tmp_path, "test")
+    events = []
     live = AgentView("main", "Main")
     agent = Agent(SimpleNamespace(create_response=respond), registry, tmp_path,
-                  event_sink=SimpleNamespace(emit=live.consume), session_store=store,
+                  event_sink=SimpleNamespace(emit=lambda event: (events.append(event), live.consume(event))), session_store=store,
                   session_id=session.id, session_model="test")
     try:
         assert agent.run("query") == "done"
@@ -216,10 +217,14 @@ def test_agent_persists_media_and_restores_both_interfaces(tmp_path, is_error):
         saved = next(i for i in history if i.get("type") == "function_call_output")
         assert any(b["type"] == "input_image" for b in saved["output"])
         restored = AgentView("main", "Main")
-        restored.restore_history(history)
+        for event in events:
+            restored.consume(event)
         assert next(b for b in live.committed_blocks if isinstance(b, ToolBlock)) == next(
             b for b in restored.committed_blocks if isinstance(b, ToolBlock))
-        transcript = Transcript(history)
+        transcript = Transcript()
+        transcript.consume("ToolCallPrepared", "t", "main", {"call_id": "c", "tool_name": "mcp_test_query", "arguments": {}, "requires_approval": False})
+        projected = display_event(ToolFinished("t", "c", "mcp_test_query", result))
+        transcript.consume(*projected)
         tool = next(m for m in transcript.messages if m["role"] == "tool")
         assert tool["status"] == ("failed" if is_error else "completed")
         assert PNG not in tool["content"]

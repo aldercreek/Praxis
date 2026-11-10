@@ -39,9 +39,10 @@ def test_command_result_has_one_persisted_copy_and_restores_the_live_view(tmp_pa
 
     store = SQLiteSessionStore(tmp_path / "history.sqlite3")
     session = store.create_session(tmp_path, "test")
+    events = []
     live = AgentView("main", "main")
     agent = Agent(SimpleNamespace(create_response=respond), create_default_registry(), tmp_path,
-                  event_sink=SimpleNamespace(emit=live.consume), bypass_approvals=True,
+                  event_sink=SimpleNamespace(emit=lambda event: (events.append(event), live.consume(event))), bypass_approvals=True,
                   session_store=store, session_id=session.id, session_model="test")
     try:
         assert agent.run("execute") == "done"
@@ -55,7 +56,8 @@ def test_command_result_has_one_persisted_copy_and_restores_the_live_view(tmp_pa
             assert result["output"]["exit_code"] == code
         assert saved["output"].count("unique-output-marker") == (0 if ending == "spawn_failed" else 1)
         restored = AgentView("main", "main")
-        restored.restore_history(history)
+        for event in events:
+            restored.consume(event)
         before = next(block for block in live.committed_blocks if isinstance(block, ToolBlock))
         after = next(block for block in restored.committed_blocks if isinstance(block, ToolBlock))
         assert before == after

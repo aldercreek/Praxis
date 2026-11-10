@@ -1,12 +1,14 @@
-# Praxis
+<p align="center"><img src="docs/assets/overview.svg" alt="Praxis: a local service connects clients, agent teams and persistent sessions" width="100%" /></p>
+
+<h1 align="center">Praxis</h1>
 
 **A local coding agent. One session across your terminals and desktop.**
 
 Praxis helps you explore a codebase, edit files, run commands, and coordinate agents through a persistent conversation. Its Python service owns execution; the terminal and [Praxis-UI desktop app](https://github.com/aldercreek/Praxis-UI) connect to the same sessions. Close a client, open another, and pick up where you left off.
 
-[Get started](#get-started) · [Desktop](#desktop) · [How it works](#how-it-works) · [Reference](docs/reference.md) · [Development](#development)
+[Get started](#get-started) · [Agent collaboration](#agent-collaboration) · [Desktop](#desktop) · [Reference](docs/reference.md) · [Development](#development)
 
-> Praxis is under active development. Install the backend and desktop client from source together.
+> **Source preview.** Install the backend and desktop from matching revisions. This version uses database schema 6 and does not migrate older databases. Choose a new `PRAXIS_DATA_DIR` to start fresh; existing data is not automatically deleted.
 
 ## What you can do
 
@@ -16,6 +18,28 @@ Praxis helps you explore a codebase, edit files, run commands, and coordinate ag
 - **Use the right tools.** Read and edit files, search with ripgrep, run background commands, discover MCP tools, and load project skills.
 - **Delegate focused tasks.** Subagents have their own context and working directory. The parent coordinates their results.
 - **Manage long conversations.** Search saved history and compress the model's context while retaining the original records.
+
+## Agent collaboration
+
+![Main agent delegates focused tasks, teammates exchange messages, and the runtime supplies live team context](docs/assets/collaboration.svg)
+
+Give the main agent an objective and clear boundaries. For example:
+
+> Implement the API change and update its tests. Delegate an independent review of the error cases. Have the implementation and review agents exchange findings, then run the relevant checks and summarize unresolved risks.
+
+The runtime supplies each agent with the current team: IDs, responsibilities, capabilities and status. Members can address each other without asking the parent to relay every message. Creating, closing or reassigning an agent updates that context on the next model request.
+
+| Capability | How it works |
+| --- | --- |
+| Focused delegation | `spawn_agent` starts a worker with an explicit task and a separately prepared working directory. |
+| Optional inherited context | `inherit_context=true` copies the parent's retained conversation as background. The new task defines the worker's scope. |
+| Direct communication | The parent uses `send_messages`; workers use `send_message` to reach the parent or a live peer. |
+| Responsive waiting | `wait_agents(timeout=60)` wakes for mail, team changes, parent user input, timeout or closure. It takes no agent-ID filter. |
+| Explicit closure | `close_agent` requests cancellation and releases the worker's context after execution stops. |
+
+**A wake is not “all agents finished.”** An idle recipient resumes when messaged; a busy recipient receives messages at a model boundary. Ordinary streaming tokens do not wake a wait.
+
+Inherited context does not include hidden originals removed by compaction, future user input, Python variables or command sessions. Worker directories are not automatically copied, synchronized or merged. Worker waits currently occupy worker-pool threads.
 
 ## Get started
 
@@ -131,7 +155,7 @@ flowchart LR
 
 **Ordered updates.** Each session has a durable, increasing event sequence. A client subscribes before loading a snapshot, buffers incoming events, and applies only those after the snapshot's sequence. Each SSE connection reads replayed and live events through one ordered database loop. Heartbeats detect stale connections; reconnects start after the last event successfully applied by the client.
 
-**Saved history.** Snapshots also restore finished turns saved in the conversation tables before an event journal existed. Both clients receive their messages and tool results in turn order. This display reconstruction does not execute an agent, rewrite history, or change the SSE cursor.
+**One display history.** Snapshots replay the current event journal for both clients. There is no reconstruction of old unjournaled records, database migration, or old tool-protocol adapter. Reopening a current session does not execute an agent or change the SSE cursor.
 
 **Explicit outcomes.** Turns use `running`, `completed`, `cancelled`, or `failed`. A cancellation names its turn, so a delayed request cannot stop a newer turn. The first valid approval decision wins. On service restart, unfinished turns become failed, pending approvals close, and unknown tool outcomes are recorded without automatic retries.
 

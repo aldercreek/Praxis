@@ -482,9 +482,9 @@ class SQLiteSessionStore:
             version = int(
                 connection.execute("PRAGMA user_version").fetchone()[0]
             )
-            if version > _SCHEMA_VERSION:
+            if version not in (0, _SCHEMA_VERSION):
                 raise SessionStoreError(
-                    "session database was created by a newer Praxis version"
+                    "unsupported session database version; use a new data directory"
                 )
             connection.executescript(_SCHEMA)
             connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")

@@ -229,9 +229,6 @@ class AgentRuntime:
             self.condition.notify_all()
             return {"message_id": message.message_id, "accepted": True}
 
-    def send_parent(self, agent_id: str, content: str) -> dict[str, object]:
-        return self.send_message(agent_id, "parent", content)
-
     def _report(self, handle: AgentHandle, content: str) -> AgentMessage:
         message = AgentMessage(handle.agent_id, "parent", content)
         self.inbox.append(message)
@@ -334,7 +331,7 @@ class AgentRuntime:
                         "team_version": self.team_version,
                         "timed_out": reason == "timeout",
                     }
-                # Also supports legacy in-process input queues without a notifier.
+                # Poll in-process input queues, which do not have a notifier.
                 self.condition.wait(min(remaining, 0.2))
 
     def _schedule(self, handle: AgentHandle) -> None:

@@ -76,7 +76,7 @@ def mcp_tool_result(result, *, programmatic: bool = False) -> ToolResult:
 
 
 def decode_tool_output(output) -> dict:
-    """Read both legacy string outputs and persisted multimodal tool outputs."""
+    """Read persisted text and multimodal tool outputs."""
     if isinstance(output, str):
         return json.loads(output)
     status = json.loads(output[0]["text"])

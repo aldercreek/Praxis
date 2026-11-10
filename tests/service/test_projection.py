@@ -30,11 +30,6 @@ def test_python_status_matches_live_and_restored_history(structured, kind, statu
     })
     transcript.consume("ToolFinished", "turn", "main", {"call_id": "python", "result": result})
     assert transcript.messages[0]["status"] == status
-    restored = Transcript([
-        {"type": "function_call", "call_id": "python", "name": "run_code", "arguments": "{}"},
-        {"type": "function_call_output", "call_id": "python", "output": json.dumps(result)},
-    ])
-    assert restored.messages[0]["status"] == status
 
 
 def test_collaboration_reports_are_grouped_deduplicated_and_keep_user_examples():
@@ -105,29 +100,6 @@ def test_event_adapter_omits_prompts_and_does_not_duplicate_child_events():
     )
     assert "private prompt" not in json.dumps(received)
     assert "response" not in received[-1][-1]
-
-
-def test_transcript_restores_saved_tools_and_text():
-    history = [
-        {"role": "user", "content": "read"},
-        {
-            "type": "function_call",
-            "call_id": "c",
-            "name": "read_file",
-            "arguments": '{"path":"a.txt"}',
-        },
-        {
-            "type": "function_call_output",
-            "call_id": "c",
-            "output": '{"success":true,"output":"hello"}',
-        },
-        {"role": "assistant", "content": [{"type": "output_text", "text": "done"}]},
-    ]
-    messages = Transcript(history).messages
-    assert [message["role"] for message in messages] == ["user", "tool", "assistant"]
-    assert messages[1]["content"] == "hello"
-    assert messages[1]["arguments"] == {"path": "a.txt"}
-    assert messages[2]["content"] == "done"
 
 
 def test_child_response_numbers_can_restart_within_a_parent_turn():
@@ -294,20 +266,8 @@ def test_denied_finished_tool_remains_denied_after_root_cancellation():
     ],
 )
 def test_restored_tool_keeps_denied_or_cancelled_result_status(output, expected):
-    transcript = Transcript(
-        [
-            {
-                "type": "function_call",
-                "call_id": "c",
-                "name": "run_command",
-                "arguments": "{}",
-            },
-            {
-                "type": "function_call_output",
-                "call_id": "c",
-                "output": json.dumps({"success": False, "output": output}),
-            },
-        ]
-    )
+    transcript = Transcript()
+    transcript.consume("ToolCallPrepared", "turn", "main", {"call_id": "c", "tool_name": "run_command", "arguments": {}, "requires_approval": False})
+    transcript.consume("ToolFinished", "turn", "main", {"call_id": "c", "result": {"success": False, "output": output}})
     assert transcript.messages[0]["status"] == expected
     assert transcript.messages[0]["tool_finished"] is True

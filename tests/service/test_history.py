@@ -19,6 +19,8 @@ def test_cold_history_keeps_collaboration_in_its_agent_without_rewriting_model_h
     h.store.sessions.append_response_items(sid, "saved", [{"role": "user", "content": envelope}])
     state.complete()
     h.store.sessions.finish_run(sid, "saved", state)
+    h.store.append_event(sid, "TurnStarted", "saved", data={"task": "review this"})
+    h.store.append_event(sid, "MessagesReceived", "saved", data={"source": "agent", "items": [{"role": "user", "content": envelope}]})
     snapshot = h.store.snapshot(sid)
     assert [m["content"] for m in snapshot["messages"]] == ["review this", "Review complete."]
     assert snapshot["messages"][1]["agent_id"] == "reviewer"
@@ -26,7 +28,7 @@ def test_cold_history_keeps_collaboration_in_its_agent_without_rewriting_model_h
     assert h.store.sessions.load_conversation_items(sid)[-1]["content"] == envelope
 
 
-def saved_turn(h, sid, turn_id, *, finish=True):
+def saved_turn(h, sid, turn_id, *, finish=True, journal=True):
     state = RunState("saved question")
     h.store.sessions.start_run(
         sid, turn_id, state, {"role": "user", "content": "saved question"}
@@ -58,6 +60,21 @@ def saved_turn(h, sid, turn_id, *, finish=True):
             {"role": "assistant", "content": "saved answer"},
         ],
     )
+    if journal:
+        events = [
+            ("TurnStarted", {"task": "saved question"}),
+            ("ModelRequestStarted", {"request_number": 1}),
+            ("ModelRequestCompleted", {"request_number": 1, "output_text": "checking the file"}),
+            ("ToolCallPrepared", {"call_id": "read", "tool_name": "read_file", "arguments": {"relative_path": "notes.md"}, "requires_approval": False}),
+            ("ToolFinished", {"tool_name": "read_file", "call_id": "read", "result": {"success": True, "output": "saved tool output"}}),
+            ("MessagesReceived", {"source": "user", "items": [{"role": "user", "content": "saved supplement"}]}),
+            ("ModelRequestStarted", {"request_number": 2}),
+            ("ModelRequestCompleted", {"request_number": 2, "output_text": "saved answer"}),
+        ]
+        if finish:
+            events += [("AssistantTextCompleted", {"text": "saved answer"}), ("TurnCompleted", {})]
+        for event, data in events:
+            h.store.append_event(sid, event, turn_id, data=data)
     if finish:
         state.complete()
         h.store.sessions.finish_run(sid, turn_id, state)
@@ -135,7 +152,7 @@ def test_running_turn_without_start_event_is_not_restored_ahead_of_its_journal(s
     h = service()
     session = h.create()
     sid = session["id"]
-    saved_turn(h, sid, "starting", finish=False)
+    saved_turn(h, sid, "starting", finish=False, journal=False)
     assert h.store.snapshot(sid)["messages"] == []
     h.store.append_event(
         sid, "TurnStarted", "starting", data={"task": "saved question"}

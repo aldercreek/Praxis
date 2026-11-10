@@ -51,7 +51,7 @@ class SessionRuntime:
                 )
                 connection.execute(
                     "UPDATE inputs SET position = ("
-                    "SELECT COALESCE(MAX(COALESCE(position, rowid)), 0) + 1 "
+                    "SELECT COALESCE(MAX(position), 0) + 1 "
                     "FROM inputs WHERE session_id = ?) WHERE command_id = ?",
                     (self.id, command_id),
                 )
@@ -165,7 +165,7 @@ class SessionRuntime:
                 self._editable_input(connection, input_id)
                 connection.execute(
                     "UPDATE inputs SET position = ("
-                    "SELECT COALESCE(MIN(COALESCE(position, rowid)), 0) - 1 "
+                    "SELECT COALESCE(MIN(position), 0) - 1 "
                     "FROM inputs WHERE session_id = ?) WHERE command_id = ?",
                     (self.id, input_id),
                 )

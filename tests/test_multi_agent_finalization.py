@@ -90,7 +90,7 @@ def test_idle_help_request_must_be_delivered_but_does_not_block_afterward():
     runtime = AgentRuntime(None, MultiAgentConfig())
     handle = AgentHandle("worker", "turn", ExecutionControl())
     runtime.handles[handle.agent_id] = handle
-    runtime.send_parent(handle.agent_id, "Task incomplete. Please reassign remaining work.")
+    runtime.send_message(handle.agent_id, "parent", "Task incomplete. Please reassign remaining work.")
     items = []
     try:
         assert not runtime.can_finalize(items.extend)
@@ -107,7 +107,7 @@ def test_final_message_is_not_lost_when_persistence_fails():
     runtime = AgentRuntime(None, MultiAgentConfig())
     handle = AgentHandle("worker", "turn", ExecutionControl())
     runtime.handles[handle.agent_id] = handle
-    runtime.send_parent(handle.agent_id, "Important correction")
+    runtime.send_message(handle.agent_id, "parent", "Important correction")
 
     def fail(items):
         raise OSError("database unavailable")

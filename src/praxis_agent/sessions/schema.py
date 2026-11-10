@@ -1,4 +1,4 @@
-_SCHEMA_VERSION = 5
+_SCHEMA_VERSION = 6
 _INTERRUPTED_RUN_ERROR = "Praxis stopped before this run completed."
 _INTERRUPTED_TOOL_OUTPUT = (
     "Tool execution was interrupted. Its completion is unknown.\n"
@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     model TEXT NOT NULL,
     title TEXT NOT NULL,
     created_at TEXT NOT NULL,
+    delete_requested_at TEXT,
     updated_at TEXT NOT NULL
 );
 

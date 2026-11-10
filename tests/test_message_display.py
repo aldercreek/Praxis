@@ -113,7 +113,7 @@ def test_live_history_details_and_copy_use_same_display_text(
         source = "[message_id=m15, operation_id=op2]\n已经找到源码。"
         view = app.store.get("main")
         if restore:
-            view.restore_history([{"type": "message", "role": "assistant", "content": source}])
+            view.consume(AssistantTextCompleted("turn", source))
         async with app.run_test(size=(80, 26)) as pilot:
             if not restore:
                 app.sink.emit(AssistantTextDelta("turn", 1, "[message_id=m"))

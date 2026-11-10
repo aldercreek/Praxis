@@ -254,9 +254,6 @@ def tool_description(name: str, arguments: Mapping[str, object]) -> tuple[str, s
     if name == "spawn_agent":
         return label, str(arguments.get("task_summary") or arguments.get("task", ""))
     if name == "wait_agents":
-        if "agent_ids" in arguments:  # Saved calls from before unfiltered waits.
-            items = arguments["agent_ids"]
-            return label, f"{len(items)} agent{'' if len(items) == 1 else 's'}"
         return label, f"up to {arguments.get('timeout', 60)}s"
     if name == "send_messages":
         items = arguments.get("messages", [])
@@ -382,25 +379,14 @@ def _operation_summary(call: ToolBlock) -> list[Text] | None:
         return None
     if not isinstance(result, dict) or (call.failed and "results" not in result):
         return None
-    statuses = {"queued": "Queued", "running": "Running", "idle": "Turn finished",
-                "closing": "Closing", "closed": "Closed"}
     if call.name == "wait_agents":
-        if "reason" in result:
-            reasons = {"message": "New collaboration message", "team_changed": "Team membership or responsibilities changed",
-                       "user_input": "New user input", "timeout": "Wait timed out", "closed": "Collaboration closed"}
-            lines = [Text(reasons.get(result["reason"], str(result["reason"])))]
-            count = result.get("unread_messages", 0)
-            if count:
-                lines.append(Text(f"{count} unread collaboration message{'' if count == 1 else 's'}; Ctrl+T for details"))
-            return lines
-        # Keep historical results readable after the tool contract changes.
-        lines = [Text(f"{statuses.get(agent['status'], agent['status'])} · {agent.get('task') or agent['agent_id']}")
-                 for agent in result.get("agents", [])]
-        count = len(result.get("messages", []))
+        reasons = {"message": "New collaboration message", "team_changed": "Team membership or responsibilities changed",
+                   "user_input": "New user input", "timeout": "Wait timed out", "closed": "Collaboration closed"}
+        reason = result.get("reason", "")
+        lines = [Text(reasons.get(reason, str(reason)))]
+        count = result.get("unread_messages", 0)
         if count:
-            lines.append(Text(f"Received {count} collaboration message{'' if count == 1 else 's'}; Ctrl+T for details"))
-        if result.get("timed_out"):
-            lines.append(Text("Wait ended; subagents are still running"))
+            lines.append(Text(f"{count} unread collaboration message{'' if count == 1 else 's'}; Ctrl+T for details"))
         return lines
     if call.name == "send_messages":
         return [Text(str(item.get("error")), style="red") for item in result.get("results", []) if item.get("error")]

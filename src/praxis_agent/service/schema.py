@@ -10,12 +10,14 @@ CREATE TABLE IF NOT EXISTS inputs (
     session_id TEXT NOT NULL REFERENCES sessions(id),
     content TEXT NOT NULL,
     consumed_turn_id TEXT,
+    position INTEGER,
     deleted INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS inputs_session ON inputs(session_id);
 CREATE TABLE IF NOT EXISTS active_turns (
     session_id TEXT PRIMARY KEY REFERENCES sessions(id),
     turn_id TEXT NOT NULL UNIQUE,
+    input_id TEXT,
     cancel_requested INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS approvals (

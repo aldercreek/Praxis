@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from praxis_agent.mcp_results import decode_tool_output
 from dataclasses import dataclass, replace
 from queue import Empty, SimpleQueue
 from time import monotonic
@@ -34,7 +33,6 @@ from praxis_agent.events import (
     TurnFailed,
     TurnStarted,
 )
-from praxis_agent.planning import PlanStep, PlanStepStatus
 from praxis_agent.terminal.cells import (
     CollaborationBlock,
     MessageBlock,
@@ -46,7 +44,6 @@ from praxis_agent.terminal.cells import (
 )
 from praxis_agent.terminal.command_output import CommandOutputs
 from praxis_agent.terminal.context import capacity_footer
-from praxis_agent.tools import ToolResult
 from praxis_agent.tools.filesystem import FileChange
 
 
@@ -211,55 +208,6 @@ class AgentView:
         complete = all(step.status.value == "completed" for step in plan)
         self.committed_blocks.append(plan_cell(plan, compact=self._plan_seen and not complete))
         self._plan_seen = True
-
-    def restore_history(self, items: list[object]) -> None:
-        """Replay saved conversation data into the same display blocks as live events."""
-        calls = {}
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            kind, role = item.get("type"), item.get("role")
-            if role in {"user", "assistant"}:
-                content = item.get("content", "")
-                text = content if isinstance(content, str) else "\n".join(
-                    part.get("text", "") for part in content if part.get("type") in {"input_text", "output_text"})
-                if text:
-                    messages = collaboration_messages(text) if role == "user" else None
-                    if messages is not None and self.agent_id == "main":
-                        self.committed_blocks.extend(CollaborationBlock("Subagent", message["content"])
-                                                     for message in messages)
-                    else:
-                        self._append_message(text, user=role == "user", collaboration=True)
-                if role == "user":
-                    self._plan_seen = False
-            elif kind == "function_call":
-                calls[item["call_id"]] = item
-            elif kind == "function_call_output" and item["call_id"] in calls:
-                call = calls.pop(item["call_id"])
-                result = decode_tool_output(item["output"])
-                try:
-                    arguments = json.loads(call["arguments"])
-                except ValueError:
-                    arguments = None
-                if not isinstance(arguments, dict):
-                    # Invalid model arguments are legitimate failed calls, retained verbatim.
-                    self.committed_blocks.append(ToolBlock(
-                        tool_description(call["name"], {})[0], call["arguments"],
-                        result["output"], "failed", call["name"],
-                    ))
-                    continue
-                self._prepared_calls[item["call_id"]] = ToolCallPrepared(
-                    "", item["call_id"], call["name"], arguments, False)
-                output = result["output"]
-                structured = output if isinstance(output, dict) else None
-                self._on_tool_finished(ToolFinished(
-                    "", item["call_id"], call["name"], ToolResult(
-                        result["success"], json.dumps(output, ensure_ascii=False) if structured is not None else output,
-                        structured_output=structured)))
-                if call["name"] == "update_plan" and result["success"]:
-                    self._append_plan([PlanStep(step["step"], PlanStepStatus(step["status"]))
-                                       for step in arguments["plan"]])
-        self._phase = "Waiting for a task"
 
     def _on_compaction(self, event: ContextCompaction) -> None:
         if event.stage == "started":
