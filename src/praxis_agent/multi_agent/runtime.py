@@ -85,6 +85,8 @@ class AgentRuntime:
         self.run: Run | None = None
         self.accepting = True
         self.epoch = uuid4().hex
+        self.team_version = 0
+        self.seen_team_versions: dict[str, int] = {}
         self.pool = ThreadPoolExecutor(
             max_workers=config.max_workers, thread_name_prefix="praxis-agent",
         )
@@ -107,6 +109,8 @@ class AgentRuntime:
         return value.strip()
 
     def _status(self, handle: AgentHandle, status: AgentStatus) -> None:
+        if handle.status != status and status in (AgentStatus.CLOSING, AgentStatus.CLOSED):
+            self.team_version += 1
         handle.status = status
         self._publish(ChildAgentStatus(
             handle.parent_turn_id, handle.agent_id, status.value, handle.task_summary,
@@ -128,7 +132,7 @@ class AgentRuntime:
         return value.strip()
 
     def spawn(self, task: str, task_summary: str = "", *,
-              working_directory: str = "") -> dict[str, object]:
+              working_directory: str = "", history: Sequence[object] = ()) -> dict[str, object]:
         task = self._content(task)
         if not isinstance(working_directory, str):
             raise ValueError("working_directory must be a directory path")
@@ -148,8 +152,12 @@ class AgentRuntime:
             self.handles[agent_id] = handle
             try:
                 handle.agent = self.factory(agent_id, control, _WorkerEvents(self, handle))
+                if history:
+                    handle.agent.restore_history(history)
                 handle.inbox.append(AgentMessage("parent", agent_id, task))
                 self._schedule(handle)
+                self.team_version += 1
+                self.condition.notify_all()
             except Exception:
                 self._dispose(handle)
                 raise
@@ -196,13 +204,33 @@ class AgentRuntime:
             self.condition.notify_all()
         return {"results": results}
 
-    def send_parent(self, agent_id: str, content: str) -> dict[str, object]:
+    def send_message(self, sender_id: str, target: str, content: str) -> dict[str, object]:
+        """Route attributed mail within this runtime; idle recipients resume."""
         with self.condition:
             self._require_open()
-            handle = self._handle(agent_id)
-            handle.control.check()
-            message = self._report(handle, self._content(content))
+            if sender_id != "parent":
+                sender = self._handle(sender_id)
+                sender.control.check()
+                if sender.status in (AgentStatus.CLOSING, AgentStatus.CLOSED):
+                    raise ValueError("sender is closed")
+            if target == sender_id:
+                raise ValueError("cannot send a message to yourself")
+            message = AgentMessage(sender_id, target, self._content(content))
+            if target == "parent":
+                self.inbox.append(message)
+                self._publish(ChildAgentMessage(self.parent_turn_id, sender_id, message.content))
+            else:
+                recipient = self._handle(target)
+                if recipient.status in (AgentStatus.CLOSING, AgentStatus.CLOSED):
+                    raise ValueError("recipient is closed")
+                recipient.inbox.append(message)
+                if recipient.status == AgentStatus.IDLE:
+                    self._schedule(recipient)
+            self.condition.notify_all()
             return {"message_id": message.message_id, "accepted": True}
+
+    def send_parent(self, agent_id: str, content: str) -> dict[str, object]:
+        return self.send_message(agent_id, "parent", content)
 
     def _report(self, handle: AgentHandle, content: str) -> AgentMessage:
         message = AgentMessage(handle.agent_id, "parent", content)
@@ -221,7 +249,10 @@ class AgentRuntime:
             accept([{"role": "user", "content": message_text(messages)}])
             if agent_id != "parent":
                 self._update_task(self._handle(agent_id), messages)
+            accepted_ids = {message.message_id for message in messages}
+            retained = [message for message in inbox if message.message_id not in accepted_ids]
             inbox.clear()
+            inbox.extend(retained)
             return True
 
     def can_finalize(self, accept: AcceptMessages) -> bool:
@@ -251,16 +282,20 @@ class AgentRuntime:
                 return False
             return True
 
-    def wait_agents(self, agent_ids: list[str], timeout: int,
-                    pump: Callable[[], None]) -> dict[str, object]:
-        if not isinstance(agent_ids, list) or not agent_ids:
-            raise ValueError("agent_ids must be a non-empty list")
+    def wake_waiters(self) -> None:
+        with self.condition:
+            self.condition.notify_all()
+
+    def wait_agents(self, timeout: int, pump: Callable[[], None], *,
+                    agent_id: str = "parent",
+                    has_user_input: Callable[[], bool] = lambda: False) -> dict[str, object]:
+        """Wait for input activity without consuming mail or invoking the model."""
         if isinstance(timeout, bool) or not isinstance(timeout, int) or not 0 <= timeout <= 60:
             raise ValueError("timeout must be an integer between 0 and 60 seconds")
         with self.condition:
-            for agent_id in agent_ids:
+            if agent_id != "parent":
                 self._handle(agent_id)
-        ids = set(agent_ids)
+            observed = self.seen_team_versions.get(agent_id, self.team_version)
         deadline = monotonic() + timeout
         def wake():
             with self.condition:
@@ -268,28 +303,38 @@ class AgentRuntime:
         operation = current_handle()
         unsubscribe = operation.on_cancel(wake) if operation is not None else lambda: None
         try:
-            return self._wait_agents(ids, agent_ids, deadline, pump)
+            return self._wait_agents(agent_id, observed, deadline, pump, has_user_input)
         finally:
             unsubscribe()
 
-    def _wait_agents(self, ids, agent_ids, deadline, pump):
+    def _wait_agents(self, agent_id, observed, deadline, pump, has_user_input):
         while True:
             pump()
+            # Service input uses a different lock. Never acquire it under the
+            # collaboration lock; submissions notify us in the opposite order.
+            user_pending = agent_id == "parent" and has_user_input()
             with self.condition:
                 if current_run() is not None:
                     current_run().check()
-                matching = [m for m in self.inbox if m.sender_id in ids]
-                handles = [self.handles[agent_id] for agent_id in dict.fromkeys(agent_ids)]
-                terminal = all(h.status in (AgentStatus.IDLE, AgentStatus.CLOSED) for h in handles)
+                if agent_id != "parent":
+                    self._handle(agent_id).control.check()
+                inbox = self.inbox if agent_id == "parent" else self._handle(agent_id).inbox
                 remaining = deadline - monotonic()
-                if matching or terminal or not self.accepting or remaining <= 0:
-                    self.inbox = deque(m for m in self.inbox if m.sender_id not in ids)
+                reason = (
+                    "user_input" if user_pending else
+                    "message" if inbox else
+                    "team_changed" if self.team_version != observed else
+                    "closed" if not self.accepting else
+                    "timeout" if remaining <= 0 else None
+                )
+                if reason is not None:
                     return {
-                        "messages": [m.to_dict() for m in matching],
-                        "agents": [self._snapshot(h) for h in handles],
-                        "timed_out": not matching and not terminal and remaining <= 0,
+                        "reason": reason,
+                        "unread_messages": len(inbox),
+                        "team_version": self.team_version,
+                        "timed_out": reason == "timeout",
                     }
-                # Wake regularly only to render worker events; this does not call the model.
+                # Also supports legacy in-process input queues without a notifier.
                 self.condition.wait(min(remaining, 0.2))
 
     def _schedule(self, handle: AgentHandle) -> None:
@@ -390,11 +435,12 @@ class AgentRuntime:
             handle.future = None
             self._status(handle, AgentStatus.CLOSED)
 
-    @staticmethod
-    def _update_task(handle: AgentHandle, messages: Iterable[AgentMessage]) -> None:
+    def _update_task(self, handle: AgentHandle, messages: Iterable[AgentMessage]) -> None:
         for message in messages:
-            if message.task_summary:
+            if message.task_summary and message.task_summary != handle.task_summary:
                 handle.task_summary = message.task_summary
+                self.team_version += 1
+                self.condition.notify_all()
 
     @staticmethod
     def _freeze_elapsed(handle: AgentHandle) -> None:
@@ -413,13 +459,18 @@ class AgentRuntime:
             "elapsed_seconds": round(elapsed, 3),
         }
 
-    def context_item(self) -> dict[str, str]:
+    def context_item(self, agent_id: str = "parent") -> dict[str, str]:
         with self.condition:
             agents = [self._snapshot(h)
                       for h in self.handles.values() if h.status != AgentStatus.CLOSED]
+            version = self.team_version
+            self.seen_team_versions[agent_id] = version
         return {"role": "developer", "content": (
             "<collaboration_status>\n"
-            "1. Current workers\n"
+            f"Your agent_id: {agent_id}. Team version: {version}.\n"
+            "parent coordinates work and integrates results. This is the current team snapshot; "
+            "it supersedes historical team lists. Use exact IDs to message peers. "
+            "A closing agent cannot receive new messages.\n"
             + json.dumps(agents, ensure_ascii=False)
             + "\n</collaboration_status>"
         )}
@@ -463,6 +514,8 @@ class AgentRuntime:
             self.handles.clear()
             self.inbox.clear()
             self.epoch = uuid4().hex
+            self.team_version = 0
+            self.seen_team_versions.clear()
             self.accepting = True
             self.pool = ThreadPoolExecutor(
                 max_workers=self.config.max_workers, thread_name_prefix="praxis-agent",

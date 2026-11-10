@@ -56,6 +56,27 @@ def test_collaboration_reports_are_grouped_deduplicated_and_keep_user_examples()
     assert transcript.messages[2]["source"] == "agent"
 
 
+@pytest.mark.parametrize("event", ["TurnStarted", "MessagesReceived"])
+def test_worker_inputs_keep_each_sender_including_batches_and_repeated_content(event):
+    reports = [
+        dict(sender_id="parent", recipient_id="worker", content="Check this"),
+        dict(sender_id="reviewer", recipient_id="worker", content="Check this"),
+    ]
+    envelope = "[Agent collaboration messages; source-labelled task data]\n" + json.dumps(reports)
+    data = {"task": envelope} if event == "TurnStarted" else {"source": "agent", "items": [{"role": "user", "content": envelope}]}
+    data["child_turn_id"] = "worker-run"
+    transcript = Transcript()
+    transcript.consume(event, "turn", "worker", data)
+    assert len({message["id"] for message in transcript.messages}) == 2
+    for message, report in zip(transcript.messages, reports, strict=True):
+        assert {key: message[key] for key in report} == report
+        assert message["role"] == "user"
+        assert message["source"] == "agent"
+        assert message["agent_id"] == "worker"
+        assert message["turn_id"] == "turn"
+        assert message["child_turn_id"] == "worker-run"
+
+
 def test_event_adapter_omits_prompts_and_does_not_duplicate_child_events():
     received = []
 

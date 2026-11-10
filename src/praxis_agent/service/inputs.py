@@ -8,6 +8,10 @@ class TurnInputs:
         self.runtime = runtime
         self.first_id = first_id
 
+    def has_pending(self):
+        with self.runtime.lock:
+            return not self.runtime.closed and bool(self.runtime.store.pending(self.runtime.id))
+
     def consume_initial(self, turn_id):
         store = self.runtime.store
         with store.db.transaction() as connection:

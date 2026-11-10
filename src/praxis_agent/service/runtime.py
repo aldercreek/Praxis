@@ -61,6 +61,8 @@ class SessionRuntime:
             result, created = self.store.command(
                 command_id, "input", {"session_id": self.id, "text": text}, accept
             )
+            if created and (collaboration := getattr(self.agent, "collaboration", None)) is not None:
+                collaboration.wake_waiters()
             if created and self.run is None:
                 self._start_pending()
             return result

@@ -212,6 +212,7 @@ def create_default_agent(
                 config, worker_instructions, summary
             ),
             receive_messages=lambda accept: collaboration.receive(agent_id, accept),
+            team_context=lambda: collaboration.context_item(agent_id),
             close_callbacks=(
                 lambda: code_runtime.release_agent(agent_id),
                 release_worker_tools,
@@ -229,7 +230,8 @@ def create_default_agent(
     )
     agent.collaboration = collaboration
     agent.receive_messages = lambda accept: collaboration.receive("parent", accept)
-    register_parent_tools(agent.tool_registry, collaboration, agent._pump_worker_events)
+    register_parent_tools(agent.tool_registry, collaboration, agent._pump_worker_events,
+                          has_user_input=agent._has_pending_user_input)
     agent.restore_history(history)
     return agent
 

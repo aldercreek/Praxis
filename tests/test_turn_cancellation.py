@@ -82,7 +82,7 @@ def test_cancel_parent_drains_running_and_queued_workers_then_reuses_runtime(tmp
     def body():
         ids.append(runtime.spawn("first", working_directory=".")["agent_id"])
         ids.append(runtime.spawn("queued", working_directory=".")["agent_id"])
-        runtime.wait_agents(ids, 60, lambda: None)
+        runtime.wait_agents(60, lambda: None)
         parent.check()
     thread = Thread(target=execute, daemon=True)
     thread.start()
@@ -104,7 +104,7 @@ def test_cancel_parent_drains_running_and_queued_workers_then_reuses_runtime(tmp
         runtime.run = next_run
         def again():
             runtime.send_many([{"agent_id": ids[0], "content": "continue"}])
-            runtime.wait_agents([ids[0]], 5, lambda: None)
+            runtime.wait_agents(5, lambda: None)
         next_run.execute(again)
         assert len(invoked) == 2
         assert runtime.accepting

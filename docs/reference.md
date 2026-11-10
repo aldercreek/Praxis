@@ -74,11 +74,17 @@ Cancelling a turn stops commands created in that turn and commands it is current
 
 ## Subagents
 
-The parent has `spawn_agent`, `send_messages`, `wait_agents`, and `close_agent`. Workers use `send_message` to report to the parent and do not receive spawning tools by default.
+The parent has `spawn_agent`, `send_messages`, `wait_agents`, and `close_agent`. Workers have `send_message(target, content)` and `wait_agents(timeout)`; the target is `parent` or an exact teammate ID. Workers do not receive spawning tools by default.
 
-Each worker has its own history, plan, context, and Python state. It inherits model and approval configuration. `spawn_agent` requires an existing working directory; Praxis does not automatically create worktrees, copy files, or merge changes. Coordinate file ownership and integration explicitly.
+Each worker has its own history, plan, context, and Python state. It inherits model and approval configuration. `spawn_agent` requires an existing working directory; Praxis does not automatically create worktrees, copy files, or merge changes. Coordinate file ownership and integration explicitly. Optional `inherit_context=true` copies the retained parent conversation, including existing summaries, as background before the new task. It defaults to false. Unfinished tool-call batches and parent-only developer instructions are excluded. Future inputs, running commands, Python variables and context-operation state are not shared.
 
-Messages to idle workers start work; running workers receive them at execution boundaries. `wait_agents` waits for new messages, completion, or a timeout of at most 60 seconds. A parent cannot finalize while workers are queued, running, or closing. `close_agent` cancels and releases the worker without deleting its files. `PRAXIS_AGENT_MAX_WORKERS` defaults to 8; additional tasks wait in the worker pool.
+Messages to idle workers start work; running workers receive them at execution boundaries. Closing/closed recipients reject new mail. Every agent sees a fresh, transient team snapshot on each model request: its identity, the parent coordinator, teammates' responsibilities, workspaces and status. Creating or closing a member or changing its responsibility can wake existing waits. Ordinary running/idle transitions do not broadcast new work. Idle agents are not started by membership changes.
+
+`wait_agents(timeout=60)` waits for any mail to the caller, team membership/responsibility changes, parent user input, or a timeout of at most 60 seconds. It takes no agent-ID filter. Its result has `reason` (`message`, `team_changed`, `user_input`, `timeout`, or `closed`), `unread_messages`, `team_version` and `timed_out`. It never removes messages: the normal input boundary accepts them before acknowledging their exact IDs. Persistence failure retains unread mail. A wake is not proof that all workers finished; consult the current team and outcomes. Worker terminal reports go to the parent, while peer replies go only to their addressed recipient. Streaming display output does not wake waits.
+
+A parent cannot finalize while workers are queued, running, or closing. `close_agent` cancels and releases the worker without deleting its files. `PRAXIS_AGENT_MAX_WORKERS` defaults to 8; additional tasks wait in the worker pool. A waiting worker still occupies a pool thread: leave capacity for peers that must answer it. Workers and queued messages do not survive a process restart.
+
+Service transcript snapshots retain each incoming worker message separately, with optional `sender_id` and `recipient_id` fields. Clients can label main-agent instructions and peer messages consistently during live execution and after reopening the session. These fields describe message provenance; they do not change the model's conversation history.
 
 ## MCP servers
 

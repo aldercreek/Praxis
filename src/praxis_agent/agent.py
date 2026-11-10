@@ -70,6 +70,7 @@ class Agent:
     max_parallel_tools: int = DEFAULT_MAX_PARALLEL_TOOLS
     collaboration: AgentRuntime | None = None
     receive_messages: Callable[[Callable[[Sequence[object]], None]], bool] | None = None
+    team_context: Callable[[], dict[str, str]] | None = None
     user_input: SimpleQueue[str] | None = None
     input_source: object | None = None
     execution_control: ExecutionControl | None = None
@@ -276,6 +277,11 @@ class Agent:
             return False
         self._accept_messages(turn_id, items, source="user")
         return True
+
+    def _has_pending_user_input(self) -> bool:
+        if self.input_source is not None:
+            return self.input_source.has_pending()
+        return self.user_input is not None and not self.user_input.empty()
 
     def _accept_messages(self, turn_id: str, items: Sequence[object], *, source: str = "agent") -> None:
         if self.session_store is not None:

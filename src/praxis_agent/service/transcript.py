@@ -122,9 +122,17 @@ class Transcript:
         if event == "TurnStarted":
             task = data["task"]
             envelope = collaboration_messages(task) if agent_id not in {"main", "root"} else None
+            if envelope:
+                for index, report in enumerate(envelope):
+                    self.append(
+                        "user", report["content"], **common, source="agent",
+                        sender_id=report["sender_id"], recipient_id=report["recipient_id"],
+                        status="completed", id=f"user:{turn_id}:{agent_id}:{execution_id}:report:{index}",
+                    )
+                return
             self.append(
                 "user",
-                "\n\n".join(item["content"] for item in envelope) if envelope else task,
+                task,
                 **common,
                 status="completed",
                 source="user" if agent_id in {"main", "root"} else "agent",
@@ -239,9 +247,11 @@ class Transcript:
                             sender = report["sender_id"]
                             if agent_id in {"main", "root"} and report["recipient_id"] == "parent":
                                 if not any(m.get("agent_id") == sender and m.get("turn_id") == turn_id and m["content"] == report["content"] for m in self.messages):
-                                    self.append("assistant", report["content"], turn_id=turn_id, agent_id=sender, source="agent", status="completed")
+                                    self.append("assistant", report["content"], turn_id=turn_id, agent_id=sender, source="agent", status="completed",
+                                                sender_id=sender, recipient_id=report["recipient_id"])
                             elif agent_id not in {"main", "root"}:
-                                self.append("user", report["content"], **common, source="agent", status="completed")
+                                self.append("user", report["content"], **common, source="agent", status="completed",
+                                            sender_id=sender, recipient_id=report["recipient_id"])
                         continue
                     if text:
                         self.append(

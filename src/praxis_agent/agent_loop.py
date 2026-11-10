@@ -94,18 +94,21 @@ def run_model_loop(
         mcp_catalog = agent.mcp_catalog() if agent.mcp_catalog else ""
         if mcp_catalog:
             transient_items += ({"role": "developer", "content": mcp_catalog},)
-        if agent.collaboration is not None:
-            transient_items += (agent.collaboration.context_item(),)
         recovery_rounds = 0
         recovery_summary = None
         response_retries = 0
         response_hint = ()
         while True:
             request_number += 1
+            team_items = ()
+            if agent.collaboration is not None:
+                team_items = (agent.collaboration.context_item(),)
+            elif agent.team_context is not None:
+                team_items = (agent.team_context(),)
             context_view = run_operation(
                 "context",
                 lambda handle: agent.context_manager.build_view(
-                    agent._history, transient_items=transient_items + response_hint,
+                    agent._history, transient_items=transient_items + team_items + response_hint,
                     tool_definitions=tool_definitions,
                     summary_context=summary_context,
                 ),

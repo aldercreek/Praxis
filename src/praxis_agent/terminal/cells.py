@@ -241,7 +241,7 @@ _TOOL_LABELS = {
     "delete": "Prune messages", "compress": "Compact context",
     "search_history": "Search history", "read_history": "Read history",
     "spawn_agent": "Create subagent", "send_messages": "Send collaboration messages",
-    "wait_agents": "Wait for subagents", "close_agent": "Close subagent", "send_message": "Report results",
+    "wait_agents": "Wait for collaboration", "close_agent": "Close subagent", "send_message": "Send collaboration message",
 }
 
 
@@ -253,10 +253,16 @@ def tool_description(name: str, arguments: Mapping[str, object]) -> tuple[str, s
         return label, str(arguments.get("session_id", ""))
     if name == "spawn_agent":
         return label, str(arguments.get("task_summary") or arguments.get("task", ""))
-    if name in {"wait_agents", "send_messages"}:
-        items = arguments.get("agent_ids" if name == "wait_agents" else "messages", [])
-        unit = "agent" if name == "wait_agents" else "message"
-        return label, f"{len(items)} {unit}{'' if len(items) == 1 else 's'}"
+    if name == "wait_agents":
+        if "agent_ids" in arguments:  # Saved calls from before unfiltered waits.
+            items = arguments["agent_ids"]
+            return label, f"{len(items)} agent{'' if len(items) == 1 else 's'}"
+        return label, f"up to {arguments.get('timeout', 60)}s"
+    if name == "send_messages":
+        items = arguments.get("messages", [])
+        return label, f"{len(items)} message{'' if len(items) == 1 else 's'}"
+    if name == "send_message":
+        return label, str(arguments.get("target", "parent"))
     if name in {"delete", "compress"}:
         count = len(arguments.get("message_ids", []))
         return label, f"{count} message{'' if count == 1 else 's'}"
@@ -379,6 +385,15 @@ def _operation_summary(call: ToolBlock) -> list[Text] | None:
     statuses = {"queued": "Queued", "running": "Running", "idle": "Turn finished",
                 "closing": "Closing", "closed": "Closed"}
     if call.name == "wait_agents":
+        if "reason" in result:
+            reasons = {"message": "New collaboration message", "team_changed": "Team membership or responsibilities changed",
+                       "user_input": "New user input", "timeout": "Wait timed out", "closed": "Collaboration closed"}
+            lines = [Text(reasons.get(result["reason"], str(result["reason"])))]
+            count = result.get("unread_messages", 0)
+            if count:
+                lines.append(Text(f"{count} unread collaboration message{'' if count == 1 else 's'}; Ctrl+T for details"))
+            return lines
+        # Keep historical results readable after the tool contract changes.
         lines = [Text(f"{statuses.get(agent['status'], agent['status'])} · {agent.get('task') or agent['agent_id']}")
                  for agent in result.get("agents", [])]
         count = len(result.get("messages", []))

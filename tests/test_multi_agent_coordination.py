@@ -65,11 +65,12 @@ def test_snapshot_counts_successful_compactions_and_freezes_time(monkeypatch):
         wait_idle(runtime, agent_id)
         clock[0] = 500
         assert snapshot(runtime)[0]["elapsed_seconds"] == 12
-        ended = runtime.wait_agents([agent_id], 0, lambda: None)
-        assert "run ended" in ended["messages"][0]["content"]
-        assert "does not imply task completion" in ended["messages"][0]["content"]
-        assert "context" not in ended["agents"][0]
-        assert "compaction_count" not in ended["agents"][0]
+        ended = runtime.wait_agents(0, lambda: None)
+        assert ended["reason"] == "message"
+        received = []
+        runtime.receive("parent", received.extend)
+        assert "run ended" in str(received)
+        assert "does not imply task completion" in str(received)
         runtime.send_many([{"agent_id": agent_id, "content": "Only handle A", "task_summary": "Scope A"}])
         assert resumed.wait(5)
         row = snapshot(runtime)[0]
@@ -150,9 +151,12 @@ def test_actual_agent_mail_wakes_wait_then_idle_resumes_with_history(tmp_path):
     runtime = AgentRuntime(factory, MultiAgentConfig())
     try:
         agent_id = runtime.spawn("Investigate A and B", "A and B", working_directory=".")["agent_id"]
-        response = runtime.wait_agents([agent_id], 5, lambda: None)
-        assert "Please split B" in response["messages"][0]["content"]
-        assert response["agents"][0]["status"] == "running"
+        response = runtime.wait_agents(5, lambda: None)
+        assert response["reason"] == "message"
+        received = []
+        runtime.receive("parent", received.extend)
+        assert "Please split B" in str(received)
+        assert runtime.handles[agent_id].status == AgentStatus.RUNNING
         assert runtime.handles[agent_id].context_status is not None
         final_allowed.set()
         wait_idle(runtime, agent_id)
@@ -187,6 +191,6 @@ def test_tool_task_labels_validate_without_changing_ordinary_mail(tmp_path):
         assert snapshot(runtime)[0]["task"] == "Short scope"
         runtime.close_agent(agent_id)
         assert snapshot(runtime) == []
-        assert runtime.wait_agents([agent_id], 0, lambda: None)["agents"][0]["status"] == "closed"
+        assert runtime.handles[agent_id].status == AgentStatus.CLOSED
     finally:
         runtime.shutdown(lambda: None)
