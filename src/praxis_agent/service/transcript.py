@@ -20,11 +20,20 @@ def content_text(content) -> str:
     return ""
 
 
-def tool_result_status(result: dict, previous: str = "") -> str:
+def tool_result_status(result: dict, previous: str = "", tool_name: str = "") -> str:
     output = result.get("output", "")
     structured = result.get("structured_output") or (
         output if isinstance(output, dict) else {}
     )
+    if tool_name == "run_code":
+        code = structured
+        if not code and isinstance(output, str):
+            try:
+                code = json.loads(output)
+            except (ValueError, TypeError):
+                code = {}
+        if isinstance(code, dict) and code.get("error_kind") == "cancelled":
+            return "cancelled"
     if structured.get("status") == "running":
         return "running"
     if structured.get("status") == "cancelled" or (
@@ -100,7 +109,7 @@ class Transcript:
                     else json.dumps(output, ensure_ascii=False)
                 )
                 message["status"] = (
-                    tool_result_status(result) if isinstance(result, dict) else "failed"
+                    tool_result_status(result, tool_name=message.get("tool_name", "")) if isinstance(result, dict) else "failed"
                 )
                 message["tool_finished"] = True
 
@@ -204,7 +213,7 @@ class Transcript:
                 result = data["result"]
                 message.update(
                     content=result["output"],
-                    status=tool_result_status(result, message["status"]),
+                    status=tool_result_status(result, message["status"], message.get("tool_name", "")),
                     tool_finished=True,
                 )
                 if result.get("structured_output"):

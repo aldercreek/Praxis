@@ -1,4 +1,4 @@
-"""Bounded code-output previews with complete overflow logs on disk."""
+"""Bounded code-output previews and capped overflow logs on disk."""
 
 from pathlib import Path
 from typing import TextIO
@@ -8,6 +8,7 @@ from uuid import uuid4
 _HEAD_CHARS = 6_000
 _TAIL_CHARS = 24_000
 _PREVIEW_CHARS = _HEAD_CHARS + _TAIL_CHARS
+_LOG_CHARS = 10_000_000
 
 
 class _Stream:
@@ -19,6 +20,7 @@ class _Stream:
         self.error = ""
         self._file: TextIO | None = None
         self._created = False
+        self._written = 0
 
     def append(self, text: str) -> None:
         if not text:
@@ -39,10 +41,13 @@ class _Stream:
                 self._file = self.path.open("x", encoding="utf-8", newline="")
                 self._created = True
                 self._file.write(previous)
+                self._written = len(previous)
             if self._file is not None:
                 # Bound the temporary UTF-8 encoding buffer even for one huge print.
-                for offset in range(0, len(text), 65_536):
-                    self._file.write(text[offset:offset + 65_536])
+                end = min(len(text), _LOG_CHARS - self._written)
+                for offset in range(0, end, 65_536):
+                    self._file.write(text[offset:min(offset + 65_536, end)])
+                self._written += end
         except (OSError, UnicodeError) as error:
             self.error = f"{type(error).__name__}: {error}"
             raise
@@ -67,7 +72,8 @@ class _Stream:
         return {
             "path": str(self.path), "total_chars": self.total_chars,
             "omitted_chars": max(0, self.total_chars - _PREVIEW_CHARS),
-            "complete": not self.error,
+            "complete": not self.error and self.total_chars <= _LOG_CHARS,
+            "saved_chars": self._written,
         }
 
 

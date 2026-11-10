@@ -1,4 +1,4 @@
-"""Exercise the shipped Monty worker through Praxis's real tool executor."""
+"""Exercise the shipped CPython worker through Praxis's real tool executor."""
 import asyncio
 import json
 import textwrap
@@ -21,7 +21,7 @@ def code_tools(tmp_path):
     registry = create_default_registry()
     registry.register(runtime.tool())
     executor = ToolCallExecutor(
-        registry, ToolContext(tmp_path, RunState("Monty runtime")),
+        registry, ToolContext(tmp_path, RunState("CPython runtime")),
         publish_event=lambda event: None,
     )
 
@@ -98,14 +98,14 @@ def test_functions_and_mutable_data_persist_in_the_same_worker(code_tools):
     assert run("total()")["result"] == 6
 
 
-def test_type_check_rejects_script_before_any_tool_runs(code_tools, tmp_path):
+def test_syntax_error_rejects_script_before_any_tool_runs(code_tools, tmp_path):
     run, _, _ = code_tools
     rejected = run('''
         call_tool("write_file", {"relative_path": "must-not-exist.txt", "content": "bad"})
-        count: int = "invalid"
+        if invalid syntax
     ''', success=False)
 
-    assert rejected["error_kind"] == "type_check"
+    assert rejected["error_kind"] == "syntax"
     assert rejected["phase"] == "preflight"
     assert rejected["state_lost"] is False
     assert rejected["calls"] == []
@@ -130,17 +130,17 @@ def test_runtime_failure_keeps_partial_mutations_and_external_effects(code_tools
 
 @pytest.mark.parametrize("expression", ['{(1, 2): "value"}', '{b"key": "value"}', '{1, 2}', "b'value'"])
 @pytest.mark.parametrize("existing_worker", [False, True])
-def test_result_encoding_failure_keeps_executed_changes(code_tools, tmp_path, expression, existing_worker):
+def test_non_json_result_has_text_fallback_and_keeps_changes(code_tools, tmp_path, expression, existing_worker):
     run, _, _ = code_tools
     if existing_worker:
         run("saved: int = 1")
     failed = run('saved = 2\n'
                  'print("before encoding")\n'
                  'call_tool("write_file", {"relative_path": "completed.txt", "content": "done"})\n'
-                 + expression, success=False)
+                 + expression)
 
-    assert failed["error_kind"] == "serialize"
-    assert failed["phase"] == "serialize"
+    assert isinstance(failed["result"], str)
+    assert failed["result"]
     assert failed["state_lost"] is False
     assert failed["worker_created"] is (not existing_worker)
     assert failed["stdout"] == "before encoding\n"
@@ -362,7 +362,7 @@ def test_output_file_failure_keeps_executed_changes(code_tools, tmp_path):
     assert run("values")["result"] == [1, 2]
 
 
-def test_search_pages_through_real_monty_tools(code_tools, tmp_path):
+def test_search_pages_through_real_python_tools(code_tools, tmp_path):
     run, _, _ = code_tools
     (tmp_path / "search.txt").write_bytes(b"before\nhit hit\ncontext\nhit\nend\n")
     result = run('''

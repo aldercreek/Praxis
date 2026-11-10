@@ -1,4 +1,4 @@
-"""Explicit parallel calls through Monty and the real tool executor."""
+"""Explicit parallel calls through CPython and the real tool executor."""
 import asyncio
 import json
 import threading

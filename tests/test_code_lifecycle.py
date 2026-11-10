@@ -141,8 +141,8 @@ def test_calls_within_one_agent_are_serialized(context, tmp_path):
         runtime.close()
 
 
-def test_compute_timeout_discards_only_affected_worker(context, tmp_path):
-    runtime = CodeRuntime(CodeConfig(compute_seconds=0.1), output_dir=tmp_path / "logs")
+def test_execution_timeout_discards_only_affected_worker(context, tmp_path):
+    runtime = CodeRuntime(CodeConfig(execution_seconds=1), output_dir=tmp_path / "logs")
     try:
         run(runtime, context, "value = 1")
         run(runtime, context, "value = 99", "other")

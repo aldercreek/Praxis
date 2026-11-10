@@ -123,9 +123,12 @@ def create_default_agent(
 
     from praxis_agent.tools.code import CodeRuntime
 
-    code_runtime = CodeRuntime()
+    code_runtime = CodeRuntime(
+        environment_dir=lambda: Path.home() / ".praxis" / "python" / agent.session_id,
+    )
     agent.tool_registry.register(code_runtime.tool("parent"))
-    agent.reset_code_worker = lambda: code_runtime.release_agent("parent")
+    agent.reset_code_worker = code_runtime.reset_session
+    agent.code_turn = lambda: code_runtime.agent_turn("parent")
     agent.close_callbacks = (code_runtime.close, *agent.close_callbacks)
     agent.tool_registry.register(
         create_skill_tool(skills, max_chars=config.context_policy.max_tool_output_chars)
@@ -197,6 +200,7 @@ def create_default_agent(
             name=agent_id,
             mcp_catalog=mcp.catalog,
             reset_code_worker=lambda: code_runtime.release_agent(agent_id),
+            code_turn=lambda: code_runtime.agent_turn(agent_id),
             event_sink=sink,
             max_parallel_tools=config.max_parallel_tools,
             execution_control=control,

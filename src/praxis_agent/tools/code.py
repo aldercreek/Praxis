@@ -1,42 +1,36 @@
-"""Python composition of the current agent's tools using Monty."""
+"""Persistent native CPython execution and composition of the current agent's tools."""
 from __future__ import annotations
 
 import asyncio
 import json
 import math
 import os
+import sys
 import threading
 import time
-from contextlib import AsyncExitStack
+from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from praxis_agent.execution import ExecutionStopped, Run, await_cancellable, current_handle, current_run, run_operation
 from praxis_agent.tools.code_output import CodeOutput
+from praxis_agent.tools.python_kernel import PythonError, PythonKernel
 from praxis_agent.tools.registry import Tool, ToolContext, ToolResult
-
-if TYPE_CHECKING:
-    from pydantic_monty import AsyncMontySession
-
-
-_TOOL_STUBS = """from typing import Any
-def call_tool(name: str, arguments: dict[str, Any]) -> Any: ...
-def call_parallel_tools(requests: list[dict[str, Any]]) -> list[dict[str, Any]]: ...
-"""
 
 
 @dataclass(frozen=True)
 class CodeConfig:
-    # Per-feed interpreter compute time; host/tool waiting is excluded.
-    compute_seconds: float = 5.0
+    # Wall time per execution, including tool waits; kernel startup is separate.
+    execution_seconds: float = 120.0
+    idle_seconds: float = 900.0
     queue_seconds: float = 30.0
     max_parallel_tools: int = 16
 
     def __post_init__(self):
-        for value in (self.compute_seconds, self.queue_seconds):
+        for value in (self.execution_seconds, self.queue_seconds, self.idle_seconds):
             if not math.isfinite(value) or value <= 0:
-                raise ValueError("Monty limits must be finite positive numbers")
+                raise ValueError("Python limits must be finite positive numbers")
         if type(self.max_parallel_tools) is not int or self.max_parallel_tools < 1:
             raise ValueError("max_parallel_tools must be a positive integer")
 
@@ -48,7 +42,8 @@ class CodeConfig:
             return os.getenv(name, "").strip() or str(default)
 
         return cls(
-            compute_seconds=float(value("PRAXIS_CODE_COMPUTE_SECONDS", defaults.compute_seconds)),
+            execution_seconds=float(value("PRAXIS_CODE_EXECUTION_SECONDS", defaults.execution_seconds)),
+            idle_seconds=float(value("PRAXIS_CODE_IDLE_SECONDS", defaults.idle_seconds)),
             queue_seconds=float(value("PRAXIS_CODE_QUEUE_SECONDS", defaults.queue_seconds)),
             max_parallel_tools=int(value("PRAXIS_CODE_MAX_PARALLEL_TOOLS", defaults.max_parallel_tools)),
         )
@@ -56,71 +51,38 @@ class CodeConfig:
 
 @dataclass(eq=False)
 class _AgentWorker:
-    """One agent's execution lock and lazily opened Monty subprocess."""
+    """One agent's execution lock and lazily opened CPython kernel."""
 
     lock: threading.Lock = field(default_factory=threading.Lock)
     released: threading.Event = field(default_factory=threading.Event)
     closed: threading.Event = field(default_factory=threading.Event)
-    resources: AsyncExitStack | None = None
-    session: AsyncMontySession | None = None
-    process_handle: int | None = None
+    session: PythonKernel | None = None
+    last_used: float = field(default_factory=time.monotonic)
 
-    async def open(self, config: CodeConfig) -> None:
-        from pydantic_monty import AsyncMonty
-
-        resources = AsyncExitStack()
+    async def open(self, workspace: Path, python: str) -> None:
+        self.session = PythonKernel()
         try:
-            pool = await resources.enter_async_context(AsyncMonty(
-                min_processes=0, max_processes=1,
-                request_timeout=config.compute_seconds + 1,
-            ))
-            session = await resources.enter_async_context(pool.checkout(
-                script_name="praxis_run_code.py",
-                limits={
-                    "max_feed_duration_secs": config.compute_seconds,
-                    # Omission/None restores Monty's 1000 suspension default.
-                    "max_suspensions": 2**64 - 1,
-                },
-                type_check=True, type_check_stubs=_TOOL_STUBS,
-                type_check_format="concise",
-            ))
-            if os.name == "nt":
-                import _winapi
-
-                # Keep the exact process identity even if the SDK drops its handle.
-                self.process_handle = _winapi.OpenProcess(0x100000, False, session.worker_pid)
+            await self.session.open(workspace, python)
         except BaseException:
-            await resources.aclose()
+            self.session = None
             raise
-        self.resources, self.session = resources, session
 
     async def close(self) -> None:
-        resources, self.resources = self.resources, None
-        process_handle, self.process_handle = self.process_handle, None
-        self.session = None
-        try:
-            if resources is not None:
-                await resources.aclose()
-            if process_handle is not None:
-                import _winapi
-
-                # Monty's pool exit may precede Windows' process-exit signal.
-                # Wait off the shared event loop so other agents can continue.
-                status = await asyncio.to_thread(_winapi.WaitForSingleObject, process_handle, 10000)
-                if status == _winapi.WAIT_TIMEOUT:
-                    raise TimeoutError("Monty worker did not exit after pool cleanup")
-        finally:
-            if process_handle is not None:
-                import _winapi
-
-                _winapi.CloseHandle(process_handle)
+        session, self.session = self.session, None
+        if session is not None:
+            await session.close()
 
 
 class CodeRuntime:
     """One resident worker per agent, sharing only the host event loop."""
 
-    def __init__(self, config: CodeConfig | None = None, *, output_dir: Path | None = None):
+    def __init__(self, config: CodeConfig | None = None, *, output_dir: Path | None = None,
+                 environment_dir: Path | Callable[[], Path] | None = None):
         self.config = config or CodeConfig.from_env()
+        self._environment_dir = environment_dir
+        self._environment_lock = threading.Lock()
+        self._python = None
+        self._busy_agents: dict[str, int] = {}
         self._output_dir = (output_dir if output_dir is not None else
                             Path.home() / ".praxis" / "outputs" / "code").resolve()
         self._lock = threading.Lock()
@@ -133,6 +95,76 @@ class CodeRuntime:
         self._close_done = threading.Event()
         self._active: dict[Run, tuple[_AgentWorker | None, threading.Event]] = {}
         self._workers: dict[str, _AgentWorker] = {}
+
+    def _get_python(self):
+        with self._environment_lock:
+            if self._python is None:
+                if self._environment_dir is None:
+                    self._python = sys.executable
+                else:
+                    import venv
+                    import sysconfig
+                    import importlib.util
+
+                    # Reuse the shipped kernel libraries; installs through this
+                    # interpreter go to the session venv, not Praxis's environment.
+                    root = Path(self._environment_dir() if callable(self._environment_dir)
+                                else self._environment_dir)
+                    # Reuse the runtime's pip too, avoiding ensurepip's costly
+                    # per-session bootstrap. pip still targets this venv's prefix.
+                    venv.EnvBuilder(with_pip=importlib.util.find_spec("pip") is None,
+                                    system_site_packages=False).create(root)
+                    packages = root / ("Lib/site-packages" if os.name == "nt" else
+                                       f"lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages")
+                    # venv-of-venv inherits the base installation, not the launching
+                    # venv. Explicitly expose Praxis's shipped runtime dependencies.
+                    (packages / "praxis-runtime.pth").write_text(
+                        f"import site; site.addsitedir({sysconfig.get_path('purelib')!r})\n", encoding="utf-8")
+                    self._python = str(root / ("Scripts/python.exe" if os.name == "nt" else "bin/python"))
+            return self._python
+
+    @contextmanager
+    def agent_turn(self, agent_id):
+        # Keep variables alive while the model thinks or other tools run.
+        with self._lock:
+            self._busy_agents[agent_id] = self._busy_agents.get(agent_id, 0) + 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._busy_agents[agent_id] -= 1
+                if self._busy_agents[agent_id] == 0:
+                    del self._busy_agents[agent_id]
+                if worker := self._workers.get(agent_id):
+                    worker.last_used = time.monotonic()
+
+    def reap_idle(self):
+        # Remove candidates atomically so a new call never attaches to an
+        # expiring worker. New work can immediately create a fresh kernel.
+        with self._lock:
+            if self._closed.is_set():
+                return
+            active = {worker for worker, _ in self._active.values()}
+            expired = [(key, worker) for key, worker in self._workers.items()
+                       if key not in self._busy_agents and worker not in active
+                       and not worker.released.is_set()
+                       and time.monotonic() - worker.last_used >= self.config.idle_seconds]
+            for key, worker in expired:
+                worker.released.set()
+                del self._workers[key]
+        for _, worker in expired:
+            try:
+                asyncio.run_coroutine_threadsafe(worker.close(), self._loop).result()
+            finally:
+                worker.closed.set()
+
+    def reset_session(self):
+        with self._lock:
+            agents = tuple(self._workers)
+        for agent_id in agents:
+            self.release_agent(agent_id)
+        with self._environment_lock:
+            self._python = None
 
     def _ensure_loop(self):
         with self._lock:
@@ -151,10 +183,15 @@ class CodeRuntime:
             self._loop = asyncio.get_running_loop()
             self._stopping = asyncio.Event()
             self._ready.set()
-            await self._stopping.wait()
+            while not self._stopping.is_set():
+                try:
+                    await asyncio.wait_for(self._stopping.wait(), timeout=min(30, self.config.idle_seconds))
+                except TimeoutError:
+                    await asyncio.to_thread(self.reap_idle)
 
         try:
-            asyncio.run(serve())
+            with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop if os.name == "nt" else None) as runner:
+                runner.run(serve())
         except BaseException as error:
             self._startup_error = error
         finally:
@@ -202,7 +239,7 @@ class CodeRuntime:
                 scope.cancel()
             for _, done in active:
                 done.wait()
-            if worker.resources is not None:
+            if worker.session is not None:
                 asyncio.run_coroutine_threadsafe(worker.close(), self._loop).result()
         finally:
             with self._lock:
@@ -217,37 +254,30 @@ class CodeRuntime:
         return Tool(
             name="run_code",
             description=(
-                "Compose allowed tools and process returned data in a private official Monty 1.2.0 Python-subset session. "
-                "Built-in json, csv and tomllib can parse text returned by tools. "
-                "For project imports/tests, installed libraries or subprocesses use run_command if available; "
-                "otherwise report the capability gap. Monty cannot execute host project modules. "
-                "Use call_tool for file tools, active MCP tools and history within the current role; "
-                "commands, management tools and nested run_code are unavailable. "
-                "Use call_parallel_tools([{name, arguments}, ...]) for caller-selected independent calls: "
-                "the host runs them concurrently without checking parallel_safe and returns ordered "
-                "{success, output} or {success, error} entries; individual failures do not stop the batch. "
-                "No host filesystem mounts or external modules are configured. "
-                "This agent owns one resident worker: variables/functions persist across calls, including "
-                "changes made before ordinary errors. There are no snapshots or rollback. Cancellation during "
-                "execution, resource exhaustion or worker failure discards this agent's environment; "
-                "state_lost=true means its variables must be rebuilt. External effects are never undone. "
-                "Idle agents retain their workers; closing an agent, clearing the conversation or restarting "
-                "discards its variables. Returns the final expression, stdout/stderr previews and tool-call records. "
-                "Each stream retains 30000 characters (first 6000, last 24000); "
-                "overflow logs are saved in full at output_files paths, readable with read_file. "
-                "See the monty skill for usage and recovery details."
+                "Execute full Python in this agent's persistent native CPython kernel. "
+                "Import project modules and installed packages, and read/write native filesystem paths directly. "
+                "Use call_tool(name, arguments) for supported file/history tools and activated MCP tools. "
+                "It returns the tool's structured value or text directly; read_file returns a dict with text and paging fields. "
+                "Commands, management tools and nested run_code are unavailable through call_tool. "
+                "call_parallel_tools([{name, arguments}, ...]) returns a LIST of ordered {success, output/error} entries; "
+                "iterate that list directly. Only the outer run_code response wraps its final expression in result. "
+                "Each agent has separate variables; agents in one session share the Python dependency environment. "
+                "Calls within one agent run sequentially. Ordinary errors preserve completed changes. "
+                "Cancellation, execution timeout or process failure kills this kernel and its descendants; "
+                "state_lost=true means variables must be rebuilt. External effects are never rolled back. "
+                "Idle reclamation and agent close also discard variables; worker_created=true signals fresh state. "
+                "Returns the final expression as JSON where possible, otherwise a text preview, plus stdout/stderr. "
+                "Stream previews retain first 6000 and last 24000 characters; capped overflow logs are in output_files. "
+                "This is native execution without sandbox isolation. See the python skill for usage."
             ),
             parameters={"type": "object", "properties": {
-                "code": {"type": "string", "minLength": 1, "description": "Python for Monty 1.2.0, type-checked before execution. Use call_tool(name, arguments) or call_parallel_tools([{name, arguments}, ...]). The final expression is returned; print only needed output."}},
+                "code": {"type": "string", "minLength": 1,
+                         "description": "Python source. Variables persist; final expression is returned. call_tool and call_parallel_tools are predefined."}},
                 "required": ["code"], "additionalProperties": False},
             handler=execute,
         )
 
     def run(self, context: ToolContext, code: str, *, agent_id: str = "parent") -> ToolResult:
-        from pydantic_monty import (
-            MontyCrashedError, MontyError, MontyRuntimeError, MontySyntaxError, MontyTypingError,
-        )
-
         worker = None
         agent_acquired = False
         worker_created = False
@@ -345,24 +375,19 @@ class CodeRuntime:
                 check()
                 if worker.session is None:
                     phase = "startup"
-                    await worker.open(self.config)
+                    await worker.open(context.workspace, await asyncio.to_thread(self._get_python))
                     worker_created = True
                 try:
                     check()
                     phase = "execute"
-                    return await worker.session.feed_run(code, external_lookup={
+                    return await worker.session.execute(code, {
                         "call_tool": call_tool, "call_parallel_tools": call_parallel_tools},
-                                                         print_callback=capture)
-                except (MontySyntaxError, MontyTypingError):
+                        capture, self.config.execution_seconds)
+                except PythonError:
                     raise
-                except BaseException as error:
-                    inner = error.exception() if isinstance(error, MontyError) else error
-                    recoverable = (isinstance(error, MontyRuntimeError)
-                                   and not isinstance(inner, (MemoryError, TimeoutError))
-                                   and not str(inner).startswith("suspension limit "))
-                    if not recoverable:
-                        state_lost = True
-                        await worker.close()
+                except BaseException:
+                    state_lost = True
+                    await worker.close()
                     raise
 
             async def owned_call():
@@ -399,34 +424,28 @@ class CodeRuntime:
             return pending
         except Exception as error:
             output.close()
-            inner = error.exception() if isinstance(error, MontyError) else error
-            detail = (error.display() if isinstance(error, (MontyRuntimeError, MontySyntaxError, MontyTypingError))
-                      else f"{type(error).__name__}: {error}")
+            detail = str(error) if isinstance(error, PythonError) else f"{type(error).__name__}: {error}"
             kind = "runtime" if phase == "execute" else phase
             if isinstance(error, ExecutionStopped):
                 kind = "cancelled"
             elif output.errors:
                 kind = "output"
-            elif isinstance(error, MontyTypingError):
-                kind = "syntax" if "[invalid-syntax]" in detail else "type_check"
-                phase = "preflight"
-            elif isinstance(error, MontySyntaxError):
-                kind, phase = "syntax", "preflight"
-            elif isinstance(error, MontyCrashedError):
-                kind = "timeout" if error.timed_out else "worker_crash"
-            elif isinstance(error, MontyRuntimeError):
-                message = str(inner)
-                if any(call.get("error") == message for call in calls):
+            elif isinstance(error, PythonError):
+                if error.name in ("SyntaxError", "IndentationError", "TabError"):
+                    kind, phase = "syntax", "preflight"
+                elif any(call.get("error") and call["error"] in detail for call in calls):
                     kind = "tool"
-                elif (isinstance(inner, (MemoryError, TimeoutError))
-                      or message.startswith("suspension limit ")):
-                    kind = "resource"
+            elif isinstance(error, TimeoutError):
+                kind = "timeout"
+            elif isinstance(error, ChildProcessError):
+                kind = "worker_crash"
             return response(False, error=detail, error_kind=kind,
-                            error_type=type(inner).__name__, phase=phase)
+                            error_type=error.name if isinstance(error, PythonError) else type(error).__name__, phase=phase)
         finally:
             output.close()
             unsubscribe()
             if agent_acquired:
+                worker.last_used = time.monotonic()
                 worker.lock.release()
             with self._lock:
                 self._active.pop(scope, None)

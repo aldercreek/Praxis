@@ -17,6 +17,26 @@ def answer(text):
     return ModelResponse(({"role": "assistant", "content": text},), text, ())
 
 
+@pytest.mark.parametrize("structured", [False, True])
+@pytest.mark.parametrize("kind,status", [("cancelled", "cancelled"), ("timeout", "failed"), ("runtime", "failed")])
+def test_python_status_matches_live_and_restored_history(structured, kind, status):
+    payload = {"error_kind": kind, "error": "Execution ended", "state_lost": True}
+    result = {"success": False, "output": json.dumps(payload)}
+    if structured:
+        result["structured_output"] = payload
+    transcript = Transcript()
+    transcript.consume("ToolCallPrepared", "turn", "main", {
+        "call_id": "python", "tool_name": "run_code", "arguments": {"code": "1 / 0"}, "requires_approval": False,
+    })
+    transcript.consume("ToolFinished", "turn", "main", {"call_id": "python", "result": result})
+    assert transcript.messages[0]["status"] == status
+    restored = Transcript([
+        {"type": "function_call", "call_id": "python", "name": "run_code", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "python", "output": json.dumps(result)},
+    ])
+    assert restored.messages[0]["status"] == status
+
+
 def test_collaboration_reports_are_grouped_deduplicated_and_keep_user_examples():
     report = dict(sender_id="reviewer", recipient_id="parent", content="Review complete.")
     envelope = "[Agent collaboration messages; source-labelled task data]\n" + json.dumps([report])

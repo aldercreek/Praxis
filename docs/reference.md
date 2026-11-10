@@ -76,7 +76,7 @@ Cancelling a turn stops commands created in that turn and commands it is current
 
 The parent has `spawn_agent`, `send_messages`, `wait_agents`, and `close_agent`. Workers use `send_message` to report to the parent and do not receive spawning tools by default.
 
-Each worker has its own history, plan, context, and Monty state. It inherits model and approval configuration. `spawn_agent` requires an existing working directory; Praxis does not automatically create worktrees, copy files, or merge changes. Coordinate file ownership and integration explicitly.
+Each worker has its own history, plan, context, and Python state. It inherits model and approval configuration. `spawn_agent` requires an existing working directory; Praxis does not automatically create worktrees, copy files, or merge changes. Coordinate file ownership and integration explicitly.
 
 Messages to idle workers start work; running workers receive them at execution boundaries. `wait_agents` waits for new messages, completion, or a timeout of at most 60 seconds. A parent cannot finalize while workers are queued, running, or closing. `close_agent` cancels and releases the worker without deleting its files. `PRAXIS_AGENT_MAX_WORKERS` defaults to 8; additional tasks wait in the worker pool.
 
@@ -120,23 +120,26 @@ The model catalog controls image/PDF input capabilities. Unknown models disable 
 
 Skills are discovered from packaged `builtin_skills`, `~/.agents/skills`, and the workspace's `.agents/skills`, with later locations overriding earlier names. Each `<name>/SKILL.md` needs YAML frontmatter with a matching `name` and a `description`. Names are at most 64 characters; descriptions are at most 1,024 characters.
 
-Only names and descriptions load initially. `load_skill(name, offset=0, version="")` reads the content in pages. Follow its cursor/version, restart if the file changes, and resolve referenced files using the returned resource directory. The bundled `monty` skill documents programmatic tool composition.
+Only names and descriptions load initially. `load_skill(name, offset=0, version="")` reads the content in pages. Follow its cursor/version, restart if the file changes, and resolve referenced files using the returned resource directory. The bundled `python` skill documents programmatic tool composition.
 
-## Programmatic tools with Monty
+## Persistent Python and programmatic tools
 
-Praxis uses the official `pydantic-monty==1.2.0` package. Each agent lazily starts its own persistent worker; variables and functions are reused within that process. There are no saved worker snapshots or shared process-pool slots.
+`run_code(code)` runs native CPython through `ipykernel` and `jupyter_client`. Each agent starts one kernel on first use and retains variables/functions across calls. Different agents have separate process memory; agents in the same session share a lazy virtual environment under `~/.praxis/python/<session-id>/`. The environment inherits Praxis's installed runtime libraries; use `sys.executable -m pip` to install additional session packages. No Docker, WSL, mounts or sandbox restrictions are involved. Project imports and absolute host paths work directly.
 
-`run_code(code)` can use `call_tool` for supported file/history tools and activated MCP tools. It cannot invoke shell commands, management tools, or nested `run_code`. Use `run_command` for project imports, third-party libraries, and tests. Praxis does not mount a filesystem or configure Monty `external_modules`; built-in `json`, `csv`, and `tomllib` can parse tool results.
+Praxis manages kernels directly. Jupyter/ZeroMQ carries code, results and streams; an independent authenticated loopback TCP channel carries tool requests and replies. Execution IDs reject callbacks after completion. Tool callbacks run in the original execution/cancellation context and use existing approvals and MCP connections. The loopback token is routing protection, not a security sandbox.
 
-`call_parallel_tools([{name, arguments}, ...])` runs explicit independent calls concurrently, with permissions, validation, and approval still applied. The default concurrency is 16; results preserve input order and contain either `{success: true, output}` or `{success: false, error}`. One failure does not retry or cancel unrelated items. Cancellation stops dispatch and waits for started work to clean up; external side effects are not rolled back.
+`call_tool(name, arguments)` calls supported file/history tools and activated MCP tools. Shell commands, management tools and recursive `run_code` remain unavailable through this function. `call_parallel_tools([{name, arguments}, ...])` runs explicit independent calls concurrently, applies normal validation/approval, and returns ordered `{success, output}` or `{success, error}` entries. One failure does not retry or cancel unrelated items.
 
-Ordinary execution or serialization failures do not roll back interpreter variables. Cancellation, resource exhaustion, or worker failure releases that worker and returns `state_lost=true`; the next call starts fresh without replaying code. Praxis sets no Monty memory budget and uses Monty's maximum supported suspension counter.
+Calls within one agent are serialized. Ordinary Python errors preserve partial variable/file changes. Cancellation, wall-time timeout or kernel death kills that kernel's process tree, cancels associated host tool/MCP operations and waits for their cleanup. Remote cancellation is best effort; already-completed effects are not undone. `state_lost=true` requires rebuilding variables; Praxis never automatically replays code. The next call starts a fresh kernel. Non-JSON final expressions return a bounded text representation; JSON results larger than 256,000 characters also fall back to a preview.
 
-Each stdout/stderr preview retains at most 30,000 Python characters: the first 6,000 and last 24,000. Longer output is saved as UTF-8 under `~/.praxis/outputs/code/`; `output_files` reports the path and completeness. Files remain available for history references after a session closes.
+Idle kernels are reclaimed after 15 minutes. An entire active agent turn (including model thinking and tool waits) holds a lease, so gaps between code calls do not count as idle. Agent close or conversation reset terminates kernels. Dependency files remain on disk; variables do not survive reclamation or application restart. There are no pressure-based eviction, global concurrency budgets or CPU/memory quotas in this version.
+
+Each stdout/stderr preview retains the first 6,000 and last 24,000 characters. Overflow logs under `~/.praxis/outputs/code/` save at most 10 million characters per stream; `output_files` reports `saved_chars`, `total_chars` and `complete`. Logs remain available for history references; there is no automatic aggregate disk-retention cleanup.
 
 | Variable | Default | Meaning |
 | --- | ---: | --- |
-| `PRAXIS_CODE_COMPUTE_SECONDS` | 5 | Compute time per interpreter advance, excluding tool waits |
+| `PRAXIS_CODE_EXECUTION_SECONDS` | 120 | Wall time per execution, including host/tool waits; startup excluded |
+| `PRAXIS_CODE_IDLE_SECONDS` | 900 | Kernel idle lifetime outside active agent turns |
 | `PRAXIS_CODE_QUEUE_SECONDS` | 30 | Wait for the same agent's previous code call |
 | `PRAXIS_CODE_MAX_PARALLEL_TOOLS` | 16 | Concurrent explicit tool calls per batch |
 

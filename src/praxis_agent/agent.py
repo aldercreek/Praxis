@@ -76,6 +76,7 @@ class Agent:
     close_callbacks: tuple[Callable[[], None], ...] = ()
     mcp_catalog: Callable[[], str] | None = None
     reset_code_worker: Callable[[], None] | None = None
+    code_turn: Callable | None = None
     command_sessions: CommandSessionManager = field(default_factory=CommandSessionManager, init=False, repr=False)
     _run_lock: Lock = field(default_factory=Lock, init=False, repr=False)
     _closed: bool = field(default=False, init=False)
@@ -129,7 +130,8 @@ class Agent:
             self.execution_control.run = scope
             if self.collaboration is not None:
                 self.collaboration.run = scope
-            return self._run(task)
+            with self.code_turn() if self.code_turn is not None else nullcontext():
+                return self._run(task)
         finally:
             self._run_lock.release()
 

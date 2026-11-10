@@ -1,4 +1,4 @@
-"""Cancellation through the real tool executor and dedicated Monty workers."""
+"""Cancellation through the real tool executor and dedicated CPython workers."""
 import json
 import threading
 import time
@@ -17,7 +17,7 @@ from praxis_agent.tools.code import CodeConfig, CodeRuntime
 
 @pytest.fixture
 def code_runtime(tmp_path):
-    runtime = CodeRuntime(CodeConfig(compute_seconds=8), output_dir=tmp_path / "code-logs")
+    runtime = CodeRuntime(CodeConfig(execution_seconds=8), output_dir=tmp_path / "code-logs")
     try:
         yield runtime
     finally:

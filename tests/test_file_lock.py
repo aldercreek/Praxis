@@ -262,7 +262,7 @@ def test_real_run_code_parallel_edits_and_whole_turn_cancel(tmp_path, waiting, c
                     assert waiting.get(timeout=5) is condition
                     if cancel:
                         scope.cancel()
-                        # The entire Monty/tool tree must drain while the file
+                        # The entire CPython/tool tree must drain while the file
                         # is STILL occupied by this unrelated holder.
                         with pytest.raises(ExecutionStopped):
                             future.result(timeout=5)

@@ -135,7 +135,7 @@ flowchart LR
 
 **Explicit outcomes.** Turns use `running`, `completed`, `cancelled`, or `failed`. A cancellation names its turn, so a delayed request cannot stop a newer turn. The first valid approval decision wins. On service restart, unfinished turns become failed, pending approvals close, and unknown tool outcomes are recorded without automatic retries.
 
-Session events currently remain in SQLite without retention cleanup. Subagent processes, background commands, and Monty variables are not restored after service restart. See the [reference](docs/reference.md) for execution boundaries and configuration.
+Session events currently remain in SQLite without retention cleanup. Subagent processes, background commands, and CPython variables are not restored after service restart. See the [reference](docs/reference.md) for execution boundaries and configuration.
 
 ## Local service
 
