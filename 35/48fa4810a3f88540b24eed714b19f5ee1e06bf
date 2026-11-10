@@ -1,0 +1,73 @@
+src/praxis_agent/builtin_skills/python/SKILL.md
+  s_1df716b35aa977::t_5514a0d3c7a32b 1-37,41,44-54
+  s_1df716b35aa977::t_3424207210b7cd 38-40,42-43
+tests/test_code_native.py
+  s_1df716b35aa977::t_0d4ce26447643c 3,21-26,41,45
+  s_1df716b35aa977::t_f0373a32e40037 1-2,4-14,16-20,27-40,42-43,46-144
+  s_1df716b35aa977::t_cc26780783d378 15
+  s_1df716b35aa977::t_23378abf967356 44,145-176
+src/praxis_agent/agent.py
+  s_1df716b35aa977::t_122bd2e1dda601 79,133-134
+tests/manual/compare_code_backends.py
+  s_1df716b35aa977::t_a89557d8736a33 98
+  s_1df716b35aa977::t_3f3a6af065c497 1-15,17-97,99-121,123-171
+  s_1df716b35aa977::t_f6cf34047252cd 16,122
+tests/test_code_lifecycle.py
+  s_1df716b35aa977::t_511db1eaac7b3d 144-145
+src/praxis_agent/tools/kernel_bootstrap.py
+  s_1df716b35aa977::t_f6cf34047252cd 8,17,19-27,29-33
+  s_1df716b35aa977::t_cc26780783d378 111,117-119
+  s_1df716b35aa977::t_62f48bc3d73b14 1-7,9-16,18,28,34-110,112-116,120-121
+src/praxis_agent/tools/code.py
+  s_1df716b35aa977::t_122bd2e1dda601 1,12,24-26,31,33,45-46,54,59-60,62-63,65,67,71-73,79,82-85,99-105,108-112,123-168,186-190,242,257-259,261,264-271,274-275,378,383,385-386,388-390,427,433-436,438-441,443,448
+  s_1df716b35aa977::t_0d4ce26447643c 107,113-116
+  s_1df716b35aa977::t_0cb9c5d791adcb 8,11,18,80
+  s_1df716b35aa977::t_2373a7f089fa3c 106,117-122,193-194
+  s_1df716b35aa977::t_3424207210b7cd 260,262-263
+src/praxis_agent/service/transcript.py
+  s_1df716b35aa977::t_fbbc64de3c79fb 23,28-36,112,216
+tests/manual/run_complex_code_tasks.py
+  s_1df716b35aa977::t_ea0b392428a0ec 227,233-235,237,245,250-251
+  s_1df716b35aa977::t_43c473fa82d33d 228,236,238
+  s_1df716b35aa977::t_7e4c96810ecd10 59,193-194,239-244,246
+  s_1df716b35aa977::t_3b53194c535b86 1-12,14-17,19-39,41-58,60-144,146-192,195-226,229-232,247-249,252-299
+tests/service/test_projection.py
+  s_1df716b35aa977::t_10b4d95c1f80b4 20-39
+tests/manual/README.md
+  s_1df716b35aa977::t_1159fbf2f2d217 1-61
+src/praxis_agent/tools/python_kernel.py
+  s_1df716b35aa977::t_0cb9c5d791adcb 215-223
+  s_1df716b35aa977::t_f7772a8c63ae15 207-208,211-213
+  s_1df716b35aa977::t_2373a7f089fa3c 13,39-40,42-49,77,80,82-84,89,91-92
+  s_1df716b35aa977::t_511db1eaac7b3d 134-136,179-184,198-199
+  s_1df716b35aa977::t_cc26780783d378 8,76,188-190
+  s_1df716b35aa977::t_67bd4efb44331a 71,116
+  s_1df716b35aa977::t_62f48bc3d73b14 1-7,9-12,14-38,41,50-57,66-70,72-75,78-79,81,86,88,90,93-115,117-133,137-178,185-187,191-197,200-206,209-210,214,224-230
+  s_1df716b35aa977::t_14b3873beab8f7 58-65,85,87
+src/praxis_agent/factory.py
+  s_1df716b35aa977::t_0cb9c5d791adcb 126-128
+  s_1df716b35aa977::t_122bd2e1dda601 130-131,203
+src/praxis_agent/tools/code_output.py
+  s_1df716b35aa977::t_67bd4efb44331a 1,11,23,44,47-50,75-76
+tests/manual/complex_code_cases.py
+  s_1df716b35aa977::t_925356feeb08a3 1-365,375-410
+  s_1df716b35aa977::t_ea0b392428a0ec 366-374
+tests/manual/probe_python_startup.py
+  s_1df716b35aa977::t_ea0b392428a0ec 1-78
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.52-trip",
+  "base_commit_sha": "3548fa4810a3f88540b24eed714b19f5ee1e06bf",
+  "prompts": {},
+  "sessions": {
+    "s_1df716b35aa977": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1a594-3686-76c3-b1b1-8ff9eddef44e",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "aldercreek <57739268+aldercreek@users.noreply.github.com>"
+    }
+  }
+}
