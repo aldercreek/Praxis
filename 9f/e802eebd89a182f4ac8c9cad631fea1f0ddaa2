@@ -1,0 +1,21 @@
+evals/multi_agent/README.md
+  s_43e924c679c1eb::t_f93ccd3a708717 12-14
+evals/multi_agent/run.py
+  s_43e924c679c1eb::t_f93ccd3a708717 19,127,197-198,206-207
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.52-trip",
+  "base_commit_sha": "9fe802eebd89a182f4ac8c9cad631fea1f0ddaa2",
+  "prompts": {},
+  "sessions": {
+    "s_43e924c679c1eb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c87b-7984-7fd1-b76c-a67eb47c6b1b",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "aldercreek <57739268+aldercreek@users.noreply.github.com>"
+    }
+  }
+}
