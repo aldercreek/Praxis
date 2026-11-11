@@ -1,157 +1,175 @@
+"""File-only configuration. Credentials are resolved only for selected models."""
+from __future__ import annotations
+
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
+from pathlib import Path
+from types import MappingProxyType
+
+import yaml
+from jsonschema import Draft202012Validator
 
 from praxis_agent.context.capacity import ContextPolicy
-from praxis_agent.context.budgets import DEFAULT_BUDGETS
-from praxis_agent.context.model_catalog import (
-    ModelLimitOverrides,
-    ModelLimits,
-    ModelInputCapabilities,
-    resolve_model_inputs,
-    resolve_model_limits,
-)
+from praxis_agent.context.model_metadata import ModelInputCapabilities, ModelLimits
+from praxis_agent.sessions.database import data_directory
 
 
-_DEFAULT_ADA_BASE_URL = (
-    "https://ada-cli-go.ctripcorp.com/coding-plan/openai/v1"
-)
-_DEFAULT_ADA_MODEL = "auto(free)"
 DEFAULT_MAX_PARALLEL_TOOLS = 4
+
+
+def _object(properties, required=()):
+    return {"type": "object", "properties": properties, "required": list(required),
+            "additionalProperties": False}
+
+
+_TEXT = {"type": "string", "pattern": r"\S"}
+_POSITIVE = {"type": "integer", "minimum": 1}
+_PARAMETERS = _object({
+    "reasoning_effort": _TEXT,
+    "temperature": {"type": "number", "minimum": 0, "maximum": 2},
+})
+_MODEL = _object({
+    "protocol": {"enum": ["responses", "chat_completions"]},
+    "base_url": {"type": "string", "pattern": r"^https?://[^\s/]+"},
+    "model": _TEXT,
+    "api_key_env": _TEXT,
+    "context_window": _POSITIVE,
+    "max_input_tokens": _POSITIVE,
+    "max_output_tokens": _POSITIVE,
+    "capabilities": _object({
+        "image_input": {"type": "boolean"}, "pdf_input": {"type": "boolean"},
+        "tool_calling": {"type": "boolean"},
+    }),
+    "parameters": _PARAMETERS,
+}, ("protocol", "base_url", "model", "context_window", "max_output_tokens"))
+_SCHEMA = _object({
+    "default_model": _TEXT,
+    "models": {"type": "object", "minProperties": 1, "propertyNames": _TEXT,
+               "additionalProperties": _MODEL},
+    "compression": _object({"model": _TEXT, "parameters": _PARAMETERS}),
+    "subagents": _object({"model": _TEXT, "max_concurrent": _POSITIVE}),
+    "timeout_seconds": {"type": "number", "exclusiveMinimum": 0},
+    "max_retries": {"type": "integer", "minimum": 0},
+    "max_parallel_tools": _POSITIVE,
+    "context": _object({f.name: {"type": "number" if "ratio" in f.name else "integer"}
+                        for f in fields(ContextPolicy) if f.name != "output_reserve_tokens"}),
+}, ("models",))
 
 
 @dataclass(frozen=True, slots=True)
 class ModelConfig:
-    """保存模型客户端及其上下文管理策略所需的配置。"""
-
-    # repr=False 可以防止调试打印配置对象时泄露密钥。
-    api_key: str = field(repr=False)
     model: str
-    base_url: str | None = None
-    model_limit_overrides: ModelLimitOverrides = field(
-        default_factory=ModelLimitOverrides,
-        repr=False,
-    )
+    base_url: str
+    protocol: str
+    model_limits: ModelLimits
+    api_key: str = field(default="", repr=False)
+    input_capabilities: ModelInputCapabilities = field(default_factory=ModelInputCapabilities)
+    tool_calling: bool = True
+    parameters: Mapping = field(default_factory=dict)
     context_policy: ContextPolicy | None = None
     max_parallel_tools: int = DEFAULT_MAX_PARALLEL_TOOLS
-    input_capabilities: ModelInputCapabilities | None = None
+    timeout_seconds: float = 120
+    max_retries: int = 2
 
-    def __post_init__(self) -> None:
-        if self.input_capabilities is None:
-            object.__setattr__(self, "input_capabilities", resolve_model_inputs(self.model))
-        if self.max_parallel_tools < 1:
-            raise ValueError("max_parallel_tools must be at least 1")
+    def __post_init__(self):
+        object.__setattr__(self, "parameters", MappingProxyType(dict(self.parameters)))
         if self.context_policy is None:
             object.__setattr__(self, "context_policy", ContextPolicy.for_model(self.model_limits))
-
-    @property
-    def model_limits(self) -> ModelLimits:
-        """解析当前模型最终使用的容量限制。"""
-        return resolve_model_limits(self.model, self.model_limit_overrides)
-
-    @classmethod
-    def from_env(
-        cls,
-        environ: Mapping[str, str] | None = None,
-        *, model: str | None = None,
-    ) -> "ModelConfig":
-        """从环境变量读取并校验模型配置。"""
-        # 参数主要用于测试；正常运行时直接读取当前进程的环境变量。
-        values = os.environ if environ is None else environ
-        api_key = values.get("ADA_API_KEY", "").strip()
-
-        if not api_key:
-            raise ValueError("ADA_API_KEY environment variable is required")
-
-        # 模型和网关提供 ADA 默认值，需要时仍可通过环境变量覆盖。
-        model = model or values.get("ADA_MODEL", "").strip() or _DEFAULT_ADA_MODEL
-        base_url = (
-            values.get("ADA_BASE_URL", "").strip() or _DEFAULT_ADA_BASE_URL
-        )
-        model_limit_overrides = ModelLimitOverrides(
-            context_window_tokens=_read_optional_integer(
-                values,
-                "ADA_CONTEXT_WINDOW_TOKENS",
-            ),
-            max_input_tokens=_read_optional_integer(
-                values,
-                "ADA_MAX_INPUT_TOKENS",
-            ),
-            max_output_tokens=_read_optional_integer(
-                values,
-                "ADA_MAX_OUTPUT_TOKENS",
-            ),
-        )
-        policy_overrides = {}
-        for name in DEFAULT_BUDGETS:
-            value = _read_optional_integer(values, f"ADA_{name.upper()}")
-            if value is not None:
-                policy_overrides[name] = value
-        context_policy = ContextPolicy.for_model(
-            resolve_model_limits(model, model_limit_overrides),
-            **policy_overrides,
-            safety_ratio=_read_float(
-                values,
-                "ADA_CONTEXT_SAFETY_RATIO",
-                0.95,
-            ),
-        )
-        max_parallel_tools = _read_optional_integer(values, "PRAXIS_MAX_PARALLEL_TOOLS")
-        inputs = resolve_model_inputs(model)
-        image_input = _read_optional_bool(values, "ADA_MODEL_IMAGE_INPUT")
-        pdf_input = _read_optional_bool(values, "ADA_MODEL_PDF_INPUT")
-        if image_input is not None:
-            inputs = replace(inputs, image_mime_types=(
-                (inputs.image_mime_types or ("image/png", "image/jpeg", "image/webp", "image/gif"))
-                if image_input else ()
-            ))
-        if pdf_input is not None:
-            inputs = replace(inputs, pdf=pdf_input)
-        return cls(
-            api_key=api_key,
-            model=model,
-            base_url=base_url,
-            model_limit_overrides=model_limit_overrides,
-            context_policy=context_policy,
-            input_capabilities=inputs,
-            max_parallel_tools=(DEFAULT_MAX_PARALLEL_TOOLS
-                                if max_parallel_tools is None else max_parallel_tools),
-        )
+        self.context_policy.effective_input_limit(self.model_limits)
 
 
-def _read_optional_bool(values: Mapping[str, str], name: str) -> bool | None:
-    raw = values.get(name, "").strip().lower()
-    if not raw:
-        return None
-    if raw in {"true", "1"}:
-        return True
-    if raw in {"false", "0"}:
-        return False
-    raise ValueError(f"{name} must be true/false or 1/0")
+@dataclass(frozen=True, slots=True)
+class PraxisConfig:
+    path: Path
+    default_model: str
+    models: Mapping[str, ModelConfig]
+    credential_envs: Mapping[str, str]
+    compression_model: str | None = None
+    compression_parameters: Mapping = field(default_factory=dict)
+    subagent_model: str | None = None
+    max_concurrent: int = 4
+
+    def resolve(self, name: str | None = None, *, compression=False) -> ModelConfig:
+        name = (self.compression_model if compression else None) or name or self.default_model
+        if name not in self.models:
+            raise ValueError(f"Unknown model configuration: {name}")
+        variable = self.credential_envs.get(name)
+        key = os.environ.get(variable, "").strip() if variable else ""
+        if variable and not key:
+            raise ValueError(f"Credential environment variable {variable} is required for {name}")
+        config = self.models[name]
+        parameters = dict(config.parameters)
+        if compression:
+            parameters.update(self.compression_parameters)
+        return replace(config, api_key=key, parameters=parameters)
 
 
-def _read_optional_integer(
-    values: Mapping[str, str],
-    name: str,
-) -> int | None:
-    raw_value = values.get(name, "").strip()
-    if not raw_value:
-        return None
+class _ConfigLoader(yaml.SafeLoader):
+    pass
+
+
+def _mapping(loader, node):
+    result = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node)
+        if not isinstance(key, str) or key in result:
+            raise ValueError("Configuration keys must be unique strings")
+        result[key] = loader.construct_object(value_node)
+    return result
+
+
+_ConfigLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapping)
+
+
+def load_config(path: Path | str | None = None) -> PraxisConfig:
+    path = Path(path or os.environ.get("PRAXIS_CONFIG") or data_directory() / "praxis.yaml").expanduser().resolve()
     try:
-        return int(raw_value)
-    except ValueError as error:
-        raise ValueError(f"{name} must be an integer") from error
-
-
-def _read_float(
-    values: Mapping[str, str],
-    name: str,
-    default: float,
-) -> float:
-    raw_value = values.get(name, "").strip()
-    if not raw_value:
-        return default
-    try:
-        return float(raw_value)
-    except ValueError as error:
-        raise ValueError(f"{name} must be a number") from error
+        data = yaml.load(path.read_text(encoding="utf-8"), Loader=_ConfigLoader)
+    except (OSError, yaml.YAMLError) as error:
+        raise ValueError(f"Cannot load configuration file: {path}") from error
+    errors = list(Draft202012Validator(_SCHEMA).iter_errors(data))
+    if errors:
+        error = errors[0]
+        location = ".".join(map(str, error.absolute_path)) or "root"
+        raise ValueError(f"Invalid configuration at {location}: {error.validator} validation failed")
+    default = data.get("default_model")
+    if default is None:
+        if len(data["models"]) != 1:
+            raise ValueError("default_model is required when multiple models are configured")
+        default = next(iter(data["models"]))
+    compression = data.get("compression", {})
+    subagents = data.get("subagents", {})
+    for name in (default, compression.get("model"), subagents.get("model")):
+        if name is not None and name not in data["models"]:
+            raise ValueError(f"Unknown model configuration: {name}")
+    models, credentials = {}, {}
+    for name, item in data["models"].items():
+        limits = ModelLimits(item["context_window"], item.get("max_input_tokens"), item["max_output_tokens"])
+        if limits.max_output_tokens >= limits.context_window_tokens:
+            raise ValueError(f"{name}: max_output_tokens must be below context_window")
+        if limits.max_input_tokens and limits.max_input_tokens > limits.context_window_tokens:
+            raise ValueError(f"{name}: max_input_tokens exceeds context_window")
+        capabilities = item.get("capabilities", {})
+        if item["protocol"] == "chat_completions" and capabilities.get("pdf_input", False):
+            raise ValueError(f"{name}: PDF input is only supported by the responses adapter")
+        models[name] = ModelConfig(
+            model=item["model"], base_url=item["base_url"], protocol=item["protocol"],
+            model_limits=limits, parameters=item.get("parameters", {}),
+            context_policy=ContextPolicy.for_model(limits, output_reserve_tokens=limits.max_output_tokens, **data.get("context", {})),
+            input_capabilities=ModelInputCapabilities(
+                ("image/png", "image/jpeg", "image/webp", "image/gif") if capabilities.get("image_input") else (),
+                pdf=capabilities.get("pdf_input", False),
+            ),
+            tool_calling=capabilities.get("tool_calling", True),
+            max_parallel_tools=data.get("max_parallel_tools", DEFAULT_MAX_PARALLEL_TOOLS),
+            timeout_seconds=data.get("timeout_seconds", 120), max_retries=data.get("max_retries", 2),
+        )
+        if item.get("api_key_env"):
+            credentials[name] = item["api_key_env"]
+    for name in (default, subagents.get("model")):
+        if name is not None and not models[name].tool_calling:
+            raise ValueError(f"{name}: agents require tool_calling")
+    return PraxisConfig(path, default, MappingProxyType(models), MappingProxyType(credentials),
+                        compression.get("model"), MappingProxyType(compression.get("parameters", {})),
+                        subagents.get("model"), subagents.get("max_concurrent", 4))

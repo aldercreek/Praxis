@@ -6,10 +6,10 @@ from unittest.mock import AsyncMock
 import pytest
 from openai.types.responses import ResponseIncompleteEvent
 
-from praxis_agent.config import ModelConfig
+from support.models import model_config
 from praxis_agent.context.capacity import ContextPolicy
 from praxis_agent.context.manager import ContextManager
-from praxis_agent.context.model_catalog import ModelLimits
+from praxis_agent.context.model_metadata import ModelLimits
 from praxis_agent.context.models import ConversationHistory
 from praxis_agent.context.summarizer import ModelContextSummarizer, SUMMARY_INSTRUCTIONS
 from praxis_agent.model import ModelClientError, ModelResponse, OpenAIModelClient
@@ -182,7 +182,7 @@ def test_incomplete_generation_is_not_accepted_as_summary(monkeypatch, reason, e
 
     sdk = SimpleNamespace(responses=SimpleNamespace(create=AsyncMock(return_value=Stream())), close=AsyncMock())
     monkeypatch.setattr("praxis_agent.model.AsyncOpenAI", lambda **kwargs: sdk)
-    client = OpenAIModelClient(ModelConfig(api_key="test", model="test"))
+    client = OpenAIModelClient(model_config(api_key="test", model="test"))
     try:
         with pytest.raises(expected, match="incomplete") as error:
             client.create_response([], [])

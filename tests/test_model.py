@@ -22,15 +22,15 @@ from openai.types.responses.response_usage import (
     OutputTokensDetails,
 )
 
-from praxis_agent.config import ModelConfig
-from praxis_agent.context.model_catalog import MODEL_INPUT_CATALOG
+from support.models import model_config
+from praxis_agent.context.model_metadata import ModelInputCapabilities
 from praxis_agent.execution import ExecutionControl, ExecutionStopped, Run
 from praxis_agent.model import ModelClientError, OpenAIModelClient
 from praxis_agent.model_errors import IncompleteResponseError
 
 
-@pytest.mark.parametrize("model", list(MODEL_INPUT_CATALOG) + ["auto(free)", "custom-model"])
-def test_mcp_media_requests_for_all_model_configs(monkeypatch, model):
+@pytest.mark.parametrize("capabilities", [ModelInputCapabilities(), ModelInputCapabilities(("image/png",), pdf=True)])
+def test_mcp_media_requests_follow_configured_capabilities(monkeypatch, capabilities):
     import json
     from mcp.types import CallToolResult, ImageContent, AudioContent, TextContent, EmbeddedResource, BlobResourceContents
     from praxis_agent.agent import _build_function_call_output
@@ -44,7 +44,7 @@ def test_mcp_media_requests_for_all_model_configs(monkeypatch, model):
         return httpx2.Response(200, headers={"content-type": "text/event-stream"}, content=body)
     monkeypatch.setattr("praxis_agent.model.AsyncOpenAI", lambda **options: AsyncOpenAI(
         **options, http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handle))))
-    config = ModelConfig(api_key="test", model=model, base_url="https://example.test/v1")
+    config = model_config(api_key="test", model="custom", input_capabilities=capabilities, base_url="https://example.test/v1")
     client = OpenAIModelClient(config)
     reply = CallToolResult(content=[
         TextContent(type="text", text="Report completed"),
@@ -62,7 +62,7 @@ def test_mcp_media_requests_for_all_model_configs(monkeypatch, model):
     finally:
         client.close()
     request = received[0]
-    assert request["model"] == model
+    assert request["model"] == "custom"
     blocks = request["input"][-1]["output"]
     assert any(b["type"] == "input_image" for b in blocks) is bool(config.input_capabilities.image_mime_types)
     assert any(b["type"] == "input_file" for b in blocks) is config.input_capabilities.pdf
@@ -184,7 +184,7 @@ def test_openai_model_client_builds_and_parses_a_response(monkeypatch) -> None:
         lambda **options: _capture_options(sdk_client, options),
     )
     client = OpenAIModelClient(
-        ModelConfig(
+        model_config(
             api_key="secret-key",
             model="example-model",
             base_url="https://example.com/v1",
@@ -203,7 +203,8 @@ def test_openai_model_client_builds_and_parses_a_response(monkeypatch) -> None:
     assert sdk_client.options == {
         "api_key": "secret-key",
         "base_url": "https://example.com/v1",
-        "max_retries": 5,
+        "max_retries": 2,
+        "timeout": 120,
     }
     assert sdk_client.responses.arguments["model"] == "example-model"
     assert (
@@ -239,7 +240,7 @@ def _model_with_http_transport(monkeypatch, handler):
         ),
     )
     return OpenAIModelClient(
-        ModelConfig(api_key="test", model="test", base_url="https://example.test/v1"),
+        model_config(api_key="test", model="test", base_url="https://example.test/v1"),
         execution_control=ExecutionControl(),
     )
 
@@ -249,7 +250,7 @@ def _successful_stream_body():
     return "".join("data: " + event.model_dump_json() + "\n\n" for event in events.events).encode()
 
 
-def test_main_http_request_omits_output_limit_but_summary_keeps_its_limit(monkeypatch):
+def test_main_uses_configured_output_limit_and_summary_can_lower_it(monkeypatch):
     requests = []
     body = _successful_stream_body()
 
@@ -263,7 +264,7 @@ def test_main_http_request_omits_output_limit_but_summary_keeps_its_limit(monkey
         client.create_response([], [], max_output_tokens=4096)
     finally:
         client.close()
-    assert "max_output_tokens" not in requests[0]
+    assert requests[0]["max_output_tokens"] == 8192
     assert requests[1]["max_output_tokens"] == 4096
 
 
@@ -314,7 +315,7 @@ def test_agent_regenerates_truncated_tool_arguments_without_executing_partial_ca
         assert agent.run("Read the file") == "Reading README"
         assert tool_runs == ["README.md"]
         assert len(requests) == 3
-        assert all("max_output_tokens" not in request for request in requests)
+        assert all(request["max_output_tokens"] == 8192 for request in requests)
         assert "UNFINISHED" not in json.dumps(requests)
         assert "UNFINISHED" not in json.dumps(
             agent._history.snapshot(), default=lambda item: item.model_dump(mode="json"))
@@ -325,13 +326,13 @@ def test_agent_regenerates_truncated_tool_arguments_without_executing_partial_ca
 
 
 @pytest.mark.parametrize("failure", ["connection", "timeout", 408, 409, 429, 500, 503])
-def test_model_retries_five_times_with_exponential_backoff(monkeypatch, failure):
+def test_model_retries_configured_times_with_exponential_backoff(monkeypatch, failure):
     body = _successful_stream_body()
     calls, delays = [], []
 
     def handle(request):
         calls.append(request)
-        if len(calls) <= 5:
+        if len(calls) <= 2:
             if failure == "connection":
                 raise httpx2.ConnectError("connection failed", request=request)
             if failure == "timeout":
@@ -348,13 +349,13 @@ def test_model_retries_five_times_with_exponential_backoff(monkeypatch, failure)
     try:
         response = Run().execute(lambda: client.create_response([], []))
         assert response.output_text == "Reading README"
-        assert len(calls) == 6
-        assert delays == [0.5, 1.0, 2.0, 4.0, 8.0]
+        assert len(calls) == 3
+        assert delays == [0.5, 1.0]
     finally:
         client.close()
 
 
-@pytest.mark.parametrize("status, attempts", [(503, 6), (400, 1), (401, 1), (403, 1)])
+@pytest.mark.parametrize("status, attempts", [(503, 3), (400, 1), (401, 1), (403, 1)])
 def test_model_bounds_retries_and_rejects_non_retryable_errors(monkeypatch, status, attempts):
     calls = []
 
@@ -476,7 +477,7 @@ def test_cancel_network_wait_acknowledges_cleanup_before_future(monkeypatch, pha
     sdk = FakeOpenAI()
     sdk.responses = Responses()
     monkeypatch.setattr("praxis_agent.model.AsyncOpenAI", lambda **kwargs: sdk)
-    client = OpenAIModelClient(ModelConfig(api_key="test", model="test"))
+    client = OpenAIModelClient(model_config(api_key="test", model="test"))
     scope = Run()
     def execute():
         try:
@@ -534,7 +535,7 @@ def test_cancel_real_http_request_before_headers_and_reuse_client():
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     serving = Thread(target=server.serve_forever, daemon=True)
     serving.start()
-    client = OpenAIModelClient(ModelConfig(
+    client = OpenAIModelClient(model_config(
         api_key="test", model="test", base_url=f"http://127.0.0.1:{server.server_port}/v1",
     ))
     scope = Run()

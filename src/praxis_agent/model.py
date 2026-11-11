@@ -5,7 +5,7 @@ from threading import Event, Lock, Thread
 from typing import Protocol
 
 from httpx2 import TransportError
-from openai import AsyncOpenAI, OpenAIError
+from openai import AsyncOpenAI, OpenAIError, Omit
 from openai.types.responses import (
     Response,
     ResponseCompletedEvent,
@@ -17,9 +17,8 @@ from openai.types.responses import (
 )
 
 from praxis_agent.config import ModelConfig
-from praxis_agent.context.model_catalog import ModelInputCapabilities
+from praxis_agent.context.model_metadata import ModelInputCapabilities
 from praxis_agent.media import adapt_media_blocks
-from praxis_agent.deepseek import DeepSeekResponseNormalizer
 from praxis_agent.execution import await_cancellable, current_handle, run_operation
 from praxis_agent.multi_agent.models import ExecutionControl
 from praxis_agent.prompts import BASE_INSTRUCTIONS
@@ -74,23 +73,23 @@ class ModelClient(Protocol):
 
 
 class OpenAIModelClient:
-    """使用 OpenAI Python SDK 调用 Responses API。"""
+    """Run the configured protocol through a shared cancellable SDK transport."""
 
     def __init__(
         self,
         config: ModelConfig,
         instructions: str = BASE_INSTRUCTIONS,
         *,
-        reasoning_effort: str | None = None,
         execution_control: ExecutionControl | None = None,
     ) -> None:
         # SDK 提供有限重试、指数退避和抖动；await_cancellable 也会取消退避等待。
-        client_options: dict[str, object] = {"api_key": config.api_key, "max_retries": 5}
-        if execution_control is not None:
-            client_options["timeout"] = 60.0
-        if config.base_url is not None:
-            client_options["base_url"] = config.base_url
-
+        client_options = {
+            "api_key": config.api_key or "unused",
+            "base_url": config.base_url,
+            "max_retries": config.max_retries,
+            "timeout": config.timeout_seconds,
+        }
+        self._config = config
         self._client = AsyncOpenAI(**client_options)
         self._loop = None
         self._thread = None
@@ -100,11 +99,6 @@ class OpenAIModelClient:
         self._input_capabilities = config.input_capabilities
         self._instructions = instructions
         self._execution_control = execution_control
-        # None 沿用服务端默认值；摘要客户端显式传入 "none" 关闭 thinking。
-        self._reasoning_effort = reasoning_effort
-        self._response_normalizer = (
-            DeepSeekResponseNormalizer() if "deepseek" in config.model.lower() else None
-        )
 
     def create_response(
         self,
@@ -134,14 +128,27 @@ class OpenAIModelClient:
 
         handle = current_handle()
         response = request(handle) if handle is not None else run_operation("model request", request)
-        if self._response_normalizer is not None:
-            response = self._response_normalizer.normalize(response)
-        return _build_model_response(response)
+        return response
 
     async def _request(self, input_items, tools, on_text_delta, max_output_tokens):
-        options = {} if max_output_tokens is None else {"max_output_tokens": max_output_tokens}
-        if self._reasoning_effort is not None:
-            options["reasoning"] = {"effort": self._reasoning_effort}
+        if tools and not self._config.tool_calling:
+            raise ModelClientError("Configured model does not support tool calling")
+        limit = self._config.model_limits.max_output_tokens
+        if max_output_tokens is not None:
+            limit = min(limit, max_output_tokens)
+        if self._config.protocol == "chat_completions":
+            from praxis_agent.chat_completions import create_chat_response
+            return await create_chat_response(
+                self._client, self._config, self._instructions, input_items, tools,
+                on_text_delta, limit,
+            )
+        options = dict(self._config.parameters)
+        if not self._config.api_key:
+            options["extra_headers"] = {"Authorization": Omit()}
+        effort = options.pop("reasoning_effort", None)
+        if effort is not None:
+            options["reasoning"] = {"effort": effort}
+        options["max_output_tokens"] = limit
         stream = await self._client.responses.create(
             model=self._model,
             instructions=self._instructions,
@@ -176,7 +183,7 @@ class OpenAIModelClient:
             await stream.close()
         if completed is None:
             raise IncompleteResponseError("model stream ended without a completed response")
-        return completed
+        return _build_model_response(completed)
 
     def _ensure_loop(self):
         with self._loop_lock:

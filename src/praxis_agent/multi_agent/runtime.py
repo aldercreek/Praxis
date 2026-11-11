@@ -132,7 +132,8 @@ class AgentRuntime:
         return value.strip()
 
     def spawn(self, task: str, task_summary: str = "", *,
-              working_directory: str = "", history: Sequence[object] = ()) -> dict[str, object]:
+              working_directory: str = "", history: Sequence[object] = (),
+              model: str | None = None) -> dict[str, object]:
         task = self._content(task)
         if not isinstance(working_directory, str):
             raise ValueError("working_directory must be a directory path")
@@ -146,7 +147,7 @@ class AgentRuntime:
             self._require_open()
             agent_id = "agent-" + uuid4().hex
             control = ExecutionControl()
-            handle = AgentHandle(agent_id, self.parent_turn_id, control)
+            handle = AgentHandle(agent_id, self.parent_turn_id, control, model=model)
             handle.task_summary = task_summary
             handle.workspace = directory
             self.handles[agent_id] = handle

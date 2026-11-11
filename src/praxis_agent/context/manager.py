@@ -12,7 +12,7 @@ from praxis_agent.context.capacity import (
     HeuristicTokenEstimator,
     TokenEstimator,
 )
-from praxis_agent.context.model_catalog import ModelLimits
+from praxis_agent.context.model_metadata import ModelLimits
 from praxis_agent.context.compaction import trim_tool_messages
 from praxis_agent.context.model_context import build_context_status_context
 from praxis_agent.context.models import (

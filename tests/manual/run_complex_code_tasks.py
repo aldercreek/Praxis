@@ -54,7 +54,6 @@ def hashes(paths, base):
 
 def run_case(args):
     sys.path.insert(0, str(REPO / "src"))
-    os.environ["ADA_MODEL"] = args.model
     from praxis_agent.events import ToolCallPrepared, ToolFinished, ToolStarted
     from praxis_agent.execution import ExecutionStopped, Run, current_handle
     from praxis_agent.factory import create_default_agent
@@ -117,7 +116,7 @@ def run_case(args):
                   "output": event.result.output, "seconds": round(time.monotonic() - tool_started.get(event.call_id, time.monotonic()), 4)})
             print(json.dumps({"case": args.case, "turn": state["turn"], "tool": event.tool_name, "success": event.result.success}), flush=True)
 
-    agent = create_default_agent(workspace, session_database_path=destination / "session.sqlite",
+    agent = create_default_agent(workspace, model=args.model, session_database_path=destination / "session.sqlite",
                                  event_sink=SimpleNamespace(emit=observe), bypass_approvals=True,
                                  enable_multi_agent=False, mcp=mcp)
     state["runtime"] = next(c.__self__ for c in agent.close_callbacks
@@ -266,7 +265,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", choices=[*CASES, "all"], required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--model", default="deepseek-v4.1-flash")
+    parser.add_argument("--model", default=None)
     parser.add_argument("--jobs", type=int, default=2)
     parser.add_argument("--timeout", type=float, default=360)
     parser.add_argument("--max-requests", type=int, default=40)

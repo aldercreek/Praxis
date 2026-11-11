@@ -43,21 +43,25 @@ WORKER_INSTRUCTIONS = """<collaboration>
 """
 
 
-def _schema(properties: dict[str, object]) -> dict[str, object]:
+def _schema(properties: dict[str, object], optional=()) -> dict[str, object]:
     return {"type": "object", "properties": properties,
-            "required": list(properties), "additionalProperties": False}
+            "required": [name for name in properties if name not in optional], "additionalProperties": False}
 
 
 def register_parent_tools(registry: ToolRegistry, runtime: AgentRuntime,
                           pump: Callable[[], None], *,
-                          has_user_input: Callable[[], bool] = lambda: False) -> None:
+                          has_user_input: Callable[[], bool] = lambda: False,
+                          models: tuple[str, ...] = ()) -> None:
     def spawn_agent(context: ToolContext, task: str, task_summary: str = "",
-                    working_directory: str = "", inherit_context: bool = False) -> str:
+                    working_directory: str = "", inherit_context: bool = False,
+                    model: str | None = None) -> str:
         if not isinstance(inherit_context, bool):
             raise ValueError("inherit_context must be a boolean")
+        if model is not None and model not in models:
+            raise ValueError("Unknown configured worker model")
         history = inherited_context(context) if inherit_context else ()
         return json.dumps(runtime.spawn(task, task_summary, working_directory=working_directory,
-                                       history=history), ensure_ascii=False)
+                                       history=history, model=model), ensure_ascii=False)
 
     def send_messages(context: ToolContext, messages: list[dict[str, object]]) -> str:
         return json.dumps(runtime.send_many(messages), ensure_ascii=False)
@@ -67,13 +71,14 @@ def register_parent_tools(registry: ToolRegistry, runtime: AgentRuntime,
 
     registry.register(Tool(
         name="spawn_agent", description="Delegate a bounded task to a worker. Returns its ID, workspace and registered command/file-write capabilities; tool availability does not bypass approvals. Deliveries arrive as messages with artifact paths.",
-        parameters=_schema({"inherit_context": {"type": "boolean", "description": "Default false. True copies retained parent conversation as background; does not share future input, commands or Python variables. The new task defines the worker's scope."},
+        parameters=_schema({"model": {"type": "string", "enum": list(models), "description": "Optional configured model; omit to inherit the worker default."},
+                            "inherit_context": {"type": "boolean", "description": "Default false. True copies retained parent conversation as background; does not share future input, commands or Python variables. The new task defines the worker's scope."},
                             "task": {"type": "string", "minLength": 1,
                                     "description": "Objective, available inputs, scope, acceptance criteria and deliverable. For independent review, name the unresolved question and evidence needed; review is not mandatory after successful checks."},
                             "task_summary": {"type": "string", "maxLength": 200,
                                              "description": "Short task scope for the runtime snapshot, not the complete task instructions."},
                             "working_directory": {"type": "string", "minLength": 1,
-                                       "description": "Existing directory, absolute or relative to the parent. Required, non-empty and independently prepared. Confirm critical inputs/dependencies here before spawning. No files are copied or synchronized."}}),
+                                       "description": "Existing directory, absolute or relative to the parent. Required, non-empty and independently prepared. Confirm critical inputs/dependencies here before spawning. No files are copied or synchronized."}}, optional=("model",)),
         handler=spawn_agent,
     ))
     registry.register(Tool(

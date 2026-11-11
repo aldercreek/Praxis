@@ -6,7 +6,7 @@ from functools import partial
 from pathlib import Path
 from threading import RLock
 
-from praxis_agent.config import ModelConfig
+from praxis_agent.config import load_config
 from praxis_agent.factory import create_default_agent
 
 from .errors import ServiceError, required_text
@@ -15,10 +15,12 @@ from .runtime import SessionRuntime
 
 
 class SessionManager:
-    def __init__(self, store, *, agent_factory=create_default_agent, mcp=None):
+    def __init__(self, store, *, agent_factory=create_default_agent, mcp=None, config_path=None):
         self.store = store
         self.mcp = mcp
-        self.factory = partial(agent_factory, mcp=mcp) if mcp is not None else agent_factory
+        self.config = load_config(config_path)
+        self.agent_factory = agent_factory
+        self.factory = partial(agent_factory, mcp=mcp, configuration=self.config)
         self.lock = RLock()
         self.runtimes = {}
         self.closed = False
@@ -33,21 +35,13 @@ class SessionManager:
         return self.mcp.snapshot() if self.mcp is not None else {"servers": []}
 
     def configuration(self):
-        try:
-            config = ModelConfig.from_env()
-            return {
-                "model": config.model,
-                "base_url": config.base_url,
-                "configured": True,
-                "bypass_approvals": self.bypass_approvals,
-            }
-        except ValueError as error:
-            return {
-                "model": os.environ.get("ADA_MODEL", "auto(free)"),
-                "configured": False,
-                "configuration_error": str(error),
-                "bypass_approvals": self.bypass_approvals,
-            }
+        return {
+            "model": self.config.default_model,
+            "models": list(self.config.models),
+            "config_path": str(self.config.path),
+            "configured": True,
+            "bypass_approvals": self.bypass_approvals,
+        }
 
     def create(self, data):
         workspace = Path(required_text(data, "workspace")).expanduser().resolve()
@@ -56,6 +50,12 @@ class SessionManager:
         model = data.get("model") or self.configuration()["model"]
         if not isinstance(model, str) or not model.strip():
             raise ServiceError("invalid_model", "Model must be a nonempty string")
+        try:
+            selected = self.config.resolve(model)
+            if not selected.tool_calling:
+                raise ValueError("Agent models require tool_calling")
+        except ValueError as error:
+            raise ServiceError("invalid_model", str(error)) from error
         payload = {"workspace": os.path.normcase(str(workspace)), "model": model}
 
         def create(_):
@@ -106,54 +106,33 @@ class SessionManager:
         return self.runtime(row["session_id"]).approvals.decide(approval_id, approved)
 
     def configure(self, data):
-        keys = {
-            "model": "ADA_MODEL",
-            "base_url": "ADA_BASE_URL",
-            "api_key": "ADA_API_KEY",
-        }
-        if set(data) - (set(keys) | {"bypass_approvals"}):
-            raise ServiceError("invalid_params", "Unknown configuration field")
-        for key in keys:
-            if key in data and (
-                not isinstance(data[key], str) or len(data[key]) > 4096
-            ):
-                raise ServiceError("invalid_params", f"Invalid {key}")
-        if "bypass_approvals" in data and not isinstance(
-            data["bypass_approvals"], bool
-        ):
+        if set(data) - {"config_path", "bypass_approvals"}:
+            raise ServiceError("invalid_params", "Settings accept config_path and bypass_approvals only")
+        if "bypass_approvals" in data and not isinstance(data["bypass_approvals"], bool):
             raise ServiceError("invalid_params", "bypass_approvals must be a boolean")
-        changes = {
-            key: value
-            for key, value in data.items()
-            if (
-                value != self.bypass_approvals
-                if key == "bypass_approvals"
-                else value != os.environ.get(keys[key], "")
-            )
-        }
-        if not changes:
-            return self.configuration()
+        config = self.config
+        if "config_path" in data:
+            try:
+                config = load_config(required_text(data, "config_path"))
+            except ValueError as error:
+                raise ServiceError("invalid_configuration", str(error)) from error
+        bypass = data.get("bypass_approvals", self.bypass_approvals)
         with self.lock, ExitStack() as locks:
             runtimes = [runtime for runtime in self.runtimes.values() if not runtime.closed]
             for runtime in runtimes:
                 locks.enter_context(runtime.lock)
             if any(runtime.run is not None for runtime in runtimes):
-                raise ServiceError(
-                    "sessions_running",
-                    "Stop running sessions before changing shared service settings",
-                    409,
-                )
+                raise ServiceError("sessions_running", "Stop running sessions before changing shared service settings", 409)
             for runtime in runtimes:
                 if runtime.agent:
                     runtime.agent.close()
                     runtime.agent = None
-            for key, value in changes.items():
-                if key == "bypass_approvals":
-                    self.bypass_approvals = value
-                else:
-                    os.environ[keys[key]] = value
+            self.config = config
+            self.factory = partial(self.agent_factory, mcp=self.mcp, configuration=config)
+            self.bypass_approvals = bypass
             for runtime in runtimes:
-                runtime.bypass_approvals = self.bypass_approvals
+                runtime.factory = self.factory
+                runtime.bypass_approvals = bypass
         return self.configuration()
 
     def close(self):

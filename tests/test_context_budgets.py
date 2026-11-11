@@ -5,9 +5,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from praxis_agent.config import ModelConfig
+from support.models import model_config
 from praxis_agent.context.capacity import ContextPolicy, HeuristicTokenEstimator
-from praxis_agent.context.model_catalog import ModelLimits, ModelLimitOverrides
+from praxis_agent.context.model_metadata import ModelLimits
 from praxis_agent.context.summarizer import ModelContextSummarizer, SUMMARY_INSTRUCTIONS
 from praxis_agent.factory import _create_context_manager
 from praxis_agent.model import ModelResponse
@@ -36,10 +36,8 @@ def test_input_capacity_does_not_drop_at_budget_boundaries(boundary):
 
 
 def test_main_reserve_and_summary_output_are_independent_configurations():
-    config = ModelConfig.from_env({
-        "ADA_API_KEY": "test", "ADA_CONTEXT_WINDOW_TOKENS": "160000",
-        "ADA_OUTPUT_RESERVE_TOKENS": "20000", "ADA_SUMMARY_OUTPUT_TOKENS": "12000",
-    })
+    config = model_config(model_limits=ModelLimits(160000),
+        context_policy=ContextPolicy.for_model(ModelLimits(160000), output_reserve_tokens=20000, summary_output_tokens=12000))
     policy = config.context_policy
     assert policy.output_reserve_tokens == 20000
     assert policy.summary_output_tokens == 12000
@@ -97,10 +95,10 @@ def test_factory_does_not_limit_summary_input_using_the_main_output_reserve():
     sources = [{"message_id": "m1", "role": "assistant", "content": "evidence " * 60000}]
     batches = []
     for reserve in (16000, 32000):
-        config = ModelConfig(api_key="test", model="example",
-            model_limit_overrides=ModelLimitOverrides(context_window_tokens=160000),
+        config = model_config(api_key="test", model="example",
+            model_limits=ModelLimits(160000),
             context_policy=ContextPolicy.for_model(limits, output_reserve_tokens=reserve))
-        manager = _create_context_manager(config, "", SimpleNamespace(create_response=respond))
+        manager = _create_context_manager(config, "", SimpleNamespace(create_response=respond), config)
         requests.clear()
         manager._summarizer.summarize(sources, "")
         assert len(requests) > 1

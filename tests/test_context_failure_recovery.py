@@ -7,7 +7,7 @@ import pytest
 from praxis_agent.agent import Agent
 from praxis_agent.context.capacity import ContextPolicy
 from praxis_agent.context.manager import ContextManager
-from praxis_agent.context.model_catalog import ModelLimits
+from praxis_agent.context.model_metadata import ModelLimits
 from praxis_agent.context.models import ConversationHistory
 from praxis_agent.context.summarizer import ModelContextSummarizer
 from praxis_agent.events import ContextCompaction

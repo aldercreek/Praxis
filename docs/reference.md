@@ -76,13 +76,13 @@ Cancelling a turn stops commands created in that turn and commands it is current
 
 The parent has `spawn_agent`, `send_messages`, `wait_agents`, and `close_agent`. Workers have `send_message(target, content)` and `wait_agents(timeout)`; the target is `parent` or an exact teammate ID. Workers do not receive spawning tools by default.
 
-Each worker has its own history, plan, context, and Python state. It inherits model and approval configuration. `spawn_agent` requires an existing working directory; Praxis does not automatically create worktrees, copy files, or merge changes. Coordinate file ownership and integration explicitly. Optional `inherit_context=true` copies the retained parent conversation, including existing summaries, as background before the new task. It defaults to false. Unfinished tool-call batches and parent-only developer instructions are excluded. Future inputs, running commands, Python variables and context-operation state are not shared.
+Each worker has its own history, plan, context, and Python state. It inherits approval configuration. The optional `spawn_agent.model` selects a configured model; otherwise workers use `subagents.model` or inherit the parent model. `spawn_agent` requires an existing working directory; Praxis does not automatically create worktrees, copy files, or merge changes. Coordinate file ownership and integration explicitly. Optional `inherit_context=true` copies the retained parent conversation, including existing summaries, as background before the new task. It defaults to false. Unfinished tool-call batches and parent-only developer instructions are excluded. Future inputs, running commands, Python variables and context-operation state are not shared.
 
 Messages to idle workers start work; running workers receive them at execution boundaries. Closing/closed recipients reject new mail. Every agent sees a fresh, transient team snapshot on each model request: its identity, the parent coordinator, teammates' responsibilities, workspaces and status. Creating or closing a member or changing its responsibility can wake existing waits. Ordinary running/idle transitions do not broadcast new work. Idle agents are not started by membership changes.
 
 `wait_agents(timeout=60)` waits for any mail to the caller, team membership/responsibility changes, parent user input, or a timeout of at most 60 seconds. It takes no agent-ID filter. Its result has `reason` (`message`, `team_changed`, `user_input`, `timeout`, or `closed`), `unread_messages`, `team_version` and `timed_out`. It never removes messages: the normal input boundary accepts them before acknowledging their exact IDs. Persistence failure retains unread mail. A wake is not proof that all workers finished; consult the current team and outcomes. Worker terminal reports go to the parent, while peer replies go only to their addressed recipient. Streaming display output does not wake waits.
 
-A parent cannot finalize while workers are queued, running, or closing. `close_agent` cancels and releases the worker without deleting its files. `PRAXIS_AGENT_MAX_WORKERS` defaults to 8; additional tasks wait in the worker pool. A waiting worker still occupies a pool thread: leave capacity for peers that must answer it. Workers and queued messages do not survive a process restart.
+A parent cannot finalize while workers are queued, running, or closing. `close_agent` cancels and releases the worker without deleting its files. `subagents.max_concurrent` in the configuration file defaults to 4; additional tasks wait in the worker pool. A waiting worker still occupies a pool thread: leave capacity for peers that must answer it. Workers and queued messages do not survive a process restart.
 
 Service transcript snapshots retain each incoming worker message separately, with optional `sender_id` and `recipient_id` fields. Clients can label main-agent instructions and peer messages consistently during live execution and after reopening the session. These fields describe message provenance; they do not change the model's conversation history.
 
@@ -120,7 +120,7 @@ Tools are discovered before their full definitions enter model context. `search_
 
 Programmatic MCP calls return the full response dictionary. Direct calls adapt text, images, embedded PDFs, resource descriptions, and structured data for model input. Unsupported media does not discard other successful content. Resource links are described without automatic downloading. Timeouts and transport failures report an unknown completion outcome rather than retrying automatically.
 
-The model catalog controls image/PDF input capabilities. Unknown models disable these by default; override with `ADA_MODEL_IMAGE_INPUT` and `ADA_MODEL_PDF_INPUT` only when your provider supports them. Audio is not sent through the current Responses integration.
+Model configuration explicitly controls `capabilities.image_input` and `capabilities.pdf_input`; both default to false. PDF is supported by the Responses adapter only. Audio input is not supported.
 
 ## Skills
 
@@ -159,15 +159,6 @@ Ordinary messages and tool results carry `[message_id=mN]`. `delete(message_ids)
 
 Before a model request, Praxis estimates instructions, messages, and tool definitions, then calibrates using observed input-token usage. If necessary, it compresses earlier history while keeping recent interactions and tool pairs. Oversized summaries are built in chronological chunks. If fixed content or the compressed result still cannot fit, the request fails instead of silently dropping content. There is no special retry path for provider-reported context overflow.
 
-| Variable | Behavior |
-| --- | --- |
-| `ADA_CONTEXT_WINDOW_TOKENS` | Override the model context window |
-| `ADA_MAX_INPUT_TOKENS` | Override the input limit |
-| `ADA_MAX_OUTPUT_TOKENS` | Output-capacity metadata used to constrain the reserve |
-| `ADA_CONTEXT_SAFETY_RATIO` | Input safety ratio, default 0.95 |
-| `ADA_DESIRED_OUTPUT_TOKENS` | Reserved output capacity, not an API generation limit |
-| `ADA_MAX_TOOL_OUTPUT_CHARS` | Tool-result preview budget for model context |
-| `ADA_MAX_FILE_READ_CHARS` | Direct file-read character budget |
-| `ADA_MAX_HISTORY_READ_CHARS` | Direct history-read character budget |
+Model capacities come exclusively from the required YAML file. `context_window` and `max_output_tokens` are required; `max_input_tokens` is optional. The output limit is sent to the provider and bounds generation. Context budgets and compaction policies remain generic and can be overridden under `context`.
 
-Explicit overrides take precedence over the [model catalog](../src/praxis_agent/context/model_catalog.py). Unknown models fall back to a 128,000-token window. Tiered output reserves and character budgets are defined in [context/budgets.py](../src/praxis_agent/context/budgets.py). There is no separate summary-target-length or summary-output-limit setting.
+Compression uses `compression.model` when specified, otherwise the model of the agent being compressed. It uses its own model's input/output capacities for chronological chunking. See [configuration](configuration.md).

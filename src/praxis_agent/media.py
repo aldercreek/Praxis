@@ -3,7 +3,7 @@
 import base64
 import binascii
 
-from praxis_agent.context.model_catalog import ModelInputCapabilities
+from praxis_agent.context.model_metadata import ModelInputCapabilities
 
 
 # Responses accepts images/files in function outputs, but has no audio input part.

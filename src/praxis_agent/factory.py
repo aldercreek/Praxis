@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from praxis_agent.agent import Agent
-from praxis_agent.config import ModelConfig
+from praxis_agent.config import ModelConfig, PraxisConfig, load_config
 from praxis_agent.context import (
     ContextManager,
 )
@@ -48,8 +48,10 @@ def create_default_agent(
     enable_multi_agent: bool = True,
     session_store=None,
     mcp: MCPConnections | None = None,
+    configuration: PraxisConfig | None = None,
+    model: str | None = None,
 ) -> Agent:
-    """使用环境配置和内置工具创建默认 Agent。"""
+    """使用文件配置快照和内置工具创建默认 Agent。"""
     if resume_latest and resume_session_id is not None:
         raise ValueError("resume_latest and resume_session_id are mutually exclusive")
 
@@ -58,16 +60,11 @@ def create_default_agent(
         SQLiteSessionStore,
     )
 
-    config = ModelConfig.from_env()
-    collaboration_config = MultiAgentConfig.from_env() if enable_multi_agent else None
+    configuration = configuration or load_config()
+    model_name = model or configuration.default_model
+    collaboration_config = MultiAgentConfig(configuration.max_concurrent) if enable_multi_agent else None
     runtime_context = collect_runtime_context(workspace)
     skills = discover_skills(runtime_context.workspace_root)
-    instructions = build_instructions(
-        runtime_context,
-        skills=skills,
-        collaboration_instructions=PARENT_INSTRUCTIONS if enable_multi_agent else "",
-        context_policy=config.context_policy,
-    )
     session_store = session_store or SQLiteSessionStore(session_database_path)
     history: list[object] = []
 
@@ -83,22 +80,30 @@ def create_default_agent(
     else:
         session = session_store.create_session(
             runtime_context.workspace_root,
-            config.model,
+            model_name,
         )
 
     if resume_latest or resume_session_id is not None:
         history = session_store.load_conversation_items(session.id)
-        # 恢复的模型可能属于另一档；重新选默认值，同时保留环境中的显式覆盖。
-        config = ModelConfig.from_env(model=session.model)
+        model_name = session.model
 
+    config = configuration.resolve(model_name)
+    if not config.tool_calling:
+        raise ValueError(f"{model_name}: agents require tool_calling")
+    summary_config = configuration.resolve(model_name, compression=True)
+    instructions = build_instructions(
+        runtime_context,
+        skills=skills,
+        collaboration_instructions=PARENT_INSTRUCTIONS if enable_multi_agent else "",
+        context_policy=config.context_policy,
+    )
     control = ExecutionControl()
     model_client = OpenAIModelClient(
         config, instructions=instructions, execution_control=control
     )
     summary_client = OpenAIModelClient(
-        config,
+        summary_config,
         instructions=SUMMARY_INSTRUCTIONS,
-        reasoning_effort="none",
         execution_control=control,
     )
     agent = Agent(
@@ -117,7 +122,7 @@ def create_default_agent(
         session_store=session_store,
         session_id=session.id,
         session_model=session.model,
-        context_manager=_create_context_manager(config, instructions, summary_client),
+        context_manager=_create_context_manager(config, instructions, summary_client, summary_config),
         close_callbacks=(model_client.close, summary_client.close),
     )
 
@@ -159,17 +164,22 @@ def create_default_agent(
         agent_id: str, control: ExecutionControl, sink: EventSink
     ) -> Agent:
         handle = collaboration.handles[agent_id]
+        worker_name = handle.model or configuration.subagent_model or model_name
+        worker_config = configuration.resolve(worker_name)
+        if not worker_config.tool_calling:
+            raise ValueError(f"{worker_name}: agents require tool_calling")
+        worker_summary_config = configuration.resolve(worker_name, compression=True)
         # Skill discovery belongs to the session project, not a worker's output directory.
         worker_context = collect_runtime_context(handle.workspace)
         worker_instructions = build_instructions(
             worker_context,
             skills=skills,
             collaboration_instructions=WORKER_INSTRUCTIONS,
-            context_policy=config.context_policy,
+            context_policy=worker_config.context_policy,
         )
         registry = ToolRegistry()
         for tool in create_default_registry(
-            config.context_policy,
+            worker_config.context_policy,
             check_execution=control.check,
             command_shell=worker_context.command_shell,
         ).tools:
@@ -177,20 +187,19 @@ def create_default_agent(
         registry.register(code_runtime.tool(agent_id))
         registry.register(
             create_skill_tool(
-                skills, max_chars=config.context_policy.max_tool_output_chars
+                skills, max_chars=worker_config.context_policy.max_tool_output_chars
             )
         )
         release_worker_tools = mcp.register(registry, check_execution=control.check)
         register_worker_tools(registry, collaboration, agent_id)
         client = OpenAIModelClient(
-            config,
+            worker_config,
             instructions=worker_instructions,
             execution_control=control,
         )
         summary = OpenAIModelClient(
-            config,
+            worker_summary_config,
             instructions=SUMMARY_INSTRUCTIONS,
-            reasoning_effort="none",
             execution_control=control,
         )
         return Agent(
@@ -202,14 +211,14 @@ def create_default_agent(
             reset_code_worker=lambda: code_runtime.release_agent(agent_id),
             code_turn=lambda: code_runtime.agent_turn(agent_id),
             event_sink=sink,
-            max_parallel_tools=config.max_parallel_tools,
+            max_parallel_tools=worker_config.max_parallel_tools,
             execution_control=control,
             approve_tool_call=lambda name, arguments: collaboration.request_approval(
                 agent_id, name, arguments
             ),
             bypass_approvals=agent.bypass_approvals,
             context_manager=_create_context_manager(
-                config, worker_instructions, summary
+                worker_config, worker_instructions, summary, worker_summary_config
             ),
             receive_messages=lambda accept: collaboration.receive(agent_id, accept),
             team_context=lambda: collaboration.context_item(agent_id),
@@ -231,7 +240,8 @@ def create_default_agent(
     agent.collaboration = collaboration
     agent.receive_messages = lambda accept: collaboration.receive("parent", accept)
     register_parent_tools(agent.tool_registry, collaboration, agent._pump_worker_events,
-                          has_user_input=agent._has_pending_user_input)
+                          has_user_input=agent._has_pending_user_input,
+                          models=tuple(name for name, entry in configuration.models.items() if entry.tool_calling))
     agent.restore_history(history)
     return agent
 
@@ -240,6 +250,7 @@ def _create_context_manager(
     config: ModelConfig,
     instructions: str,
     summary_client: ModelClient,
+    summary_config: ModelConfig,
 ) -> ContextManager:
     return ContextManager(
         model_limits=config.model_limits,
@@ -247,7 +258,7 @@ def _create_context_manager(
         instructions=instructions,
         summarizer=ModelContextSummarizer(
             summary_client,
-            model_limits=config.model_limits,
-            safety_ratio=config.context_policy.safety_ratio,
+            model_limits=summary_config.model_limits,
+            safety_ratio=summary_config.context_policy.safety_ratio,
         ),
     )

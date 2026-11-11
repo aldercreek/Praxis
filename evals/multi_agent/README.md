@@ -9,8 +9,9 @@ $env:PYTHONPATH = (Resolve-Path src)
 python evals/multi_agent/run.py --output D:/temp/praxis-eval
 ```
 
-Use `ADA_API_KEY` and optionally `ADA_BASE_URL` from the environment. The default
-model is `DeepSeek-V4-Pro-discount`; `--model` selects another provider model ID.
+Load a model configuration with `--config` or the standard Praxis configuration
+path. `--model` selects a configured model key; otherwise `default_model` is used.
+Set `subagents.max_concurrent` to at least 5 for these coordination scenarios.
 Keys are never written to artifacts. `--cases` selects tasks, `--parallel` controls
 concurrent sessions, and `--seconds` / `--max-calls` bound each run. Use a fresh
 output directory for every run. No running Praxis service is reconfigured.

@@ -252,7 +252,6 @@ def test_shared_factory_agents_do_not_own_the_manager(tmp_path, monkeypatch):
     from praxis_agent.service.store import ServiceStore
     from praxis_agent.sessions import SQLiteSessionStore
 
-    monkeypatch.setenv("ADA_API_KEY", "test")
     monkeypatch.setattr(factory, "discover_skills", lambda workspace: [])
     monkeypatch.setattr(factory, "OpenAIModelClient", lambda *args, **kwargs: SimpleNamespace(close=lambda: None))
     mcp = ControlledConnections(config_file(tmp_path, {"shared": {"command": "shared"}}))

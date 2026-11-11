@@ -8,11 +8,11 @@ from mcp.types import CallToolResult, TextContent
 from openai import AsyncOpenAI
 
 from praxis_agent.agent import Agent, _build_function_call_output
-from praxis_agent.config import ModelConfig
+from support.models import model_config
 from praxis_agent.context.capacity import ContextPolicy, HeuristicTokenEstimator
 from praxis_agent.context.compaction import trim_tool_messages
 from praxis_agent.context.manager import ContextManager
-from praxis_agent.context.model_catalog import ModelLimits
+from praxis_agent.context.model_metadata import ModelLimits
 from praxis_agent.context.model_context import build_context_status_context
 from praxis_agent.context.models import ConversationHistory
 from praxis_agent.context.operations import ContextOperations
@@ -298,7 +298,7 @@ def test_provider_input_errors_keep_identity(monkeypatch, channel, code, error_t
 
     monkeypatch.setattr("praxis_agent.model.AsyncOpenAI", lambda **options: AsyncOpenAI(
         **options, http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(respond))))
-    client = OpenAIModelClient(ModelConfig(api_key="test", model="test", base_url="https://example.test/v1"))
+    client = OpenAIModelClient(model_config(api_key="test", model="test", base_url="https://example.test/v1"))
     try:
         with pytest.raises(error_type) as error:
             client.create_response([], [])

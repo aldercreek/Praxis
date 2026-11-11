@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from praxis_agent.agent import Agent
 from praxis_agent.context.capacity import ContextPressure, ContextStatus
 from praxis_agent.context.manager import ContextManager
-from praxis_agent.context.model_catalog import ModelLimits
+from praxis_agent.context.model_metadata import ModelLimits
 from praxis_agent.events import ContextCompaction, ModelRequestStarted, ToolFinished
 from praxis_agent.model import FunctionCall, ModelResponse
 from praxis_agent.multi_agent.models import AgentStatus, MultiAgentConfig

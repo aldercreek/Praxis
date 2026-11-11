@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -14,6 +15,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="praxis",
         description="Run the Praxis coding agent.",
     )
+    parser.add_argument("--config", type=Path, help="Load a model configuration file")
+    parser.add_argument("--model", help="Select a model key from the configuration")
     session_group = parser.add_mutually_exclusive_group()
     session_group.add_argument(
         "-c",
@@ -45,6 +48,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.model and (args.resume or args.resume_latest or args.list_sessions):
+        parser.error("--model is only supported for new sessions")
     if args.list_sessions and args.task:
         parser.error("--sessions cannot be used with a task")
     from datetime import datetime
@@ -59,7 +64,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     client = None
     try:
+        if args.config:
+            from praxis_agent.config import load_config
+            configuration = load_config(args.config)
+            os.environ["PRAXIS_CONFIG"] = str(configuration.path)
         client = ServiceClient()
+        if args.config:
+            client.request("PUT", "/api/settings", {"config_path": str(configuration.path)})
         workspace = Path.cwd().resolve()
         sessions = client.request("GET", "/api/sessions?" + urlencode({"workspace": str(workspace)}))["sessions"]
         if args.list_sessions:
@@ -79,7 +90,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise ValueError("No session found for this workspace")
             session = sessions[0]
         else:
-            session = client.create(workspace)
+            session = client.create(workspace, model=args.model)
         connection = TerminalSession(client, session)
         app = PraxisApp(ViewEventSink(), initial_task=" ".join(args.task).strip(), connection=connection)
         return app.run() or 0

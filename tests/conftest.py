@@ -35,3 +35,16 @@ def drag_selection():
     return drag
 
 pytest_plugins = ["support.service"]
+
+
+@pytest.fixture(autouse=True)
+def model_configuration_file(tmp_path_factory, monkeypatch):
+    """Every test service uses an isolated file, never the user's gateway or keys."""
+    import yaml
+    path = tmp_path_factory.mktemp("model-config") / "praxis.yaml"
+    path.write_text(yaml.safe_dump({"models": {"test": {
+        "model": "test", "base_url": "https://example.test/v1", "protocol": "responses",
+        "context_window": 128000, "max_output_tokens": 8192,
+    }}}), encoding="utf-8")
+    monkeypatch.setenv("PRAXIS_CONFIG", str(path))
+    return path

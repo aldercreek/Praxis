@@ -61,21 +61,30 @@ source .venv/bin/activate
 python -m pip install -e ".[dev]"
 ```
 
-Configure a model provider that supports the **Responses API**. Replace all three placeholders with your provider's values:
+Create `~/.praxis/praxis.yaml` (or pass `praxis --config /absolute/path/praxis.yaml`). A configuration file is required; Praxis has no built-in providers, model catalog, or model-name inference.
+
+```yaml
+models:
+  coding:
+    protocol: responses  # or chat_completions
+    base_url: https://your-provider.example/v1
+    model: your-model-id
+    api_key_env: MODEL_API_KEY
+    context_window: 128000
+    max_output_tokens: 8192
+```
+
+Set the environment variable named by `api_key_env` before starting the service. Omit that field for an endpoint without authentication. Credentials never belong in the YAML file.
 
 ```powershell
-# Windows PowerShell
-$env:ADA_API_KEY = "your-api-key"
-$env:ADA_BASE_URL = "https://your-provider.example/v1"
-$env:ADA_MODEL = "your-model-id"
+$env:MODEL_API_KEY = "your-api-key"
 ```
 
 ```sh
-# macOS / Linux
-export ADA_API_KEY="your-api-key"
-export ADA_BASE_URL="https://your-provider.example/v1"
-export ADA_MODEL="your-model-id"
+export MODEL_API_KEY="your-api-key"
 ```
+
+See [model configuration](docs/configuration.md) for multiple models, compression, workers, and all defaults.
 
 Open your project and start a conversation:
 
@@ -85,7 +94,7 @@ praxis
 praxis "Explain how this project handles background jobs"
 ```
 
-The first client starts an independent local service. Later clients discover and reuse it. Environment settings are read by the service at startup; opening a new terminal does not replace the configuration of an existing service.
+The first client starts an independent local service. Later clients discover and reuse it. The service loads its configuration file at startup. `--config` explicitly reloads the shared service configuration when no turns are active; editing a file alone does not change a running agent. Credentials are read from the service process environment.
 
 ## Desktop
 

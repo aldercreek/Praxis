@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from collections import deque
 from concurrent.futures import Future
 from dataclasses import dataclass, field
@@ -55,12 +54,6 @@ def message_text(messages: list[AgentMessage]) -> str:
 class MultiAgentConfig:
     max_workers: int = 8
 
-    @classmethod
-    def from_env(cls) -> MultiAgentConfig:
-        max_workers = int(os.environ.get("PRAXIS_AGENT_MAX_WORKERS", "8"))
-        if max_workers < 1:
-            raise ValueError("PRAXIS_AGENT_MAX_WORKERS must be positive")
-        return cls(max_workers=max_workers)
 
 
 @dataclass(slots=True)
@@ -79,3 +72,4 @@ class AgentHandle:
     started_at: float | None = None
     elapsed_seconds: float = 0.0
     workspace: Path | None = None
+    model: str | None = None

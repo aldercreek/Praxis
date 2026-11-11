@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
 from praxis_agent.context.capacity import ContextPolicy, HeuristicTokenEstimator
-from praxis_agent.context.model_catalog import ModelLimits
+from praxis_agent.context.model_metadata import ModelLimits
 from praxis_agent.model_errors import IncompleteResponseError, OutputTruncatedError, PromptTooLongError, SummaryError
 
 if TYPE_CHECKING:

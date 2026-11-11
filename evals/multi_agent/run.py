@@ -16,6 +16,7 @@ from time import monotonic
 from praxis_agent.events import ChildAgentEvent, ModelRequestCompleted, ModelRequestStarted, ToolCallPrepared, ToolFinished, ToolStarted
 from praxis_agent.execution import Run
 from praxis_agent.factory import create_default_agent
+from praxis_agent.config import load_config
 from praxis_agent.mcp import MCPConnections
 
 from scenarios import SCENARIOS
@@ -123,6 +124,7 @@ def run_case(name, args):
     # Empty MCP config prevents the benchmark from connecting to user services.
     mcp = MCPConnections(case / "disabled-mcp.json")
     parent = create_default_agent(workspace, event_sink=trace, bypass_approvals=True,
+                                  configuration=args.configuration, model=args.model,
                                   session_database_path=case / "session.sqlite3", mcp=mcp)
     parent.user_input = SimpleQueue()
     trace.parent = parent
@@ -192,7 +194,8 @@ def run_case(name, args):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--model", default="DeepSeek-V4-Pro-discount")
+    parser.add_argument("--config", type=Path, help="Model configuration file")
+    parser.add_argument("--model", help="Model key from the configuration")
     parser.add_argument("--cases", nargs="+", choices=SCENARIOS, default=list(SCENARIOS))
     parser.add_argument("--parallel", type=int, default=2)
     parser.add_argument("--seconds", type=int, default=900)
@@ -200,8 +203,8 @@ def main():
     args = parser.parse_args()
     args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=True)
-    os.environ["ADA_MODEL"] = args.model
-    os.environ["PRAXIS_AGENT_MAX_WORKERS"] = "5"
+    args.configuration = load_config(args.config)
+    args.model = args.model or args.configuration.default_model
     # Sessions/kernels and logs belong to this evaluation, not a user's live service.
     os.environ["PRAXIS_DATA_DIR"] = str(args.output / "state")
     reports = []

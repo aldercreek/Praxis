@@ -11,9 +11,9 @@ from mcp.types import (
 )
 
 from praxis_agent.agent import Agent, _build_function_call_output
-from praxis_agent.config import ModelConfig
+from support.models import model_config
 from praxis_agent.context.capacity import HeuristicTokenEstimator
-from praxis_agent.context.model_catalog import MODEL_INPUT_CATALOG, MODEL_LIMIT_CATALOG
+from praxis_agent.context.model_metadata import ModelInputCapabilities
 from praxis_agent.context.summarizer import summary_input, summary_sources
 from praxis_agent.context.tool_output import preview_tool_outputs
 from praxis_agent.service.transcript import Transcript
@@ -144,16 +144,11 @@ def test_transport_failure_reports_unknown_completion_without_retry(tmp_path, er
     client.call_tool.assert_awaited_once()
 
 
-def test_model_input_catalog_covers_every_configured_model():
-    assert set(MODEL_INPUT_CATALOG) == set(MODEL_LIMIT_CATALOG)
-    assert len(MODEL_INPUT_CATALOG) == 40
-
-
 @pytest.mark.parametrize("name", ["auto(free)", "unknown-model", "qwen3-coder-next", "deepseek-v4-pro"])
 def test_text_models_keep_text_and_replace_media_without_changing_success(name):
     item = _build_function_call_output(FunctionCall("c", "mcp_query", "{}"), mcp_tool_result(mixed_reply()))
     original = deepcopy(item)
-    adapted = _response_input(item, ModelConfig(api_key="test", model=name).input_capabilities)
+    adapted = _response_input(item, model_config(api_key="test", model=name).input_capabilities)
     assert all(block["type"] == "input_text" for block in adapted["output"])
     assert "Order B" in json.dumps(adapted)
     assert PNG not in json.dumps(adapted)
@@ -167,7 +162,7 @@ def test_unsupported_or_corrupt_image_does_not_break_other_results(mime, data):
                                    ImageContent(type="image", mime_type=mime, data=data)])
     result = mcp_tool_result(reply)
     item = _build_function_call_output(FunctionCall("c", "mcp_query", "{}"), result)
-    adapted = _response_input(item, ModelConfig(api_key="test", model="gpt-6-astra").input_capabilities)
+    adapted = _response_input(item, model_config(api_key="test", model="custom", input_capabilities=ModelInputCapabilities(("image/png",))).input_capabilities)
     assert result.success
     assert all(b["type"] == "input_text" for b in adapted["output"])
     assert "operation completed" in json.dumps(adapted)

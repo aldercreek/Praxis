@@ -22,7 +22,7 @@ from .manager import SessionManager
 from .store import ServiceStore
 
 
-async def serve(directory):
+async def serve(directory, config_path=None):
     lock = ServiceLock(directory)
     if not lock.acquire():
         return
@@ -34,7 +34,7 @@ async def serve(directory):
         store = ServiceStore(SQLiteSessionStore(directory / "state.sqlite3"))
         store.recover()
         mcp = MCPConnections(directory / "mcp.json")
-        manager = SessionManager(store, mcp=mcp)
+        manager = SessionManager(store, mcp=mcp, config_path=config_path)
         mcp.start()
         token = secrets.token_urlsafe(32)
         atomic_write(directory / "service.token", token)
@@ -89,7 +89,10 @@ def main():
         action="store_true",
         help="Discover or launch a detached service, print its registration, then exit",
     )
+    parser.add_argument("--config", type=Path)
     args = parser.parse_args()
+    if args.config:
+        os.environ["PRAXIS_CONFIG"] = str(args.config.expanduser().resolve())
     directory = args.data_dir.expanduser().resolve()
     logging.basicConfig(level=logging.INFO)
     if args.ensure:
@@ -98,7 +101,7 @@ def main():
             json.dumps({key: value for key, value in record.items() if key != "token"})
         )
     else:
-        asyncio.run(serve(directory))
+        asyncio.run(serve(directory, args.config))
 
 
 if __name__ == "__main__":

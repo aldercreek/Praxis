@@ -1,7 +1,7 @@
 """Opt-in, real-model task benchmark; never run by the ordinary pytest suite.
 
 Run this same script with --source pointing at an archived baseline or this
-checkout. Artifacts and JSON traces are kept under --output. Requires ADA_API_KEY.
+checkout. Artifacts and JSON traces are kept under --output. Requires a Praxis configuration file and its configured credentials.
 """
 from __future__ import annotations
 
@@ -73,11 +73,10 @@ def main():
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--backend", required=True)
-    parser.add_argument("--model", default="deepseek-v4.1-flash")
+    parser.add_argument("--model", default=None)
     parser.add_argument("--case", choices=["csv_state", "project_library", "sqlite_zip", "mcp_parallel"], required=True)
     args = parser.parse_args()
     sys.path.insert(0, str(args.source.resolve() / "src"))
-    os.environ["ADA_MODEL"] = args.model
 
     from praxis_agent.events import ToolCallPrepared, ToolFinished
     from praxis_agent.execution import Run
@@ -118,7 +117,7 @@ def main():
                           "success": event.result.success, "output": event.result.output})
             print(json.dumps({"tool": event.tool_name, "success": event.result.success}), flush=True)
 
-    agent = create_default_agent(workspace, session_database_path=destination / "session.sqlite",
+    agent = create_default_agent(workspace, model=args.model, session_database_path=destination / "session.sqlite",
                                  event_sink=SimpleNamespace(emit=observe), bypass_approvals=True, enable_multi_agent=False, mcp=mcp)
     underlying = agent.model_client
 

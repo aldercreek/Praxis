@@ -14,7 +14,7 @@ from praxis_agent.sessions import SessionNotFoundError, SessionStoreError
 
 from .errors import ServiceError, required_text
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 
 
 def create_app(manager, *, token, instance_id, heartbeat=15.0, poll_interval=0.1):

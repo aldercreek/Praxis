@@ -10,7 +10,6 @@ import pytest
 
 from praxis_agent.factory import create_default_agent
 from praxis_agent.mcp import MCPConnections
-from praxis_agent.config import ModelConfig
 from praxis_agent.model import FunctionCall, ModelResponse
 from praxis_agent.multi_agent.models import (
     AgentStatus,
@@ -64,7 +63,6 @@ def test_default_agent_binds_directory_delivers_resumes_and_retains_files(tmp_pa
 
     monkeypatch.setattr("praxis_agent.factory.OpenAIModelClient", Client)
     monkeypatch.setattr("praxis_agent.factory.MCPConnections", lambda: MCPConnections(tmp_path / "absent-mcp.json"))
-    monkeypatch.setattr(ModelConfig, "from_env", classmethod(lambda cls, **kwargs: ModelConfig(api_key="test", model="test")))
     parent_path = tmp_path / "project"
     parent_path.mkdir()
     parent = create_default_agent(parent_path, session_database_path=tmp_path / "state.sqlite3", bypass_approvals=True)

@@ -157,14 +157,13 @@ def test_factory_initialization_failures_do_not_leak_model_clients(
     def invalid_mcp():
         raise ValueError("invalid MCP configuration")
 
-    monkeypatch.setenv("ADA_API_KEY", "test-key")
     monkeypatch.setattr(agent_module, "OpenAIModelClient", Client)
     monkeypatch.setattr(agent_module, "discover_skills", lambda workspace: [])
     monkeypatch.setattr(agent_module, "MCPConnections", invalid_mcp)
     if failure == "multi_agent_config":
-        monkeypatch.setenv("PRAXIS_AGENT_MAX_WORKERS", "invalid")
-    else:
-        monkeypatch.setenv("PRAXIS_AGENT_MAX_WORKERS", "2")
+        from pathlib import Path
+        import os
+        Path(os.environ["PRAXIS_CONFIG"]).write_text("models: {}", encoding="utf-8")
     with pytest.raises(ValueError):
         agent_module.create_default_agent(
             tmp_path, session_database_path=tmp_path / "factory.sqlite3"
