@@ -1,11 +1,13 @@
 
 import pytest
 import yaml
+from types import SimpleNamespace
 
 from praxis_agent.config import load_config
 from praxis_agent.factory import create_default_agent
 from praxis_agent.mcp import MCPConnections
 from praxis_agent.model import ModelResponse
+from praxis_agent.events import ChildAgentEvent, ModelRequestStarted, ModelRequestCompleted
 from praxis_agent.multi_agent.models import AgentStatus
 
 
@@ -37,13 +39,16 @@ def test_factory_routes_main_worker_and_summary_with_own_budgets(tmp_path, monke
                                         'subagents': {'model': 'worker', 'max_concurrent': 2}} if independent else {}))
     mcp = MCPConnections(tmp_path / 'missing-mcp.json')
     mcp.start()
+    events = []
+    sink = SimpleNamespace(emit=events.append)
     agent = create_default_agent(tmp_path, configuration=config,
-                                session_database_path=tmp_path/'state.sqlite', mcp=mcp)
+                                session_database_path=tmp_path/'state.sqlite', mcp=mcp, event_sink=sink)
     try:
         assert created[0].config.model == 'upstream-main'
         assert created[1].config.model == ('upstream-summary' if independent else 'upstream-main')
         assert agent.context_manager._summarizer.model_limits.context_window_tokens == (32000 if independent else 128000)
         runtime = agent.collaboration
+        runtime.parent_turn_id = 'parent-turn'
         spawned = runtime.spawn('Report done', working_directory=str(tmp_path))
         with runtime.condition:
             assert runtime.condition.wait_for(lambda: len(created) >= 4
@@ -57,6 +62,16 @@ def test_factory_routes_main_worker_and_summary_with_own_budgets(tmp_path, monke
                                               and runtime.handles[second['agent_id']].status == AgentStatus.IDLE, timeout=5)
         assert created[4].config.model == 'upstream-main'
         assert created[5].config.model == ('upstream-summary' if independent else 'upstream-main')
+        runtime.pump_events(sink)
+        starts = [event for event in events if isinstance(event, ChildAgentEvent)
+                  and isinstance(event.event, ModelRequestStarted)]
+        ends = [event for event in events if isinstance(event, ChildAgentEvent)
+                and isinstance(event.event, ModelRequestCompleted)]
+        assert len(starts) == len(ends) == 2
+        assert [event.event.model_key for event in starts] == ['worker' if independent else 'main', 'main']
+        assert all(event.turn_id == 'parent-turn' and event.event.request_number == 1 for event in starts)
+        assert len({event.event.turn_id for event in starts}) == 2
+        assert {event.agent_id for event in starts} == {spawned['agent_id'], second['agent_id']}
     finally:
         agent.close()
         mcp.close()

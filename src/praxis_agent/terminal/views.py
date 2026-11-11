@@ -22,6 +22,9 @@ from praxis_agent.events import (
     ContextCompaction,
     MessagesReceived,
     ModelRequestCompleted,
+    ModelRequestEvent,
+    ModelRequestFailed,
+    ModelRequestCancelled,
     ModelRequestStarted,
     PlanUpdated,
     ToolCallPrepared,
@@ -114,6 +117,8 @@ class AgentView:
                          else now if now is not None else monotonic()) - self.started_at)
 
     def consume(self, event: AgentEvent) -> None:
+        if isinstance(event, ModelRequestEvent) and event.purpose == "compression":
+            return
         if isinstance(event, TurnStarted):
             self.started_at, self.finished_at = event.occurred_at, None
             self.state = "running"
@@ -129,9 +134,6 @@ class AgentView:
                 self.task = event.task.splitlines()[0][:200] if event.task else ""
             self._phase = "Waiting for model response"
         elif isinstance(event, ModelRequestStarted):
-            if self._response is not None and self._response.streaming:
-                self._response.update(self._response.text)
-                self.committed_blocks.append(Text("· Response interrupted; retrying", style="dim"))
             self._response = None
             self._phase = "Waiting for model response"
             self._capacity = capacity_footer(event.context_status)
@@ -143,6 +145,12 @@ class AgentView:
         elif isinstance(event, ModelRequestCompleted):
             self._update_response(event.response.output_text if event.response else (
                 self._response.text if self._response else ""))
+        elif isinstance(event, (ModelRequestFailed, ModelRequestCancelled)):
+            if self._response is not None:
+                self._response.update(self._response.text)
+                self.committed_blocks.append(Text("· Response interrupted", style="dim"))
+            self._response = None
+            self._phase = "Model request failed" if isinstance(event, ModelRequestFailed) else "Model request cancelled"
         elif isinstance(event, AssistantTextCompleted):
             self._update_response(event.text)
         elif isinstance(event, ToolCallPrepared):
@@ -211,7 +219,8 @@ class AgentView:
 
     def _on_compaction(self, event: ContextCompaction) -> None:
         if event.stage == "started":
-            self.committed_blocks.append(Text(f"· Context exceeds budget; compacting history (≈ {event.before_tokens:,} tokens)", style="dim"))
+            action = "Compacting selected history" if event.reason == "manual" else "Context exceeds budget; compacting history"
+            self.committed_blocks.append(Text(f"· {action} (≈ {event.before_tokens:,} tokens)", style="dim"))
             self._phase = "Compacting context"
         elif event.stage == "chunk_started":
             phase = "Summary" if event.round_number == 1 else f"Summary retry {event.round_number - 1}"

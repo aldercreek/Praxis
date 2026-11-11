@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from time import monotonic
 from typing import TYPE_CHECKING, Protocol
 
@@ -18,6 +19,7 @@ class AgentEvent:
 
     turn_id: str
     occurred_at: float = field(default_factory=monotonic, kw_only=True)
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat(), kw_only=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,31 +46,56 @@ class ContextCompaction(AgentEvent):
     input_tokens: int | None = None
     output_tokens: int | None = None
     model: str | None = None
+    compaction_id: str = field(default="", kw_only=True)
 
 
 @dataclass(frozen=True, slots=True)
-class ModelRequestStarted(AgentEvent):
+class ModelRequestEvent(AgentEvent):
+    """Request identity is (agent, turn_id, request_number), including summaries."""
+
+    request_number: int
+    purpose: str = field(default="agent", kw_only=True)
+    compaction_id: str | None = field(default=None, kw_only=True)
+    round_number: int = field(default=0, kw_only=True)
+    chunk_number: int = field(default=0, kw_only=True)
+
+
+@dataclass(frozen=True, slots=True)
+class ModelRequestStarted(ModelRequestEvent):
     """表示一次模型请求已经开始。"""
 
-    request_number: int
     input_items: tuple[object, ...] = ()
     context_status: ContextStatus | None = None
+    model_key: str | None = None
+    model: str | None = None
+    protocol: str | None = None
+    parameters: Mapping[str, object] = field(default_factory=dict)
+    max_output_tokens: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
-class AssistantTextDelta(AgentEvent):
+class AssistantTextDelta(ModelRequestEvent):
     """表示模型流式返回的一段助手文本。"""
 
-    request_number: int
     text: str
 
 
 @dataclass(frozen=True, slots=True)
-class ModelRequestCompleted(AgentEvent):
+class ModelRequestCompleted(ModelRequestEvent):
     """表示一次模型响应已经完整接收并解析。"""
 
-    request_number: int
     response: ModelResponse | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ModelRequestFailed(ModelRequestEvent):
+    error_type: str
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
+class ModelRequestCancelled(ModelRequestEvent):
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,6 +259,9 @@ __all__ = [
     "ContextCompaction",
     "EventSink",
     "ModelRequestCompleted",
+    "ModelRequestEvent",
+    "ModelRequestFailed",
+    "ModelRequestCancelled",
     "ModelRequestStarted",
     "MessagesReceived",
     "PlanUpdated",

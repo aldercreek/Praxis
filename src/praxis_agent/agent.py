@@ -10,7 +10,7 @@ from queue import Empty, SimpleQueue
 from threading import Lock
 from typing import TYPE_CHECKING
 
-from praxis_agent.config import DEFAULT_MAX_PARALLEL_TOOLS
+from praxis_agent.config import DEFAULT_MAX_PARALLEL_TOOLS, ModelConfig
 from praxis_agent.context import (
     ContextManager,
     ContextStatus,
@@ -28,6 +28,7 @@ from praxis_agent.events import (
     TurnStarted,
 )
 from praxis_agent.execution import ExecutionStopped, Run, current_run
+from praxis_agent.request_events import model_request_events
 from praxis_agent.model import (
     FunctionCall,
     ModelClient,
@@ -61,6 +62,7 @@ class Agent:
     workspace: Path
     name: str = "Praxis"
     event_sink: EventSink | None = None
+    model_config: ModelConfig | None = None
     approve_tool_call: ToolApprovalHandler | None = None
     bypass_approvals: bool = False
     session_store: SQLiteSessionStore | None = None
@@ -132,7 +134,8 @@ class Agent:
             if self.collaboration is not None:
                 self.collaboration.run = scope
             with self.code_turn() if self.code_turn is not None else nullcontext():
-                return self._run(task)
+                with model_request_events(scope.id, self._emit):
+                    return self._run(task)
         finally:
             self._run_lock.release()
 

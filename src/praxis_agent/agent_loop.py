@@ -4,12 +4,10 @@ import json
 from typing import TYPE_CHECKING
 
 from praxis_agent.events import (
-    AssistantTextDelta,
-    ModelRequestCompleted,
-    ModelRequestStarted,
     PlanUpdated,
 )
 from praxis_agent.execution import run_operation
+from praxis_agent.request_events import request_model
 from praxis_agent.model_errors import IncompleteResponseError, PromptTooLongError, SummaryTooLongError
 from praxis_agent.planning import RunState, build_run_state_context
 from praxis_agent.tool_execution import (
@@ -56,7 +54,6 @@ def run_model_loop(
         check_execution=check_execution,
     )
 
-    request_number = 0
     turn_start = len(agent._history) - 1
     while True:
         if agent._closed:
@@ -99,7 +96,6 @@ def run_model_loop(
         response_retries = 0
         response_hint = ()
         while True:
-            request_number += 1
             team_items = ()
             if agent.collaboration is not None:
                 team_items = (agent.collaboration.context_item(),)
@@ -114,22 +110,16 @@ def run_model_loop(
                 ),
             )
             agent.context_status = context_view.context_status
-            agent._emit(ModelRequestStarted(
-                turn_id, request_number, context_view.items,
-                context_status=context_view.context_status,
-            ))
-            try:
-                response = run_operation(
-                    "model",
-                    lambda handle: agent.model_client.create_response(
-                        context_view.items, tool_definitions,
-                        on_text_delta=lambda text: agent._emit(
-                            AssistantTextDelta(turn_id, request_number, text)
-                        ),
-                    ),
-                )
+            def validate(response):
                 if not response.function_calls and not response.output_text.strip():
                     raise IncompleteResponseError("model returned no text and no function calls")
+
+            try:
+                response = request_model(
+                    agent.model_client, context_view.items, tool_definitions,
+                    config=agent.model_config, context_status=context_view.context_status,
+                    validate=validate,
+                )
             except PromptTooLongError as error:
                 failure = error
                 while recovery_rounds < 2:
@@ -179,13 +169,6 @@ def run_model_loop(
             # 官方协议要求把模型本轮输出原样加入下一轮输入。
             agent._history.extend(response.output_items)
             agent._pending_calls = list(response.function_calls)
-            agent._emit(
-                ModelRequestCompleted(
-                    turn_id,
-                    request_number,
-                    response,
-                )
-            )
         check_execution()
 
         if not response.function_calls:

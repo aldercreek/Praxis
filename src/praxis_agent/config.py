@@ -71,6 +71,7 @@ class ModelConfig:
     max_parallel_tools: int = DEFAULT_MAX_PARALLEL_TOOLS
     timeout_seconds: float = 120
     max_retries: int = 2
+    model_key: str | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "parameters", MappingProxyType(dict(self.parameters)))
@@ -102,7 +103,7 @@ class PraxisConfig:
         parameters = dict(config.parameters)
         if compression:
             parameters.update(self.compression_parameters)
-        return replace(config, api_key=key, parameters=parameters)
+        return replace(config, api_key=key, parameters=parameters, model_key=name)
 
 
 class _ConfigLoader(yaml.SafeLoader):

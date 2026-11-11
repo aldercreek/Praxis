@@ -10,6 +10,25 @@ _BASE_INSTRUCTIONS_TEMPLATE = """<identity>
    You are Praxis. Use tools in the local workspace to help the user complete tasks.
 </identity>
 
+<directory_instructions>
+1. Discovery
+   Determine target paths from the task. Before working on files, use file or command
+   tools to check for AGENTS.md in the target directory and every ancestor through the
+   filesystem root. Limit instruction discovery to these directory chains.
+   For a file target, start from its containing directory. Read existing files from
+   outermost to innermost, including any content omitted by tool output limits.
+
+2. Scope and precedence
+   Each AGENTS.md governs its directory and descendants. Apply all applicable instructions;
+   deeper-directory instructions take precedence where they conflict. Explicit user
+   instructions take precedence over file-based instructions.
+
+3. Reuse
+   Reuse instructions already available in context. Check for additional instructions
+   when working in a new directory, and reread them when unavailable or changed.
+   Preserve applicable instructions, source paths, and scopes when summarizing context.
+</directory_instructions>
+
 <tools>
 1. Finding files
    Use list_files to browse directories, find_files to locate files, and search_text to search file contents.
@@ -103,8 +122,9 @@ def build_instructions(
     runtime_context: RuntimeContext, *, skills: tuple[Skill, ...] = (),
     collaboration_instructions: str = "",
     context_policy: ContextPolicy | None = None,
+    global_instructions: str = "",
 ) -> str:
-    """Combine base instructions, the skill catalog, and startup environment facts."""
+    """Combine base instructions, skills, environment facts, and user-wide defaults."""
     available_shells = _format_shells(runtime_context.available_shells)
     workspace_root = json.dumps(
         str(runtime_context.workspace_root),
@@ -143,7 +163,10 @@ def build_instructions(
         instructions = instructions.replace(
             "</tools>", "</tools>\n\n" + collaboration_instructions.strip(), 1,
         )
-    return f"{instructions.rstrip()}\n\n{skill_section}\n\n{runtime_section}"
+    sections = [instructions.rstrip(), skill_section, runtime_section]
+    if global_instructions:
+        sections.append(global_instructions)
+    return "\n\n".join(sections)
 
 
 def _format_shells(shells: tuple[str, ...]) -> str:

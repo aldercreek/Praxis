@@ -10,7 +10,7 @@ from praxis_agent.context.manager import ContextManager
 from praxis_agent.context.model_metadata import ModelLimits
 from praxis_agent.context.models import ConversationHistory
 from praxis_agent.context.summarizer import ModelContextSummarizer
-from praxis_agent.events import ContextCompaction
+from praxis_agent.events import ContextCompaction, ModelRequestStarted, ModelRequestCompleted, ModelRequestFailed
 from praxis_agent.execution import ExecutionStopped
 from praxis_agent.model import ModelResponse
 from praxis_agent.model_errors import IncompleteResponseError, ModelClientError, OutputTruncatedError, SummaryError
@@ -66,6 +66,13 @@ def test_automatic_summary_recovers_or_saves_safe_trim_and_continues(tmp_path, f
         assert len([event for event in compactions if event.stage == "fallback"]) == int(succeed_on is None)
         assert compactions[-1].stage == "completed"
         assert compactions[-1].request_count == len(summary_calls)
+        requests = [event for event in events if isinstance(event, ModelRequestStarted)]
+        endings = [event for event in events if isinstance(event, (ModelRequestCompleted, ModelRequestFailed))]
+        assert [event.request_number for event in requests] == list(range(1, len(summary_calls) + 2))
+        assert [event.request_number for event in endings] == [event.request_number for event in requests]
+        assert all(event.compaction_id == compactions[0].compaction_id for event in requests[:-1])
+        assert requests[-1].purpose == "agent" and requests[-1].compaction_id is None
+
         if succeed_on is None:
             assert agent.context_status.usage_percent > 20
             result = next(message["payload"] for message in manager.operations.project(agent._history.snapshot())

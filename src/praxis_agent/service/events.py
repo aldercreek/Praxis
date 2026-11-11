@@ -9,6 +9,7 @@ from praxis_agent.events import (
     AgentEvent,
     ChildAgentEvent,
     ModelRequestCompleted,
+    ModelRequestEvent,
     ModelRequestStarted,
     ToolFinished,
 )
@@ -80,6 +81,11 @@ def display_event(event: AgentEvent) -> tuple[str, str, str, dict]:
         }
     if child_turn is not None:
         data["child_turn_id"] = child_turn
+    data["occurred_at"] = event.occurred_at
+    data["timestamp"] = event.timestamp
+    if isinstance(event, ModelRequestEvent):
+        data.update(purpose=event.purpose, compaction_id=event.compaction_id,
+                    round_number=event.round_number, chunk_number=event.chunk_number)
     return type(event).__name__, turn_id, agent_id, data
 
 
@@ -88,6 +94,11 @@ class ServiceEventSink:
         self.runtime = runtime
 
     def emit(self, event: AgentEvent) -> None:
+        payload = event.event if isinstance(event, ChildAgentEvent) else event
+        # Summary requests are telemetry, not assistant responses. Compression
+        # progress already supplies the display with status and per-chunk usage.
+        if isinstance(payload, ModelRequestEvent) and payload.purpose == "compression":
+            return
         self.runtime.publish(*display_event(event))
 
     emit_live = emit

@@ -9,18 +9,14 @@ import subprocess
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING
 
-from pygments.token import Comment, Keyword
 from rich.console import Group, RenderableType
-from rich.markdown import Heading, Markdown
-from rich.style import Style
-from rich.syntax import ANSISyntaxTheme
 from rich.table import Table
 from rich.text import Text
-from rich.theme import Theme
 
 from praxis_agent import __version__
+from praxis_agent.terminal.markdown import CODE_THEME, MARKDOWN_THEME, ConversationMarkdown
 from praxis_agent.terminal.preview import OutputPreview, output_lines
 
 if TYPE_CHECKING:
@@ -68,25 +64,6 @@ class WelcomeHeader:
             content.append("\nDirectory ", style="#a0a0a0")
             content.append_text(path)
         yield content
-
-
-class ConversationHeading(Heading):
-    def __rich_console__(self, console, options):
-        yield Text("#" * int(self.tag[1]) + " ", style="bold") + self.text
-
-
-class ConversationMarkdown(Markdown):
-    elements: ClassVar[dict] = {**Markdown.elements, "heading_open": ConversationHeading}
-
-
-# Keep conversation code in the same foreground as prose; weight carries emphasis.
-CODE_THEME = ANSISyntaxTheme({
-    Keyword: Style(bold=True), Comment: Style(dim=True),
-})
-MARKDOWN_THEME = Theme({
-    **{f"markdown.h{level}": "bold" for level in range(1, 7)},
-    "markdown.code": "bold", "markdown.code_block": "none",
-})
 
 
 _MESSAGE_ID = r"m(?:[0-9]+|[0-9a-f]{32})"

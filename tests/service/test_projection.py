@@ -96,7 +96,9 @@ def test_event_adapter_omits_prompts_and_does_not_duplicate_child_events():
         "AssistantTextDelta",
         "parent-turn",
         "worker-1",
-        {"request_number": 1, "text": "hello", "child_turn_id": "child-turn"},
+        {"request_number": 1, "text": "hello", "child_turn_id": "child-turn",
+         "occurred_at": child.event.occurred_at, "timestamp": child.event.timestamp,
+         "purpose": "agent", "compaction_id": None, "round_number": 0, "chunk_number": 0},
     )
     assert "private prompt" not in json.dumps(received)
     assert "response" not in received[-1][-1]
@@ -129,6 +131,7 @@ def test_response_retry_preserves_partial_as_failed_without_affecting_other_agen
     transcript = Transcript()
     transcript.consume("AssistantTextDelta", "turn", "main", {"request_number": 1, "text": "partial"})
     transcript.consume("AssistantTextDelta", "turn", "worker", {"request_number": 1, "text": "working"})
+    transcript.consume("ModelRequestFailed", "turn", "main", {"request_number": 1, "error_type": "IncompleteResponseError", "message": "stream interrupted"})
     transcript.consume("ModelRequestStarted", "turn", "main", {"request_number": 2})
     assert [message["status"] for message in transcript.messages] == ["failed", "streaming"]
     transcript.consume("ModelRequestCompleted", "turn", "main", {"request_number": 2, "output_text": "done"})

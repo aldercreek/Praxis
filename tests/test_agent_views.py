@@ -21,6 +21,7 @@ from praxis_agent.events import (
     MessagesReceived,
     ModelRequestCompleted,
     ModelRequestStarted,
+    ModelRequestFailed,
     PlanUpdated,
     ToolCallPrepared,
     ToolFinished,
@@ -82,15 +83,16 @@ def test_response_retry_finishes_partial_stream_and_keeps_new_response_separate(
     view.consume(ModelRequestStarted("turn", 1))
     view.consume(AssistantTextDelta("turn", 1, "partial"))
     partial = view._response
+    view.consume(ModelRequestFailed("turn", 1, "IncompleteResponseError", "stream interrupted"))
     view.consume(ModelRequestStarted("turn", 2))
     assert not partial.streaming
-    assert "Response interrupted; retrying" in text_of(view)
+    assert "Response interrupted" in text_of(view)
     view.consume(AssistantTextDelta("turn", 2, "complete"))
     view.consume(ModelRequestCompleted("turn", 2, ModelResponse((), "complete", ())))
     assert view._response is not partial
     assert not view._response.streaming
     view.consume(ModelRequestStarted("turn", 3))
-    assert text_of(view).count("Response interrupted; retrying") == 1
+    assert text_of(view).count("Response interrupted") == 1
 
 
 def test_safe_compaction_fallback_is_visible_as_continuation():

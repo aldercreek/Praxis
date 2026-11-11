@@ -40,6 +40,7 @@ def test_snapshot_counts_successful_compactions_and_freezes_time(monkeypatch):
                 sink.emit(ModelRequestStarted("r1", 1))
                 for stage in ("started", "chunk_started", "chunk_completed", "completed", "failed"):
                     sink.emit(ContextCompaction("r1", stage, 60000))
+                sink.emit(ContextCompaction("r1", "completed", 60000, reason="manual"))
                 sink.emit(ToolFinished("r1", "a", "compress", ToolResult(True, "saved")))
                 sink.emit(ToolFinished("r1", "b", "compress", ToolResult(False, "failed")))
                 sink.emit(ToolFinished("r1", "c", "delete", ToolResult(True, "saved")))

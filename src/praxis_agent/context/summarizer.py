@@ -5,12 +5,14 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
+from praxis_agent.request_events import request_model, next_summary_round
 from praxis_agent.context.capacity import ContextPolicy, HeuristicTokenEstimator
 from praxis_agent.context.model_metadata import ModelLimits
 from praxis_agent.model_errors import IncompleteResponseError, OutputTruncatedError, PromptTooLongError, SummaryError
 
 if TYPE_CHECKING:
     from praxis_agent.model import ModelClient, ModelResponse
+    from praxis_agent.config import ModelConfig
 
 SummaryProgress = Callable[[int, int, int, "ModelResponse | None"], None]
 
@@ -125,6 +127,7 @@ class ModelContextSummarizer:
     input_limit_tokens: int | None = None
     safety_ratio: float = 0.95
     estimator: HeuristicTokenEstimator = field(default_factory=HeuristicTokenEstimator)
+    model_config: ModelConfig | None = None
 
     def summarize(
         self, messages: Sequence[dict[str, object]], instructions: str,
@@ -159,6 +162,7 @@ class ModelContextSummarizer:
         # All chunks and failure types share two retries for this task. Each pass
         # starts over; PTL shrinks input, truncation tightens the target, never the cap.
         for attempt in range(3):
+            round_number = next_summary_round(attempt)
             summary = ""
             index = offset = chunk_number = 0
             try:
@@ -171,14 +175,19 @@ class ModelContextSummarizer:
                     # 后续分块大小取决于实际摘要长度，处理完以前总块数未知。
                     chunk_count = chunk_number if next_index == len(messages) else 0
                     if on_progress is not None:
-                        on_progress(attempt + 1, chunk_number, chunk_count, None)
+                        on_progress(round_number, chunk_number, chunk_count, None)
                     items = summary_input(chunk, instructions, summary, target_tokens,
                                           reference_context=reference_context)
-                    response = self.model_client.create_response(items, tools=(), max_output_tokens=output_limit)
-                    if response.function_calls or not response.output_text.strip():
-                        raise IncompleteResponseError("summary model returned no usable text summary")
+                    def validate(response):
+                        if response.function_calls or not response.output_text.strip():
+                            raise IncompleteResponseError("summary model returned no usable text summary")
+
+                    response = request_model(
+                        self.model_client, items, (), config=self.model_config,
+                        purpose="compression", max_output_tokens=output_limit, validate=validate,
+                    )
                     if on_progress is not None:
-                        on_progress(attempt + 1, chunk_number, chunk_count, response)
+                        on_progress(round_number, chunk_number, chunk_count, response)
                     summary = response.output_text.strip()
                     index, offset = next_index, next_offset
                 return summary

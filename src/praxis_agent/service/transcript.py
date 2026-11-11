@@ -67,6 +67,8 @@ class Transcript:
         return message
 
     def consume(self, event: str, turn_id: str, agent_id: str, data: dict):
+        if data.get("purpose") == "compression":
+            return
         common = {"turn_id": turn_id, "agent_id": agent_id}
         execution_id = data.get("child_turn_id") or turn_id
         key = (agent_id, execution_id)
@@ -91,10 +93,10 @@ class Transcript:
                 source="user" if agent_id == "main" else "agent",
                 id=f"user:{turn_id}:{agent_id}:{execution_id}",
             )
-        elif event == "ModelRequestStarted":
-            previous = self.last_response.get(key)
-            if previous is not None and previous.get("status") == "streaming":
-                previous["status"] = "failed"
+        elif event in {"ModelRequestFailed", "ModelRequestCancelled"}:
+            message = self.responses.get((*key, data["request_number"]))
+            if message is not None:
+                message["status"] = "failed" if event == "ModelRequestFailed" else "cancelled"
         elif event in {"AssistantTextDelta", "ModelRequestCompleted"}:
             response_key = (*key, data["request_number"])
             text = (

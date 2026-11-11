@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
-from time import monotonic
 from uuid import uuid4
 
 from praxis_agent.context.capacity import (
@@ -28,8 +27,8 @@ from praxis_agent.context.operations import (
 )
 from praxis_agent.context.summarizer import ContextSummarizer
 from praxis_agent.context.tool_output import preview_tool_outputs
-from praxis_agent.events import ContextCompaction, EventSink
-from praxis_agent.execution import ExecutionStopped
+from praxis_agent.events import EventSink
+from praxis_agent.request_events import compaction_events
 from praxis_agent.model_errors import ModelClientError, PromptTooLongError, SummaryError, SummaryTooLongError
 
 
@@ -163,42 +162,17 @@ class ContextManager:
 
     def _observe_compaction(self, transient_items, tool_definitions, before_tokens,
                             *, error=None, previous_summary=None) -> str | None:
-        started = monotonic()
-        request_count = 0
-
-        def emit(stage, **values):
-            if self.event_sink is not None:
-                self.event_sink.emit(ContextCompaction(
-                    self.turn_id, stage, before_tokens,
-                    elapsed_seconds=monotonic() - started, request_count=request_count, **values,
-                ))
-
-        def progress(round_number, chunk_number, chunk_count, response):
-            nonlocal request_count
-            if response is None:
-                request_count += 1
-            usage = response.usage if response is not None else None
-            emit("chunk_started" if response is None else "chunk_completed",
-                 round_number=round_number, chunk_number=chunk_number, chunk_count=chunk_count,
-                 input_tokens=usage.input_tokens if usage else None,
-                 output_tokens=usage.output_tokens if usage else None,
-                 model=response.model if response else None)
-
-        emit("started")
-        try:
+        with compaction_events(
+            self.turn_id, self.event_sink, before_tokens,
+            "context_overflow" if error is not None else "context_pressure",
+        ) as progress:
             status, summary = self._compact_context(
-                transient_items, tool_definitions, progress,
-                on_fallback=lambda failure: emit("fallback", error=str(failure)),
+                transient_items, tool_definitions, progress.progress,
+                on_fallback=lambda failure: progress.event("fallback", error=str(failure)),
                 error=error, previous_summary=previous_summary,
             )
-        except ExecutionStopped:
-            emit("cancelled")
-            raise
-        except Exception as error:
-            emit("failed", error=str(error))
-            raise
-        emit("completed", after_tokens=status.estimated_input_tokens)
-        return summary
+            progress.after_tokens = status.estimated_input_tokens
+            return summary
 
     def _compact_context(self, transient_items, tool_definitions, on_progress,
                          *, on_fallback, error, previous_summary) -> tuple[ContextStatus, str | None]:
@@ -389,6 +363,17 @@ class ContextManager:
             raise ValueError("delete does not accept summary or instructions")
         selected = self._select(message_ids)
         if action == "compress":
+            before = self._token_estimator.estimate_request(
+                instructions=self._instructions,
+                input_items=self._render_current_messages() + self._transient_items,
+                tools=self._tool_definitions,
+            )
+            with compaction_events(self.turn_id, self.event_sink, before, "manual") as progress:
+                return self._change_selected(action, selected, instructions, summary, progress)
+        return self._change_selected(action, selected, instructions, summary)
+
+    def _change_selected(self, action, selected, instructions, summary, progress=None):
+        if action == "compress":
             # reasoning 不供摘要模型阅读，但整组输出完成压缩后一起移出视图。
             selected_ids = {message["message_id"] for message in selected}
             selected_ids.update(compression_reasoning_ids(self._current_messages, selected_ids))
@@ -410,6 +395,7 @@ class ContextManager:
                     raise ValueError("summary model is not configured")
                 summary = self._summarizer.summarize(
                     sources, instructions, reference_context=self._summary_context,
+                    on_progress=progress.progress,
                     max_output_tokens=self._policy.summary_output_tokens,
                 )
                 if not isinstance(summary, str) or not summary.strip():
@@ -446,6 +432,13 @@ class ContextManager:
             if status.estimated_input_tokens > status.effective_input_limit_tokens:
                 raise ValueError("compacted context still exceeds the budget; no operation was saved")
         self.operations.record(operation)
+        if progress is not None:
+            projected = self.operations.project(self._history_snapshot)
+            progress.after_tokens = self._token_estimator.estimate_request(
+                instructions=self._instructions,
+                input_items=tuple(render_message(m) for m in projected) + self._transient_items,
+                tools=self._tool_definitions,
+            )
         return json.dumps({
             "operation_id": operation.operation_id,
             "message_id": replacement["message_id"],

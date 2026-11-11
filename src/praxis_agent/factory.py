@@ -12,6 +12,7 @@ from praxis_agent.events import (
     EventSink,
 )
 from praxis_agent.mcp import MCPConnections
+from praxis_agent.instructions import load_global_instructions
 from praxis_agent.model import (
     ModelClient,
     OpenAIModelClient,
@@ -65,6 +66,7 @@ def create_default_agent(
     collaboration_config = MultiAgentConfig(configuration.max_concurrent) if enable_multi_agent else None
     runtime_context = collect_runtime_context(workspace)
     skills = discover_skills(runtime_context.workspace_root)
+    global_instructions = load_global_instructions()
     session_store = session_store or SQLiteSessionStore(session_database_path)
     history: list[object] = []
 
@@ -96,6 +98,7 @@ def create_default_agent(
         skills=skills,
         collaboration_instructions=PARENT_INSTRUCTIONS if enable_multi_agent else "",
         context_policy=config.context_policy,
+        global_instructions=global_instructions,
     )
     control = ExecutionControl()
     model_client = OpenAIModelClient(
@@ -108,6 +111,7 @@ def create_default_agent(
     )
     agent = Agent(
         model_client=model_client,
+        model_config=config,
         tool_registry=create_default_registry(
             config.context_policy,
             check_execution=control.check,
@@ -176,6 +180,7 @@ def create_default_agent(
             skills=skills,
             collaboration_instructions=WORKER_INSTRUCTIONS,
             context_policy=worker_config.context_policy,
+            global_instructions=load_global_instructions(),
         )
         registry = ToolRegistry()
         for tool in create_default_registry(
@@ -204,6 +209,7 @@ def create_default_agent(
         )
         return Agent(
             model_client=client,
+            model_config=worker_config,
             tool_registry=registry,
             workspace=handle.workspace,
             name=agent_id,
@@ -259,6 +265,7 @@ def _create_context_manager(
         summarizer=ModelContextSummarizer(
             summary_client,
             model_limits=summary_config.model_limits,
+            model_config=summary_config,
             safety_ratio=summary_config.context_policy.safety_ratio,
         ),
     )

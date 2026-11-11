@@ -36,7 +36,7 @@ def decode_event(frame):
         )
     if "agent_id" in {field.name for field in fields(cls)}:
         data["agent_id"] = frame.get("agent_id", "main")
-    allowed = {field.name for field in fields(cls)} - {"turn_id", "occurred_at"}
+    allowed = {field.name for field in fields(cls)} - {"turn_id"}
     event = cls(
         turn_id, **{key: value for key, value in data.items() if key in allowed}
     )

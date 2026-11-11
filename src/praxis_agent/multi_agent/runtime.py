@@ -20,7 +20,6 @@ from praxis_agent.events import (
     ContextCompaction,
     EventSink,
     ModelRequestStarted,
-    ToolFinished,
     ToolOutputDelta,
     TurnCancelled,
 )
@@ -54,11 +53,9 @@ class _WorkerEvents:
             ))
             return
         with self.runtime.condition:
-            if isinstance(event, ModelRequestStarted):
+            if isinstance(event, ModelRequestStarted) and event.purpose == "agent":
                 self.handle.context_status = self.handle.agent.context_status
             elif isinstance(event, ContextCompaction) and event.stage == "completed":
-                self.handle.compaction_count += 1
-            elif isinstance(event, ToolFinished) and event.tool_name == "compress" and event.result.success:
                 self.handle.compaction_count += 1
         self.runtime._publish(ChildAgentEvent(
             self.handle.parent_turn_id, self.handle.agent_id, event,

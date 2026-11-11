@@ -17,6 +17,23 @@ Praxis helps you explore a codebase, edit files, run commands, and coordinate ag
 - **Delegate focused tasks.** Subagents have their own context and working directory. The parent coordinates their results.
 - **Manage long conversations.** Search saved history and compress the model's context while retaining the original records.
 
+## Directory instructions
+
+Praxis reads `~/.praxis/AGENTS.md` when creating an agent, including subagents and
+restored sessions. These user-wide defaults stay in its fixed context and count
+toward the context budget. Changes apply to newly created agents; existing agents
+keep their startup snapshot. Missing or empty files are ignored; unreadable files
+produce an error rather than silently dropping instructions.
+
+For task-specific instructions, the agent uses its existing file and command tools
+to find `AGENTS.md` in the actual target directory and its ancestors up to the
+filesystem root. This works outside Git repositories and independently of the
+startup directory. Instructions apply to their directory and descendants; deeper
+instructions take precedence on conflicts, and explicit user requests take precedence
+over file instructions. The agent checks new directories as needed and rereads rules
+that have changed or are no longer available in context. This discovery is guided by
+the prompt, not enforced by a filesystem interceptor.
+
 ## Agent collaboration
 
 Give the main agent an objective and clear boundaries. For example:
