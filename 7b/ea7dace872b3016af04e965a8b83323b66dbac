@@ -1,0 +1,23 @@
+docs/configuration.md
+  s_43e924c679c1eb::t_a3dad578428342 1-61
+src/praxis_agent/factory.py
+  s_43e924c679c1eb::t_20157edb48fc05 6,51-52,54,63-65,83,88,90-99,105,125,167-171,178,182,190,196,201,214,221,241-242,251,259-260
+README.md
+  s_43e924c679c1eb::t_a3dad578428342 44-57,60,64,67-68,77
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.52-trip",
+  "base_commit_sha": "7bea7dace872b3016af04e965a8b83323b66dbac",
+  "prompts": {},
+  "sessions": {
+    "s_43e924c679c1eb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c87b-7984-7fd1-b76c-a67eb47c6b1b",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "aldercreek <57739268+aldercreek@users.noreply.github.com>"
+    }
+  }
+}
