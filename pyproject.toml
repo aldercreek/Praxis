@@ -24,6 +24,9 @@ dependencies = [
     "rich>=13.9,<15",
     "textual>=1,<2",
     "pyperclip>=1.11,<2",
+    "arize-phoenix>=21,<22",
+    "opentelemetry-sdk>=1.44,<2",
+    "opentelemetry-exporter-otlp-proto-http>=1.44,<2",
 ]
 
 [project.optional-dependencies]

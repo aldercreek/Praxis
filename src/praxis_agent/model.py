@@ -5,7 +5,7 @@ from threading import Event, Lock, Thread
 from typing import Protocol
 
 from httpx2 import TransportError
-from openai import AsyncOpenAI, OpenAIError, Omit
+from openai import APIConnectionError, AsyncOpenAI, OpenAIError, Omit
 from openai.types.responses import (
     Response,
     ResponseCompletedEvent,
@@ -177,8 +177,8 @@ class OpenAIModelClient:
                         getattr(detail, "code", None),
                         details=detail.model_dump() if detail is not None else None,
                     )
-        except TransportError as error:
-            raise IncompleteResponseError(f"model stream interrupted: {error}") from error
+        except (TransportError, APIConnectionError) as error:
+            raise IncompleteResponseError(f"model stream interrupted: {error.__cause__ or error}") from error
         finally:
             await stream.close()
         if completed is None:

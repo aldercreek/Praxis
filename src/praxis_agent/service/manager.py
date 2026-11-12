@@ -8,6 +8,7 @@ from threading import RLock
 
 from praxis_agent.config import load_config
 from praxis_agent.factory import create_default_agent
+from praxis_agent.observability import Observability
 
 from .errors import ServiceError, required_text
 from .deletion import SessionDeletions
@@ -19,8 +20,9 @@ class SessionManager:
         self.store = store
         self.mcp = mcp
         self.config = load_config(config_path)
+        self.observability = Observability(self.config.observability, store.db.path.parent / "phoenix")
         self.agent_factory = agent_factory
-        self.factory = partial(agent_factory, mcp=mcp, configuration=self.config)
+        self.factory = partial(agent_factory, mcp=mcp, configuration=self.config, observability=self.observability)
         self.lock = RLock()
         self.runtimes = {}
         self.closed = False
@@ -41,6 +43,7 @@ class SessionManager:
             "config_path": str(self.config.path),
             "configured": True,
             "bypass_approvals": self.bypass_approvals,
+            "observability": self.observability.snapshot(),
         }
 
     def create(self, data):
@@ -128,7 +131,11 @@ class SessionManager:
                     runtime.agent.close()
                     runtime.agent = None
             self.config = config
-            self.factory = partial(self.agent_factory, mcp=self.mcp, configuration=config)
+            if "config_path" in data:
+                self.observability.close()
+                self.observability = Observability(config.observability, self.store.db.path.parent / "phoenix")
+            self.factory = partial(self.agent_factory, mcp=self.mcp, configuration=config,
+                                   observability=self.observability)
             self.bypass_approvals = bypass
             for runtime in runtimes:
                 runtime.factory = self.factory
@@ -145,5 +152,8 @@ class SessionManager:
             for runtime in runtimes:
                 runtime.close()
         finally:
-            if self.mcp is not None:
-                self.mcp.close()
+            try:
+                self.observability.close()
+            finally:
+                if self.mcp is not None:
+                    self.mcp.close()

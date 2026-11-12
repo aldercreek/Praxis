@@ -24,12 +24,13 @@ from textual.widgets import Static
 
 from praxis_agent.terminal.cells import (
     ACCENT,
+    CommandResult,
     MessageBlock,
     WelcomeHeader,
 )
 from praxis_agent.terminal.composer import Composer
-from praxis_agent.terminal.delete_dialog import DeleteSessionDialog
 from praxis_agent.terminal.screen import ConversationScreen
+from praxis_agent.terminal.slash_commands import (command_error, help_result, matching_commands, mcp_result, sessions_result, tracing_result)
 from praxis_agent.terminal.selection import SelectableText
 from praxis_agent.terminal.views import ViewEventSink, ViewStore
 from praxis_agent.terminal.widgets import (
@@ -62,6 +63,8 @@ class PraxisApp(App[int]):
     #jump-latest:hover { color: $foreground; }
     #controls { width: 100%; height: auto; padding: 1 0 0 0; }
     #controls.approving { padding-top: 0; }
+    #controls.command-result { padding-top: 0; }
+    #controls.command-result #composer { padding: 0 1; }
     #status { height: auto; max-height: 2; color: $text-muted; padding: 0 1; }
     #pending { height: auto; max-height: 3; color: $text-muted; padding: 0 1; }
     #agent-bar { height: 1; }
@@ -140,12 +143,24 @@ class PraxisApp(App[int]):
         self._cursor_visible = False
         self._cursor_style_set = False
         self._show_terminal_cursor = False
+        self._observability_warning = ""
+        self._command_query = ""
+        self._dismissed_command_query = None
+        self._command_jobs = set()
+        self._delete_confirmation = False
+        self._delete_choice = 0
+        self._command_sessions = []
+        self._command_sessions_loading = False
+        self._command_sessions_query = None
+        self._command_sessions_error = ""
+        self._command_index = 0
+        self._observability_polling = False
 
     def get_default_screen(self) -> Screen:
         return ConversationScreen()
 
     def compose(self) -> ComposeResult:
-        with VerticalScroll(id="transcript"):
+        with VerticalScroll(id="transcript", can_focus=False):
             yield Static("", id="welcome")
             yield Vertical(id="blocks")
         yield Static(Text("↓ Jump to latest · Ctrl+End", no_wrap=True, overflow="ellipsis"), id="jump-latest")
@@ -161,7 +176,7 @@ class PraxisApp(App[int]):
             with Horizontal(id="composer"):
                 yield Static("›", id="prompt")
                 yield Composer()
-            with VerticalScroll(id="shortcuts"):
+            with VerticalScroll(id="shortcuts", can_focus=False):
                 yield Static("", id="shortcut-content")
             yield FooterHint(id="hint")
 
@@ -171,6 +186,14 @@ class PraxisApp(App[int]):
         return (len(self.store.views) == 1 and main.state == "idle" and not main.committed_blocks
                 and not (self.busy or self.closing or self._approval))
 
+    @property
+    def inline_command_result(self) -> bool:
+        view = self.store.get(self.selected_agent_id)
+        return (self.selected_agent_id == "main" and not self.busy
+                and self._approval is None and view.state not in {"running", "closing"}
+                and bool(view.committed_blocks)
+                and isinstance(view.committed_blocks[-1], CommandResult))
+
     async def on_mount(self) -> None:
         self._main_screen = self.screen
         self._main_screen.styles.layout = ConversationLayout()
@@ -178,6 +201,9 @@ class PraxisApp(App[int]):
                                if isinstance(block, MessageBlock) and block.user]
         self._main_screen.query_one("#agent-bar").display = False
         self.set_interval(0.1, self._tick)
+        if self.connection is not None and hasattr(self.connection, "observability_status"):
+            self.set_interval(2, self._poll_observability)
+            self.run_worker(self._poll_observability())
         if sys.platform == "win32" and not self.is_headless and self._driver is not None:
             # Textual 1's Windows driver does not probe synchronized output itself.
             self._driver.write("\x1b[?2026$p")
@@ -288,6 +314,7 @@ class PraxisApp(App[int]):
         is_main = self.selected_agent_id == "main"
         controls = screen.query_one("#controls")
         controls.set_class(approval, "approving")
+        controls.set_class(self.inline_command_result, "command-result")
         agents = screen.query_one("#agent-bar")
         agents.display = len(self.store.visible_agent_ids) > 1 and not approval
         screen.query_one("#composer").display = is_main and not approval
@@ -295,7 +322,7 @@ class PraxisApp(App[int]):
         running = view.state in {"running", "closing"} or (
             self.busy and is_main and view.state not in {"ended", "failed", "cancelled"})
         reconnecting = bool(self.connection and getattr(self.connection, "connection_error", ""))
-        status.display = not approval and (not self.empty_session or reconnecting)
+        status.display = not approval and (reconnecting or (not self.empty_session and not self.inline_command_result))
         if status.display:
             settling = view.state == "closing" or running and (self.stopping or self.closing)
             if settling:
@@ -356,14 +383,24 @@ class PraxisApp(App[int]):
             actions = [("Ctrl+R", "Send retained input"), ("Shift+←", "Edit pending")]
         elif retained and not editor.text:
             actions = [("Shift+←", "Edit pending"), ("?", "Shortcuts")]
+        elif self._delete_confirmation:
+            actions = [("↑/↓", "Select"), ("Enter", "Confirm"), ("Esc", "Cancel")]
+        elif shortcuts.display and editor.text.startswith("/"):
+            matches = self._matching_commands(editor.text)
+            action = "Enter parameters" if matches and matches[self._command_index % len(matches)][0] == "/stop-command" else "Run"
+            actions = [("↑/↓", "Select"), ("Tab", "Complete"), ("Enter", action), ("Esc", "Dismiss")]
+            if matches and len(matches) > int(shortcuts.styles.max_height.value):
+                actions.append(("", f"{self._command_index + 1}/{len(matches)}"))
         elif editor.text:
             actions = [("Enter", "Send follow-up" if running else "Send"), ("Shift+Enter", "New line")]
         elif running:
             actions = [("Enter", "Send follow-up")]
         else:
             actions = [("/", "Commands"), ("?", "Shortcuts")]
-        if self.busy and not (self.stopping or self.closing):
+        if self.busy and not (self.stopping or self.closing) and not shortcuts.display:
             actions.insert(1, ("Esc", "Stop turn"))
+        if self._command_jobs:
+            actions = [("", "Running " + ", ".join(sorted(self._command_jobs)) + "…")]
         hint.update_hint(shortcut_line(actions, width))
 
     def on_resize(self) -> None:
@@ -386,8 +423,37 @@ class PraxisApp(App[int]):
 
     def _refresh_shortcuts(self, editor: Composer, approval: bool) -> None:
         widget = self._main_screen.query_one("#shortcuts", VerticalScroll)
+        if self._delete_confirmation:
+            widget.display = True
+            widget.styles.max_height = max(1, self.size.height // 2)
+            title = self.connection.summary.get("title") or "New chat"
+            content = Text("Delete this chat?\n", style="bold", no_wrap=True, overflow="ellipsis")
+            content.append(title + "\n", style="not bold")
+            content.append("Permanently delete chat history.\nWorkspace files are kept.\n", style="not bold #a0a0a0")
+            if self.busy:
+                content.append("The running task will be stopped.\n", style="not bold #a0a0a0")
+            for index, label in enumerate(("Cancel", "Delete chat")):
+                content.append("› " if index == self._delete_choice else "  ", style="bold #38a8df")
+                content.append(label + ("\n" if index == 0 else ""), style="bold #ffffff" if index == self._delete_choice else "not bold #a0a0a0")
+            if widget.query_one(Static).renderable != content:
+                widget.query_one(Static).update(content)
+                widget.scroll_end(animate=False)
+            return
         commands = self._matching_commands(editor.text)
-        widget.display = not approval and not editor.read_only and bool(self._shortcuts_open or commands)
+        if editor.text.casefold().startswith("/stop-command ") and self._command_sessions_query is None and not self._command_sessions_loading:
+            self._command_sessions_query = editor.text
+            self._command_sessions_loading = True
+            self.run_worker(self._load_command_sessions())
+        elif not editor.text.casefold().startswith("/stop-command "):
+            self._command_sessions_query = None
+        if self._command_query != editor.text:
+            self._dismissed_command_query = None
+            self._command_query = editor.text
+            self._command_index = 0
+        if commands:
+            self._command_index %= len(commands)
+        slash_open = editor.text.startswith("/") and "\n" not in editor.text and self._dismissed_command_query != editor.text
+        widget.display = not approval and not editor.read_only and bool(self._shortcuts_open or slash_open)
         if not widget.display:
             return
         actions = [
@@ -396,7 +462,7 @@ class PraxisApp(App[int]):
             ("Esc", "Stop the turn; continue after cleanup"),
             ("Ctrl+R", "Send follow-ups retained after stopping"),
             ("Shift+←", "Edit the next pending message when the input is empty"),
-            ("↑/↓", "Browse input history from the first/last line"),
+            ("↑/↓", "Select slash commands; otherwise browse input history"),
             ("PgUp/PgDn · Ctrl+Home/End", "Scroll history · first/latest"),
             ("Alt+↑/↓", "Jump to the previous/next user message"),
             ("Ctrl+T", "Full transcript; full arguments during approval"),
@@ -415,27 +481,125 @@ class PraxisApp(App[int]):
                     height = 1
                 reserved += height
         widget.styles.max_height = max(1, min(12, self.size.height // 2, self.size.height - reserved))
-        content = Text("\n").join(
-            Text.assemble((key, "bold"), "  " + description, no_wrap=True, overflow="ellipsis")
-            for key, description in (commands or actions))
+        if slash_open and not commands:
+            if editor.text.casefold().startswith("/stop-command "):
+                message = "Loading running commands…" if self._command_sessions_loading else (self._command_sessions_error or "Usage: /stop-command <session_id> · No matching running sessions")
+            elif editor.text.casefold().startswith("/observability "):
+                message = "Usage: /observability [retry]"
+            else:
+                message = command_error(editor.text) or "Enter to run · Esc to dismiss"
+            content = Text(message, no_wrap=True, overflow="ellipsis")
+            if widget.query_one(Static).renderable != content:
+                widget.query_one(Static).update(content)
+            return
+        entries = commands if slash_open else actions
+        key_width = max((Text(key).cell_len for key, _ in entries), default=0)
+        lines = []
+        for index, (key, description) in enumerate(entries):
+            selected = bool(commands) and index == self._command_index
+            line = Text(no_wrap=True, overflow="ellipsis")
+            if commands:
+                line.append("› " if selected else "  ", style="bold #38a8df")
+            line.append(key, style="bold #ffffff" if selected else "" if commands else "bold")
+            padding = " " * (key_width - Text(key).cell_len + 2)
+            if not slash_open or self.size.width - 8 > key_width + 6:
+                line.append(padding + description, style="bold #ffffff" if selected else "")
+            lines.append(line)
+        content = Text("\n").join(lines)
         help_text = widget.query_one(Static)
         if help_text.renderable != content:
             help_text.update(content)
+        if commands:
+            widget.call_after_refresh(self._scroll_command_selection)
 
-    @staticmethod
-    def _matching_commands(text: str) -> list[tuple[str, str]]:
-        return [(name, description) for name, description in (
-            ("/clear", "Clear current chat"), ("/help", "Keyboard shortcuts"), ("/exit", "Quit Praxis"),
-            ("/commands", "List command sessions"), ("/stop-command", "Stop a command by its session ID"),
-            ("/mcp", "Show MCP service status"),
-            ("/delete", "Delete this chat"),
-        ) if text.startswith("/") and name.startswith(text)]
+    def _scroll_command_selection(self) -> None:
+        widget = self._main_screen.query_one("#shortcuts", VerticalScroll)
+        top = int(widget.scroll_y)
+        if self._command_index < top:
+            widget.scroll_to(y=self._command_index, animate=False)
+        elif self._command_index >= top + widget.scrollable_content_region.height:
+            widget.scroll_to(y=self._command_index - widget.scrollable_content_region.height + 1, animate=False)
 
-    def action_complete_command(self) -> None:
+    def select_command(self, direction: int) -> bool:
+        if self._delete_confirmation:
+            self._delete_choice = (self._delete_choice + direction) % 2
+            self._refresh_bottom()
+            return True
+        if self._history_index is not None:
+            return False
         editor = self._main_screen.query_one(Composer)
         matches = self._matching_commands(editor.text)
-        if len(matches) == 1:
-            editor.load_draft(matches[0][0])
+        if not matches or self._dismissed_command_query == editor.text:
+            return False
+        if self._command_query != editor.text:
+            self._command_query, self._command_index = editor.text, 0
+        self._command_index = (self._command_index + direction) % len(matches)
+        self._refresh_bottom()
+        return True
+
+    def _matching_commands(self, text):
+        return matching_commands(text, self._command_sessions)
+
+    async def _load_command_sessions(self):
+        self._command_sessions_error = ""
+        try:
+            self._command_sessions = await asyncio.to_thread(self.connection.commands)
+        except Exception:
+            self._command_sessions_error = "Could not load sessions. Enter a session ID or reopen the menu to retry."
+        finally:
+            self._command_sessions_loading = False
+            if self.is_running and self._main_screen.query("#controls"):
+                self._refresh_bottom()
+
+    @on(events.Click, "#shortcut-content")
+    def choose_command_at_pointer(self, event):
+        editor = self._main_screen.query_one(Composer)
+        if self._delete_confirmation:
+            content = self._main_screen.query_one("#shortcut-content")
+            index = event.screen_y - content.content_region.y - (5 if self.busy else 4)
+            if index in (0, 1):
+                self._delete_choice = index
+                self._refresh_bottom()
+            event.stop()
+            return
+        matches = self._matching_commands(editor.text)
+        if not matches or self._dismissed_command_query == editor.text:
+            return
+        content = self._main_screen.query_one("#shortcut-content")
+        index = event.screen_y - content.content_region.y
+        if 0 <= index < len(matches):
+            self._command_index = index
+            self._command_query = editor.text
+            self.action_complete_command()
+            event.stop()
+
+    def action_complete_command(self, *, explicit=True) -> bool:
+        if self._delete_confirmation:
+            if explicit:
+                self.select_command(1)
+            else:
+                confirmed = self._delete_choice == 1
+                self._delete_confirmation = False
+                self._confirm_delete(confirmed)
+                self._refresh_bottom()
+            return True
+        editor = self._main_screen.query_one(Composer)
+        if self._dismissed_command_query == editor.text:
+            return False
+        matches = self._matching_commands(editor.text)
+        if not matches:
+            return False
+        index = self._command_index if self._command_query == editor.text else 0
+        command = matches[index % len(matches)][0]
+        if command == "/stop-command":
+            editor.load_draft(command + " ")
+            return True
+        if explicit:
+            editor.load_draft(command)
+        else:
+            editor.load_draft(command)
+            self.on_message_submitted(Composer.Submitted(editor))
+        return True
 
     def recall_input(self, direction: int) -> bool:
         if not self._input_history:
@@ -658,13 +822,24 @@ class PraxisApp(App[int]):
         if getattr(self, "_deleting_session", False):
             self.notify("Deleting this chat…")
             return
-        if getattr(self.connection, "deleted", False) and task.lower() not in {"/clear", "/delete", "/exit", "/help", "/mcp"}:
+        if getattr(self.connection, "deleted", False) and task.lower() not in {"/clear", "/delete", "/exit", "/help", "/mcp", "/observability", "/observability retry"}:
             self.notify("This chat was deleted. Use /clear to start a new chat.", severity="warning")
             return
-        if task.lower() == "/clear" and self.busy:
-            self.notify("Wait for the current task to finish before clearing history.", severity="warning")
+        if task.lower() == "/clear" and (self.busy or self._command_jobs):
+            self._main_screen.query_one("#hint", FooterHint).flash("Wait for the current task or command to finish before starting a new chat.", error=True)
             return
+        if task.startswith("/"):
+            error = command_error(task)
+            if error:
+                self._main_screen.query_one("#hint", FooterHint).flash(error, error=True)
+                return
+            parts = task.split()
+            task = parts[0].lower() + (" " + " ".join(parts[1:]) if len(parts) > 1 else "")
+            if task.split()[0] in self._command_jobs:
+                self._main_screen.query_one("#hint", FooterHint).flash("This command is already running.")
+                return
         event.editor.text = ""
+        self._dismissed_command_query = None
         self._shortcuts_open = False
         self._history_index = None
         if not self._input_history or self._input_history[-1] != task:
@@ -673,58 +848,121 @@ class PraxisApp(App[int]):
         if task.lower() == "/exit":
             self.action_request_exit()
         elif task.lower() == "/help":
-            self.action_show_shortcuts()
+            self._run_slash_command(task, lambda: self._command_result("/help", help_result()))
         elif task.lower() == "/mcp":
-            self.run_worker(self._show_mcp(), group="mcp-status", exclusive=True)
+            self._run_slash_command(task, self._show_mcp)
+        elif task.lower() in {"/observability", "/observability retry"}:
+            self._run_slash_command(task, lambda: self._show_observability(retry=task.lower().endswith(" retry")))
         elif task.lower() == "/delete":
-            self.push_screen(DeleteSessionDialog(self.connection.summary), self._confirm_delete)
+            self._delete_confirmation = True
+            self._delete_choice = 0
+        elif task.lower() == "/clear":
+            self._run_slash_command(task, self._clear_chat)
         elif task.lower() == "/commands":
-            commands = self.connection.commands()
-            text = "\n".join(f"{item['session_id']}  {item['status']}  {' '.join(item['argv'])}"
-                             for item in commands) or "No command sessions."
-            self.push_screen(DetailsScreen("Command sessions · /stop-command <session_id>", Text(text)))
-        elif task.lower().split()[0] == "/stop-command":
-            parts = task.split()
-            if len(parts) != 2:
-                self.notify("Usage: /stop-command <session_id>", severity="warning")
-            else:
-                self.run_worker(self._stop_command(parts[1]))
+            self._run_slash_command(task, self._show_commands)
+        elif task.split()[0] == "/stop-command":
+            self._run_slash_command(task, lambda: self._stop_command(task.split()[1]))
         else:
             self._start(task)
         self._refresh_bottom()
 
+    def _run_slash_command(self, command, action):
+        key = command.split()[0]
+        self._command_jobs.add(key)
+        async def execute():
+            try:
+                await action()
+            finally:
+                self._command_jobs.discard(key)
+                if self.is_running and self._main_screen.query("#controls"):
+                    self._refresh_bottom()
+        self.run_worker(execute())
+
+    async def _clear_chat(self):
+        try:
+            await asyncio.to_thread(self.connection.clear)
+            self._results.put(("clear", ""))
+            await self._tick()
+            self._main_screen.query_one("#hint", FooterHint).flash("New chat started.")
+        except Exception as error:
+            await self._command_result("/clear", str(error), error=True)
+
     async def _show_mcp(self):
-        states = {
-            "disabled": "已禁用", "queued": "等待连接", "connecting": "连接中",
-            "retrying": "等待重试", "connected": "已连接", "failed": "连接失败",
-            "disconnected": "已断开",
-        }
         try:
             servers = await asyncio.to_thread(self.connection.mcp_servers)
-            text = "\n".join(f"{item['name']}    {states.get(item['state'], item['state'])}"
-                             for item in servers) or "未配置 MCP 服务"
-            self.push_screen(DetailsScreen("MCP 服务", Text(text)))
+            await self._command_result("/mcp", mcp_result(servers))
         except Exception as error:
-            self.notify(str(error), severity="error")
+            await self._command_result("/mcp", str(error), error=True)
+
+    async def _command_result(self, command, text, *, error=False):
+        async with self._view_lock:
+            self.store.get("main").committed_blocks.append(CommandResult.assemble(
+                (command + "\n\n", "#b48ead" if command.startswith("/") else "bold"),
+                text if isinstance(text, Text) else Text(text, style="red" if error else ""),
+                (f"\n\nRetry: {command}" if error and command.startswith("/") else "", "#a0a0a0"),
+            ))
+            if self.selected_agent_id == "main":
+                with self.batch_update():
+                    await self._draw()
+                    self._refresh_bottom()
+                # Repaint at the final position after the compact layout settles.
+                self.call_after_refresh(self._main_screen.query_one("#composer").refresh)
+
+    async def _show_commands(self):
+        try:
+            commands = await asyncio.to_thread(self.connection.commands)
+            self._command_sessions = commands
+            text = sessions_result(commands, max(1, self.size.width - 2))
+            await self._command_result("/commands", text)
+        except Exception as error:
+            await self._command_result("/commands", str(error), error=True)
+
+    async def _poll_observability(self):
+        if self._observability_polling or self.closing:
+            return
+        self._observability_polling = True
+        try:
+            status = await asyncio.to_thread(self.connection.observability_status)
+            warning = status.get("message", "") if status["state"] == "failed" else ""
+            if warning and warning != self._observability_warning:
+                await self._command_result(
+                    "Tracing unavailable",
+                    warning + "\nUse /observability for details or /observability retry.", error=True,
+                )
+            self._observability_warning = warning
+        except Exception:
+            pass  # The existing connection indicator handles service disconnections.
+        finally:
+            self._observability_polling = False
+
+    async def _show_observability(self, *, retry=False):
+        try:
+            status = await asyncio.to_thread(self.connection.observability_status, retry=retry)
+            text = tracing_result(status)
+            await self._command_result("/observability retry" if retry else "/observability", text)
+        except Exception as error:
+            await self._command_result("/observability retry" if retry else "/observability", str(error), error=True)
 
     def _confirm_delete(self, confirmed):
+        self._main_screen.query_one(Composer).focus()
         if confirmed:
-            self.run_worker(self._delete_session(), group="delete-session", exclusive=True)
+            self._run_slash_command("/delete", self._delete_session)
 
     async def _delete_session(self):
         self._deleting_session = True
         try:
             await asyncio.to_thread(self.connection.delete_session)
         except Exception as error:
-            self.notify(f"Could not finish deletion: {error}. Use /delete to retry.", severity="error")
+            await self._command_result("/delete", f"Could not finish deletion: {error}", error=True)
         finally:
             self._deleting_session = False
 
     async def _stop_command(self, session_id):
         try:
             await asyncio.to_thread(self.connection.stop_command, session_id)
+            await self._command_result(f"/stop-command {session_id}", f"Stop requested for {session_id}.\nRun /commands to check its status.")
         except Exception as error:
-            self.notify(str(error), severity="error")
+            await self._command_result(f"/stop-command {session_id}", str(error), error=True)
 
     def _request(self, operation, action):
         def execute():
@@ -744,8 +982,11 @@ class PraxisApp(App[int]):
             self._request("input", lambda: self.connection.send(task))
 
     def action_stop_run(self) -> None:
-        if isinstance(self.screen, DeleteSessionDialog):
-            self.screen.dismiss(False)
+        if self.screen is self._main_screen and self._main_screen.query_one("#shortcuts").display:
+            self._delete_confirmation = False
+            self._dismissed_command_query = self._main_screen.query_one(Composer).text
+            self._shortcuts_open = False
+            self._refresh_bottom()
             return
         if self.busy and self.current_turn_id and not self.stopping:
             turn_id = self.current_turn_id
@@ -783,6 +1024,20 @@ class PraxisApp(App[int]):
 
     def on_mouse_down(self) -> None:
         self.clear_text_selection()
+
+    def on_app_blur(self) -> None:
+        # Mouse-up may happen in another terminal and never reach this app.
+        self.clear_text_selection()
+
+    def on_app_focus(self) -> None:
+        self.call_after_refresh(self._restore_composer_focus)
+
+    def _restore_composer_focus(self) -> None:
+        if (self.screen is self._main_screen and self.selected_agent_id == "main"
+                and self._approval is None and not self.closing and self.focused is None):
+            editor = self._main_screen.query_one(Composer)
+            if not editor.read_only:
+                self.screen.set_focus(editor, scroll_visible=False)
 
     def copy_to_clipboard(self, text: str) -> None:
         selector = "#details-hint" if isinstance(self.screen, DetailsScreen) else (

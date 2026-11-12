@@ -358,7 +358,7 @@ class ConversationLayout(VerticalLayout):
 
     def arrange(self, parent, children, size: Size):
         placements = super().arrange(parent, children, size)
-        if not parent.app.empty_session:
+        if not (parent.app.empty_session or parent.app.inline_command_result):
             return placements
         for index, placement in enumerate(placements):
             if placement.widget.id != "transcript":

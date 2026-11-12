@@ -75,7 +75,8 @@ def test_start_is_nonblocking_and_limits_connection_attempts_to_eight(tmp_path):
         assert mcp.peak == 8
         assert len(mcp.clients) == 12
         assert "disabled" not in mcp.attempts
-        assert mcp.snapshot()["servers"][-1] == {"name": "disabled", "state": "disabled"}
+        assert all(item["tool_count"] == 1 for item in mcp.snapshot()["servers"][:-1])
+        assert mcp.snapshot()["servers"][-1] == {"name": "disabled", "state": "disabled", "tool_count": 0}
     finally:
         mcp.close()
     assert not mcp.thread.is_alive()

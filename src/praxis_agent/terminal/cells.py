@@ -27,6 +27,10 @@ if TYPE_CHECKING:
 ACCENT = "#8ab8c5"
 
 
+class CommandResult(Text):
+    """Local terminal output, followed immediately by the next input prompt."""
+
+
 @dataclass(frozen=True)
 class WelcomeHeader:
     workspace: Path | None

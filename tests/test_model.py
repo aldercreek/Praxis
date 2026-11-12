@@ -439,7 +439,10 @@ def test_stream_failure_after_text_is_classified_for_outer_recovery(monkeypatch)
     try:
         with pytest.raises(IncompleteResponseError, match="stream disconnected") as error:
             Run().execute(lambda: client.create_response([], [], on_text_delta=text.append))
-        assert isinstance(error.value.__cause__, httpx2.ReadError)
+        cause = error.value.__cause__
+        while cause.__cause__ is not None:
+            cause = cause.__cause__
+        assert isinstance(cause, httpx2.ReadError)
         assert len(calls) == 1
         assert text == ["Reading "]
     finally:

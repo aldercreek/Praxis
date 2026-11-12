@@ -9,8 +9,10 @@ from praxis_agent.context import (
 )
 from praxis_agent.context.summarizer import SUMMARY_INSTRUCTIONS, ModelContextSummarizer
 from praxis_agent.events import (
+    CompositeEventSink,
     EventSink,
 )
+from praxis_agent.observability import Observability
 from praxis_agent.mcp import MCPConnections
 from praxis_agent.instructions import load_global_instructions
 from praxis_agent.model import (
@@ -50,6 +52,7 @@ def create_default_agent(
     session_store=None,
     mcp: MCPConnections | None = None,
     configuration: PraxisConfig | None = None,
+    observability: Observability | None = None,
     model: str | None = None,
 ) -> Agent:
     """使用文件配置快照和内置工具创建默认 Agent。"""
@@ -159,6 +162,14 @@ def create_default_agent(
             agent.close()
         raise
     agent.close_callbacks = (release_mcp_tools, *((mcp.close,) if owns_mcp else ()), *agent.close_callbacks)
+
+    if observability is None:
+        observability = Observability(configuration.observability)
+        agent.close_callbacks = (*agent.close_callbacks, observability.close)
+    if configuration.observability.enabled:
+        observer = observability.bind(lambda: agent.session_id)
+        event_sink = CompositeEventSink((event_sink, observer) if event_sink is not None else (observer,))
+        agent.event_sink = event_sink
 
     if not enable_multi_agent:
         agent.restore_history(history)

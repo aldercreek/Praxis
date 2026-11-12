@@ -11,7 +11,6 @@ from praxis_agent.terminal.app import PraxisApp
 from praxis_agent.terminal.connection import TerminalSession
 from praxis_agent.terminal.views import ViewEventSink
 from praxis_agent.terminal.widgets import DetailsScreen
-from praxis_agent.terminal.delete_dialog import DeleteSessionDialog
 
 
 def test_terminal_can_submit_supplementary_input_and_disconnect_without_cancel(service):
@@ -87,12 +86,13 @@ def test_terminal_delete_confirms_and_other_terminal_receives_removal(service):
             editor = app.query_one("#task", TextArea)
             editor.text = "/delete"
             await pilot.press("enter")
-            assert isinstance(app.screen, DeleteSessionDialog)
+            assert app.screen is app._main_screen
+            assert app._delete_confirmation
             await pilot.press("escape")
             assert h.manager.list()["sessions"]
             editor.text = "/delete"
             await pilot.press("enter")
-            await pilot.click("#delete-chat")
+            await pilot.press("down", "enter")
             async with asyncio.timeout(5):
                 while not connection.deleted:
                     await pilot.pause(0.02)
@@ -123,7 +123,7 @@ def test_mcp_command_reads_shared_status_without_starting_a_turn(service, tmp_pa
     session = h.create()
     client = h.client()
     assert client.request("GET", "/api/mcp/servers") == {"servers": [
-        {"name": "数据库", "state": "connected"}, {"name": "浏览器", "state": "disabled"}
+        {"name": "数据库", "state": "connected", "tool_count": 0}, {"name": "浏览器", "state": "disabled", "tool_count": 0}
     ]}
     assert httpx.get(h.endpoint["url"] + "/api/mcp/servers").status_code == 401
 
@@ -134,12 +134,13 @@ def test_mcp_command_reads_shared_status_without_starting_a_turn(service, tmp_pa
                 app.query_one("#task", TextArea).text = "/mcp"
                 await pilot.press("enter")
             async with asyncio.timeout(5):
-                while not isinstance(app.screen, DetailsScreen):
+                while not app.store.get("main").committed_blocks:
                     await pilot.pause(0.02)
-            assert "数据库" in str(app.screen.content)
-            assert "已连接" in str(app.screen.content)
-            assert "工具" not in str(app.screen.content)
-            await pilot.press("escape")
+            assert app.screen is app._main_screen
+            content = str(app.store.get("main").committed_blocks[-1])
+            assert "数据库" in content
+            assert "connected (0 tools)" in content
+            assert "工具" not in content
     asyncio.run(exercise())
     assert h.agents == []
     assert h.store.snapshot(session["id"])["messages"] == []

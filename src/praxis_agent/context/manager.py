@@ -363,11 +363,7 @@ class ContextManager:
             raise ValueError("delete does not accept summary or instructions")
         selected = self._select(message_ids)
         if action == "compress":
-            before = self._token_estimator.estimate_request(
-                instructions=self._instructions,
-                input_items=self._render_current_messages() + self._transient_items,
-                tools=self._tool_definitions,
-            )
+            before = self._projected_input_tokens()
             with compaction_events(self.turn_id, self.event_sink, before, "manual") as progress:
                 return self._change_selected(action, selected, instructions, summary, progress)
         return self._change_selected(action, selected, instructions, summary)
@@ -433,16 +429,24 @@ class ContextManager:
                 raise ValueError("compacted context still exceeds the budget; no operation was saved")
         self.operations.record(operation)
         if progress is not None:
-            projected = self.operations.project(self._history_snapshot)
-            progress.after_tokens = self._token_estimator.estimate_request(
-                instructions=self._instructions,
-                input_items=tuple(render_message(m) for m in projected) + self._transient_items,
-                tools=self._tool_definitions,
-            )
+            progress.after_tokens = self._projected_input_tokens()
         return json.dumps({
             "operation_id": operation.operation_id,
             "message_id": replacement["message_id"],
         })
+
+    def _projected_input_tokens(self) -> int:
+        messages = preview_tool_outputs(
+            self.operations.project(self._history_snapshot), self._policy.max_tool_output_chars,
+        )
+        origins = {op.replacement["message_id"]: op.operation_id
+                   for op in self.operations.records if op.replacement is not None}
+        return self._token_estimator.estimate_request(
+            instructions=self._instructions,
+            input_items=tuple(render_message(m, origins.get(m["message_id"])) for m in messages)
+            + self._transient_items,
+            tools=self._tool_definitions,
+        )
 
     def _estimate_status(
         self,

@@ -39,6 +39,7 @@ class MCPConnections:
         self.state_lock = RLock()
         self.clients = {}
         self.definitions = {}
+        self.tool_counts = {}
         self.locks = {}
         self.ready = Event()
         self.thread = None
@@ -64,7 +65,8 @@ class MCPConnections:
 
     def snapshot(self):
         with self.state_lock:
-            return {"servers": [{"name": name, **state} for name, state in self.status.items()]}
+            return {"servers": [{"name": name, **state, "tool_count": self.tool_counts.get(name, 0)}
+                                for name, state in self.status.items()]}
 
     def _state(self, name, state, **details):
         with self.state_lock:
@@ -230,6 +232,9 @@ class MCPConnections:
             self.index = ToolSearchIndex(path, self.config.get("search", {}))
             self.index.rebuild([])
         self.index.add(records)
+        with self.state_lock:
+            for server in self.definitions:
+                self.tool_counts[server] = sum(record["server"] == server for record in records)
         self.aliases = aliases
         self.definitions.clear()
 

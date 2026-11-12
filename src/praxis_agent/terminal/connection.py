@@ -131,6 +131,9 @@ class TerminalSession:
     def mcp_servers(self):
         return self.client.request("GET", "/api/mcp/servers")["servers"]
 
+    def observability_status(self, *, retry=False):
+        return self.client.request("POST" if retry else "GET", "/api/observability")
+
     def stop_command(self, command_id):
         return self.client.request(
             "POST", f"/api/sessions/{self.id}/commands/{command_id}/stop"

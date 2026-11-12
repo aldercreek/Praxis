@@ -12,6 +12,7 @@ from praxis_agent.multi_agent.models import AgentStatus
 
 
 def configuration(tmp_path, **options):
+    options.setdefault("observability", {"enabled": False})
     models = {}
     for name, window in [('main', 128000), ('worker', 64000), ('summary', 32000)]:
         models[name] = dict(protocol='responses', base_url=f'https://{name}.example/v1',

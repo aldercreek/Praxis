@@ -219,8 +219,11 @@ class AgentView:
 
     def _on_compaction(self, event: ContextCompaction) -> None:
         if event.stage == "started":
-            action = "Compacting selected history" if event.reason == "manual" else "Context exceeds budget; compacting history"
-            self.committed_blocks.append(Text(f"· {action} (≈ {event.before_tokens:,} tokens)", style="dim"))
+            if event.reason != "manual":
+                self.committed_blocks.append(Text(
+                    f"· Context exceeds budget; compacting history (≈ {event.before_tokens:,} tokens)",
+                    style="dim",
+                ))
             self._phase = "Compacting context"
         elif event.stage == "chunk_started":
             phase = "Summary" if event.round_number == 1 else f"Summary retry {event.round_number - 1}"

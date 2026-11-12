@@ -42,7 +42,7 @@ def model_configuration_file(tmp_path_factory, monkeypatch):
     """Every test service uses an isolated file, never the user's gateway or keys."""
     import yaml
     path = tmp_path_factory.mktemp("model-config") / "praxis.yaml"
-    path.write_text(yaml.safe_dump({"models": {"test": {
+    path.write_text(yaml.safe_dump({"observability": {"enabled": False}, "models": {"test": {
         "model": "test", "base_url": "https://example.test/v1", "protocol": "responses",
         "context_window": 128000, "max_output_tokens": 8192,
     }}}), encoding="utf-8")

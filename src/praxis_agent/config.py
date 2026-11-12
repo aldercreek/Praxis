@@ -52,6 +52,11 @@ _SCHEMA = _object({
     "timeout_seconds": {"type": "number", "exclusiveMinimum": 0},
     "max_retries": {"type": "integer", "minimum": 0},
     "max_parallel_tools": _POSITIVE,
+    "observability": _object({
+        "enabled": {"type": "boolean"},
+        "provider": {"type": "string", "pattern": r"^[A-Za-z0-9][A-Za-z0-9_.-]*$"},
+        "options": {"type": "object"},
+    }),
     "context": _object({f.name: {"type": "number" if "ratio" in f.name else "integer"}
                         for f in fields(ContextPolicy) if f.name != "output_reserve_tokens"}),
 }, ("models",))
@@ -81,6 +86,13 @@ class ModelConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ObservabilityConfig:
+    provider: str | None = None
+    options: Mapping = field(default_factory=dict, repr=False)
+    enabled: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class PraxisConfig:
     path: Path
     default_model: str
@@ -90,6 +102,7 @@ class PraxisConfig:
     compression_parameters: Mapping = field(default_factory=dict)
     subagent_model: str | None = None
     max_concurrent: int = 4
+    observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
     def resolve(self, name: str | None = None, *, compression=False) -> ModelConfig:
         name = (self.compression_model if compression else None) or name or self.default_model
@@ -171,6 +184,9 @@ def load_config(path: Path | str | None = None) -> PraxisConfig:
     for name in (default, subagents.get("model")):
         if name is not None and not models[name].tool_calling:
             raise ValueError(f"{name}: agents require tool_calling")
+    observability = data.get("observability", {})
     return PraxisConfig(path, default, MappingProxyType(models), MappingProxyType(credentials),
                         compression.get("model"), MappingProxyType(compression.get("parameters", {})),
-                        subagents.get("model"), subagents.get("max_concurrent", 4))
+                        subagents.get("model"), subagents.get("max_concurrent", 4),
+                        ObservabilityConfig(observability.get("provider"), observability.get("options", {}),
+                                            observability.get("enabled", True)))

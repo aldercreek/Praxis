@@ -159,6 +159,27 @@ def test_manual_compression_has_events_and_direct_summary_has_no_model_call():
     assert events[-1].request_count == 0
 
 
+def test_sequential_manual_compactions_use_the_previous_projected_result():
+    events = []
+    manager = ContextManager(model_limits=ModelLimits(128000))
+    manager.event_sink = SimpleNamespace(emit=events.append)
+    history = ConversationHistory()
+    history.extend([
+        {"role": "assistant", "content": "first evidence " * 1000},
+        {"role": "assistant", "content": "second evidence " * 1000},
+        {"role": "user", "content": "continue"},
+    ])
+    manager.build_view(history)
+    first, second = [m["message_id"] for m in manager._current_messages[:2]]
+    manager.change_messages("compress", [first], summary="first summary")
+    manager.change_messages("compress", [second], summary="second summary")
+    one_start, one_end, two_start, two_end = events
+    assert one_start.before_tokens > one_end.after_tokens
+    assert two_start.before_tokens == one_end.after_tokens
+    assert two_end.after_tokens < two_start.before_tokens
+    assert one_start.compaction_id != two_start.compaction_id
+
+
 def test_display_excludes_summary_and_retains_source_times_and_request_failure():
     published, observed = [], []
     service = ServiceEventSink(SimpleNamespace(publish=lambda *args: published.append(args)))

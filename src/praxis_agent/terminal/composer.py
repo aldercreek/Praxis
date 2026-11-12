@@ -29,7 +29,8 @@ class Composer(TextArea):
             event.prevent_default()
             if not self.read_only:
                 if event.key == "enter":
-                    self.post_message(self.Submitted(self))
+                    if not self.app.action_complete_command(explicit=False):
+                        self.post_message(self.Submitted(self))
                 else:
                     self.replace("\n", *self.selection, maintain_selection_offset=False)
             return
@@ -41,6 +42,10 @@ class Composer(TextArea):
         if not self.read_only:
             row = self.wrapped_document.location_to_offset(self.cursor_location).y
             direction = -1 if event.key == "up" else 1 if event.key == "down" else 0
+            if direction and self.app.select_command(direction):
+                event.stop()
+                event.prevent_default()
+                return
             at_edge = row == (0 if direction < 0 else self.wrapped_document.height - 1)
             if direction and at_edge and self.selection.is_empty and self.app.recall_input(direction):
                 event.stop()

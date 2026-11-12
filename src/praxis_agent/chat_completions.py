@@ -3,6 +3,7 @@ from httpx2 import TransportError
 from openai import Omit
 
 from praxis_agent.model_errors import IncompleteResponseError, ModelClientError, OutputTruncatedError
+from openai import APIConnectionError
 
 
 def _content(value):
@@ -115,7 +116,7 @@ async def create_chat_response(client, config, instructions, items, tools, on_de
                         call["arguments"] += part.function.arguments or ""
                 if choice.finish_reason:
                     finish = choice.finish_reason
-    except TransportError as error:
+    except (TransportError, APIConnectionError) as error:
         raise IncompleteResponseError("model stream interrupted") from error
     finally:
         await stream.close()
