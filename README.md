@@ -14,6 +14,7 @@ Praxis helps you explore a codebase, edit files, run commands, and coordinate ag
 - **Guide work as it runs.** Send follow-up instructions, approve a tool call, or stop a specific turn. Unconsumed input survives cancellation.
 - **Keep your progress.** SQLite stores messages, tool results, approvals, pending input, and ordered events. Reconnecting restores the display without rerunning tools.
 - **Use the right tools.** Read and edit files, search with ripgrep, run background commands, discover MCP tools, and load project skills.
+- **Add your own tools.** Enable independent Python files with `@tool`, Pydantic-backed typed parameters and dataclasses. See [Python tool extensions](docs/tool-extensions.md).
 - **Delegate focused tasks.** Subagents have their own context and working directory. The parent coordinates their results.
 - **Manage long conversations.** Search saved history and compress the model's context while retaining the original records.
 

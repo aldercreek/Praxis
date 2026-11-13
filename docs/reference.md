@@ -88,6 +88,11 @@ Service transcript snapshots retain each incoming worker message separately, wit
 
 ## MCP servers
 
+Local Python tools can also be enabled through `tool_extensions` in `praxis.yaml`.
+They register directly on main and worker agents and use the same execution and
+approval pipeline. See [Python tool extensions](tool-extensions.md) for the SDK,
+type conversion, service restart lifecycle and offline example.
+
 Configure external tools in `<PRAXIS_DATA_DIR>/mcp.json` (default `~/.praxis/mcp.json`). Built-in tools work without it. Supported transports are local stdio and remote Streamable HTTP. The shared service loads this file at startup; restart the service after editing it.
 
 Enabled servers connect in the background, up to eight at once. Each gets at most three attempts, waiting one then two seconds between failures; each attempt uses `startup_timeout_sec` (default 30 seconds). Disabled servers remain visible in status without starting a transport. Agents share connected clients, but keep their own activated tools and approval context. Closing an agent does not close these shared clients. Available service descriptions refresh before each model request.
@@ -134,7 +139,7 @@ Only names and descriptions load initially. `load_skill(name, offset=0, version=
 
 Praxis manages kernels directly. Jupyter/ZeroMQ carries code, results and streams; an independent authenticated loopback TCP channel carries tool requests and replies. Execution IDs reject callbacks after completion. Tool callbacks run in the original execution/cancellation context and use existing approvals and MCP connections. The loopback token is routing protection, not a security sandbox.
 
-`call_tool(name, arguments)` calls supported file/history tools and activated MCP tools. Shell commands, management tools and recursive `run_code` remain unavailable through this function. `call_parallel_tools([{name, arguments}, ...])` runs explicit independent calls concurrently, applies normal validation/approval, and returns ordered `{success, output}` or `{success, error}` entries. One failure does not retry or cancel unrelated items.
+`call_tool(name, arguments)` calls supported file/history tools, programmatic Python extension tools, and activated MCP tools. Shell commands, management tools and recursive `run_code` remain unavailable through this function. `call_parallel_tools([{name, arguments}, ...])` runs explicit independent calls concurrently, applies normal validation/approval, and returns ordered `{success, output}` or `{success, error}` entries. One failure does not retry or cancel unrelated items.
 
 Calls within one agent are serialized. Ordinary Python errors preserve partial variable/file changes. Cancellation, wall-time timeout or kernel death kills that kernel's process tree, cancels associated host tool/MCP operations and waits for their cleanup. Remote cancellation is best effort; already-completed effects are not undone. `state_lost=true` requires rebuilding variables; Praxis never automatically replays code. The next call starts a fresh kernel. Non-JSON final expressions return a bounded text representation; JSON results larger than 256,000 characters also fall back to a preview.
 

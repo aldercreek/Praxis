@@ -9,6 +9,7 @@ from threading import RLock
 from praxis_agent.config import load_config
 from praxis_agent.factory import create_default_agent
 from praxis_agent.observability import Observability
+from praxis_agent.tool_extensions import ToolExtensions
 
 from .errors import ServiceError, required_text
 from .deletion import SessionDeletions
@@ -20,9 +21,11 @@ class SessionManager:
         self.store = store
         self.mcp = mcp
         self.config = load_config(config_path)
+        self.tool_extensions = ToolExtensions(self.config.tool_extensions)
         self.observability = Observability(self.config.observability, store.db.path.parent / "phoenix")
         self.agent_factory = agent_factory
-        self.factory = partial(agent_factory, mcp=mcp, configuration=self.config, observability=self.observability)
+        self.factory = partial(agent_factory, mcp=mcp, configuration=self.config, observability=self.observability,
+                               tool_extensions=self.tool_extensions)
         self.lock = RLock()
         self.runtimes = {}
         self.closed = False
@@ -121,6 +124,8 @@ class SessionManager:
                 raise ServiceError("invalid_configuration", str(error)) from error
         bypass = data.get("bypass_approvals", self.bypass_approvals)
         with self.lock, ExitStack() as locks:
+            if config.tool_extensions != self.config.tool_extensions:
+                raise ServiceError("restart_required", "Tool extension configuration changed; restart the Praxis service", 409)
             runtimes = [runtime for runtime in self.runtimes.values() if not runtime.closed]
             for runtime in runtimes:
                 locks.enter_context(runtime.lock)
@@ -135,7 +140,7 @@ class SessionManager:
                 self.observability.close()
                 self.observability = Observability(config.observability, self.store.db.path.parent / "phoenix")
             self.factory = partial(self.agent_factory, mcp=self.mcp, configuration=config,
-                                   observability=self.observability)
+                                   observability=self.observability, tool_extensions=self.tool_extensions)
             self.bypass_approvals = bypass
             for runtime in runtimes:
                 runtime.factory = self.factory

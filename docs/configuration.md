@@ -51,6 +51,21 @@ max_parallel_tools: 4
 - `timeout_seconds`, `max_retries`, `max_parallel_tools`, and `subagents.max_concurrent` default to 120, 2, 4, and 4 respectively. These are generic program defaults, not provider presets.
 - `context` can override generic `ContextPolicy` fields such as `safety_ratio`, `auto_compact_ratio`, `summary_output_tokens`, and tool/file/history character budgets. Invalid types, unknown fields, inconsistent limits, and duplicate YAML keys fail during loading.
 
+## Python tool extensions
+
+`tool_extensions` optionally declares explicitly enabled local Python files. Paths
+are relative to this configuration file. The service loads these once at startup;
+changing their configuration requires a service restart. See
+[Python tool extensions](tool-extensions.md) for the SDK, supported dataclass types,
+execution boundaries and an offline example.
+
+```yaml
+tool_extensions:
+  - id: release
+    path: ./extensions/release_tools.py
+    enabled: true
+```
+
 ## Compression and workers
 
 A worker selects its explicit `spawn_agent.model`, then `subagents.model`, then the parent model. `compression.model` applies to both the main agent and workers. Without it, each agent uses its own model for compression. Summaries use dedicated instructions and no tools. Chunking uses the compression model's own capacity, including when it is smaller than the main model.

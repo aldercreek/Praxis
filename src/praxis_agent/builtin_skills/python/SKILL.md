@@ -29,6 +29,14 @@ totals
 
 Activate MCP tools through Praxis's `activate_tools` tool first. An MCP callback returns the complete envelope, including `content`, optional `structuredContent` and `isError`. Prefer `structuredContent` when present; do not assume every content block is text. Tool errors preserve the kernel, so inspect their cause before retrying operations with effects.
 
+Configured Python extension tools use names such as `release__get_release_status`
+and are already registered; they do not need MCP activation. Unless their author
+disables programmatic calls, call them with JSON arguments through `call_tool`.
+Praxis validates and constructs dataclass inputs on the service side after
+approval. Object results return dictionaries; other JSON results return serialized
+text. Extension dependencies belong to the service interpreter, not this kernel's
+session environment. Their module globals are shared by service sessions.
+
 ```python
 results = call_parallel_tools([
     {"name": "read_file", "arguments": {"relative_path": "a.json"}},

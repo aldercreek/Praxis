@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
@@ -52,6 +53,11 @@ _SCHEMA = _object({
     "timeout_seconds": {"type": "number", "exclusiveMinimum": 0},
     "max_retries": {"type": "integer", "minimum": 0},
     "max_parallel_tools": _POSITIVE,
+    "tool_extensions": {"type": "array", "items": _object({
+        "id": {"type": "string", "pattern": r"^[A-Za-z][A-Za-z0-9_-]{0,31}$"},
+        "path": _TEXT,
+        "enabled": {"type": "boolean"},
+    }, ("id", "path"))},
     "observability": _object({
         "enabled": {"type": "boolean"},
         "provider": {"type": "string", "pattern": r"^[A-Za-z0-9][A-Za-z0-9_.-]*$"},
@@ -93,6 +99,13 @@ class ObservabilityConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ToolExtensionConfig:
+    id: str
+    path: Path
+    enabled: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class PraxisConfig:
     path: Path
     default_model: str
@@ -103,6 +116,7 @@ class PraxisConfig:
     subagent_model: str | None = None
     max_concurrent: int = 4
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
+    tool_extensions: tuple[ToolExtensionConfig, ...] = ()
 
     def resolve(self, name: str | None = None, *, compression=False) -> ModelConfig:
         name = (self.compression_model if compression else None) or name or self.default_model
@@ -185,8 +199,19 @@ def load_config(path: Path | str | None = None) -> PraxisConfig:
         if name is not None and not models[name].tool_calling:
             raise ValueError(f"{name}: agents require tool_calling")
     observability = data.get("observability", {})
+    extensions, extension_ids = [], set()
+    for item in data.get("tool_extensions", []):
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,31}", item["id"]):
+            raise ValueError("Invalid configuration at tool_extensions: invalid extension id")
+        if item["id"] in extension_ids:
+            raise ValueError(f"Duplicate tool extension id: {item['id']}")
+        extension_ids.add(item["id"])
+        extension_path = Path(item["path"]).expanduser()
+        if not extension_path.is_absolute():
+            extension_path = path.parent / extension_path
+        extensions.append(ToolExtensionConfig(item["id"], extension_path.resolve(), item.get("enabled", True)))
     return PraxisConfig(path, default, MappingProxyType(models), MappingProxyType(credentials),
                         compression.get("model"), MappingProxyType(compression.get("parameters", {})),
                         subagents.get("model"), subagents.get("max_concurrent", 4),
                         ObservabilityConfig(observability.get("provider"), observability.get("options", {}),
-                                            observability.get("enabled", True)))
+                                            observability.get("enabled", True)), tuple(extensions))

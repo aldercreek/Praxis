@@ -50,7 +50,7 @@ _BASE_INSTRUCTIONS_TEMPLATE = """<identity>
    do not rerun the command. Both tools stream output to the UI during their waits. No TTY or input is supported.
 
 4. Composing tools
-   run_code executes full CPython with project imports, installed packages and native filesystem access. Use call_tool to combine file, history, and activated MCP tools.
+   run_code executes full CPython with project imports, installed packages and native filesystem access. Use call_tool to combine file, history, enabled Python extension tools, and activated MCP tools.
    Parse retrieved text with built-in modules such as json, csv, and tomllib; filter or summarize it and return only what is needed.
    Each agent has a persistent execution environment for variables and functions. Ordinary failures preserve completed changes without rollback.
    state_lost=true means the environment was lost and variables must be initialized again; completed external operations are not undone.

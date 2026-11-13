@@ -256,7 +256,7 @@ class CodeRuntime:
             description=(
                 "Execute full Python in this agent's persistent native CPython kernel. "
                 "Import project modules and installed packages, and read/write native filesystem paths directly. "
-                "Use call_tool(name, arguments) for supported file/history tools and activated MCP tools. "
+                "Use call_tool(name, arguments) for supported file/history tools, enabled Python extension tools, and activated MCP tools. "
                 "It returns the tool's structured value or text directly; read_file returns a dict with text and paging fields. "
                 "Commands, management tools and nested run_code are unavailable through call_tool. "
                 "call_parallel_tools([{name, arguments}, ...]) returns a LIST of ordered {success, output/error} entries; "

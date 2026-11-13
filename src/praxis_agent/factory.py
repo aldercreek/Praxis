@@ -30,6 +30,7 @@ from praxis_agent.multi_agent.tools import (
 from praxis_agent.prompts import build_instructions
 from praxis_agent.runtime import collect_runtime_context
 from praxis_agent.skills import create_skill_tool, discover_skills
+from praxis_agent.tool_extensions import ToolExtensions
 from praxis_agent.tool_execution import (
     ToolApprovalHandler,
 )
@@ -53,6 +54,7 @@ def create_default_agent(
     mcp: MCPConnections | None = None,
     configuration: PraxisConfig | None = None,
     observability: Observability | None = None,
+    tool_extensions: ToolExtensions | None = None,
     model: str | None = None,
 ) -> Agent:
     """使用文件配置快照和内置工具创建默认 Agent。"""
@@ -65,6 +67,7 @@ def create_default_agent(
     )
 
     configuration = configuration or load_config()
+    extensions = tool_extensions if tool_extensions is not None else ToolExtensions(configuration.tool_extensions)
     model_name = model or configuration.default_model
     collaboration_config = MultiAgentConfig(configuration.max_concurrent) if enable_multi_agent else None
     runtime_context = collect_runtime_context(workspace)
@@ -104,6 +107,9 @@ def create_default_agent(
         global_instructions=global_instructions,
     )
     control = ExecutionControl()
+    registry = create_default_registry(config.context_policy, check_execution=control.check,
+                                       command_shell=runtime_context.command_shell)
+    extensions.register(registry)
     model_client = OpenAIModelClient(
         config, instructions=instructions, execution_control=control
     )
@@ -115,11 +121,7 @@ def create_default_agent(
     agent = Agent(
         model_client=model_client,
         model_config=config,
-        tool_registry=create_default_registry(
-            config.context_policy,
-            check_execution=control.check,
-            command_shell=runtime_context.command_shell,
-        ),
+        tool_registry=registry,
         execution_control=control,
         workspace=runtime_context.workspace_root,
         event_sink=event_sink,
@@ -200,6 +202,7 @@ def create_default_agent(
             command_shell=worker_context.command_shell,
         ).tools:
             registry.register(tool)
+        extensions.register(registry)
         registry.register(code_runtime.tool(agent_id))
         registry.register(
             create_skill_tool(
