@@ -106,6 +106,7 @@ class ToolCallPrepared(AgentEvent):
     tool_name: str
     arguments: Mapping[str, object]
     requires_approval: bool
+    presentation: dict | None = None
 
 
 @dataclass(frozen=True, slots=True)

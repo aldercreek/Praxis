@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+from praxis_agent.tool_presentation import execution_status
+
 from .collaboration import collaboration_messages
 
 
@@ -19,6 +21,9 @@ def content_text(content) -> str:
 
 
 def tool_result_status(result: dict, previous: str = "", tool_name: str = "") -> str:
+    status = execution_status(result.get("presentation"))
+    if status:
+        return status
     output = result.get("output", "")
     structured = result.get("structured_output") or (
         output if isinstance(output, dict) else {}
@@ -32,9 +37,9 @@ def tool_result_status(result: dict, previous: str = "", tool_name: str = "") ->
                 code = {}
         if isinstance(code, dict) and code.get("error_kind") == "cancelled":
             return "cancelled"
-    if structured.get("status") == "running":
+    if tool_name in {"run_command", "wait_command"} and structured.get("status") == "running":
         return "running"
-    if structured.get("status") == "cancelled" or (
+    if (tool_name in {"run_command", "wait_command"} and structured.get("status") == "cancelled") or (
         isinstance(output, str) and output.startswith("ExecutionStopped:")
     ):
         return "cancelled"
@@ -158,6 +163,7 @@ class Transcript:
             if event == "ToolCallPrepared":
                 message.update(
                     arguments=data["arguments"],
+                    presentation=data.get("presentation"),
                     status="approval" if data["requires_approval"] else "pending",
                 )
             elif event == "ToolStarted":
@@ -176,6 +182,7 @@ class Transcript:
                 result = data["result"]
                 message.update(
                     content=result["output"],
+                    presentation={**(message.get("presentation") or {}), **(result.get("presentation") or {})},
                     status=tool_result_status(result, message["status"], message.get("tool_name", "")),
                     tool_finished=True,
                 )

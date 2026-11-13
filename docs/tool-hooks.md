@@ -122,3 +122,19 @@ performed directly by extension code.
 
 This runs a simulated query, converts `production` to `prod`, requests demo approval,
 and redacts a token before returning the result. It does not call a model or deploy.
+
+
+## Client visibility
+
+Use `/hooks` in the terminal or **Settings → Tools & hooks** in Praxis-UI to
+inspect the connected service's loaded hooks, source files, event filters and
+execution order. `/tools` lists Python tools. These are read-only catalogs;
+restart the Praxis service after editing extension configuration or code.
+Reconnecting a client does not reload extensions.
+
+Tool details show when hooks modify arguments or process output. Approval cards show
+only the final arguments and approval choices. Hooks can still require approval
+when normal approvals are bypassed. Hook blocks and result-processing errors remain visible
+in collapsed tool activity. A processing error is distinct from execution
+failure; clients never offer the unfiltered original result. The same metadata
+is retained when reopening a session.

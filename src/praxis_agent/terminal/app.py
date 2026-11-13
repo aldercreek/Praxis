@@ -30,7 +30,7 @@ from praxis_agent.terminal.cells import (
 )
 from praxis_agent.terminal.composer import Composer
 from praxis_agent.terminal.screen import ConversationScreen
-from praxis_agent.terminal.slash_commands import (command_error, help_result, matching_commands, mcp_result, sessions_result, tracing_result)
+from praxis_agent.terminal.slash_commands import (extensions_result, command_error, help_result, matching_commands, mcp_result, sessions_result, tracing_result)
 from praxis_agent.terminal.selection import SelectableText
 from praxis_agent.terminal.views import ViewEventSink, ViewStore
 from praxis_agent.terminal.widgets import (
@@ -822,7 +822,7 @@ class PraxisApp(App[int]):
         if getattr(self, "_deleting_session", False):
             self.notify("Deleting this chat…")
             return
-        if getattr(self.connection, "deleted", False) and task.lower() not in {"/clear", "/delete", "/exit", "/help", "/mcp", "/observability", "/observability retry"}:
+        if getattr(self.connection, "deleted", False) and task.lower() not in {"/clear", "/delete", "/exit", "/help", "/mcp", "/tools", "/hooks", "/observability", "/observability retry"}:
             self.notify("This chat was deleted. Use /clear to start a new chat.", severity="warning")
             return
         if task.lower() == "/clear" and (self.busy or self._command_jobs):
@@ -849,6 +849,8 @@ class PraxisApp(App[int]):
             self.action_request_exit()
         elif task.lower() == "/help":
             self._run_slash_command(task, lambda: self._command_result("/help", help_result()))
+        elif task.lower() in {"/tools", "/hooks"}:
+            self._run_slash_command(task, lambda: self._show_extensions(task.lower()[1:]))
         elif task.lower() == "/mcp":
             self._run_slash_command(task, self._show_mcp)
         elif task.lower() in {"/observability", "/observability retry"}:
@@ -886,6 +888,13 @@ class PraxisApp(App[int]):
             self._main_screen.query_one("#hint", FooterHint).flash("New chat started.")
         except Exception as error:
             await self._command_result("/clear", str(error), error=True)
+
+    async def _show_extensions(self, kind):
+        try:
+            catalog = await asyncio.to_thread(self.connection.extension_status)
+            await self._command_result("/" + kind, extensions_result(catalog, kind))
+        except Exception as error:
+            await self._command_result("/" + kind, str(error), error=True)
 
     async def _show_mcp(self):
         try:

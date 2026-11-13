@@ -16,6 +16,7 @@ from rich.table import Table
 from rich.text import Text
 
 from praxis_agent import __version__
+from praxis_agent.tool_presentation import presentation_notes
 from praxis_agent.terminal.markdown import CODE_THEME, MARKDOWN_THEME, ConversationMarkdown
 from praxis_agent.terminal.preview import OutputPreview, output_lines
 
@@ -252,7 +253,8 @@ def tool_description(name: str, arguments: Mapping[str, object]) -> tuple[str, s
 
 def _tool_marker_style(calls: tuple[ToolBlock, ...]) -> str:
     failed = any(call.failed or (
-        call.structured_output is not None
+        not (call.presentation or {}).get("execution_status")
+        and call.structured_output is not None
         and call.structured_output.get("status") == "exited"
         and call.structured_output.get("exit_code") not in (None, 0)
     ) for call in calls)
@@ -265,6 +267,9 @@ def tool_title(calls: tuple[ToolBlock, ...]) -> Text:
         return Text(f"Explore code · {len(calls)} operations")
     call = calls[0]
     title = Text(call.title)
+    label = {"blocked": "Blocked by hook", "processing_error": "Result processing failed", "denied": "Rejected"}.get(call.state)
+    if label:
+        title.append(" · " + label, style="red")
     if call.detail:
         title.append(" ")
         title.append(call.detail if call.name == "run_command" else " ".join(call.detail.split()))
@@ -403,6 +408,12 @@ def tool_details(calls: tuple[ToolBlock, ...]) -> RenderableType:
             lines.append(Text(f"{call.title} {call.detail}".rstrip(), style="bold"))
         if call.file_change is not None:
             lines.extend(change_lines(call.file_change))
+        data = call.presentation or {}
+        if data.get("source"):
+            lines.append(Text(f"Tool: {call.name} · {data['source']}", style="dim"))
+        if data.get("description"):
+            lines.append(Text(data["description"], style="dim"))
+        lines.extend(Text(note, style="dim") for note in presentation_notes(data))
         lines.extend((Text("Arguments", style="dim"), Text(call.arguments), Text("Output", style="dim")))
         if call.structured_output is not None:
             for field, value in call.structured_output.items():

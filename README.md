@@ -151,6 +151,8 @@ praxis --resume a3f21c8d              # Full session ID or unique prefix
 | Delete the current session | `/delete`, then confirm |
 | Inspect / stop a background command | `/commands` / `/stop-command ID` |
 | View MCP service status | `/mcp` |
+| View Python tool extensions | `/tools` |
+| View tool hooks and execution order | `/hooks` |
 | Disconnect the terminal | `/exit` or Ctrl+Q |
 
 Closing the terminal or desktop **does not cancel its tasks**. Use the stop control to cancel a turn. Cancellation waits for owned work to finish cleaning up, then leaves unconsumed input available to resume, edit, or delete.

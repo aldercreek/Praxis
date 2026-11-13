@@ -52,6 +52,7 @@ class HookEvent:
     original_arguments: dict
     arguments: dict
     approval_requested: bool = False
+    approval_hooks: tuple[str, ...] = ()
     original_result: HookResult | None = None
     result: HookResult | None = None
     duration_ms: float | None = None

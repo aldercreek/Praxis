@@ -67,7 +67,8 @@ class HookManager:
                     arguments = _json_copy(decision.arguments)
                 current = replace(current, arguments=arguments,
                                   requires_approval=current.requires_approval or decision.requires_approval,
-                                  approval_requested=current.approval_requested or decision.requires_approval)
+                                  approval_requested=current.approval_requested or decision.requires_approval,
+                                  approval_hooks=current.approval_hooks + ((label,) if decision.requires_approval else ()))
             except Exception as error:
                 # Do not echo arbitrary callback exceptions, which may contain payload secrets.
                 raise HookError(f"Hook {label} failed before execution ({type(error).__name__})") from error
@@ -92,12 +93,13 @@ class HookManager:
                     raise ValueError("model_content must be a list of objects")
                 data = _json_copy([update.structured_output, update.model_content])
                 output = replace(output, output=update.output, structured_output=data[0], model_content=data[1],
-                                 file_change=None)
+                                 file_change=None, presentation={**(output.presentation or {}), "result_processing": "modified"})
                 current = replace(current, result=HookResult(output.success, output.output,
                                                             output.structured_output, output.model_content))
             except Exception:
                 # Preserve execution status/callbacks, but never fall back to unfiltered content.
                 return replace(result, output=f"Hook {label} failed while processing the result. "
                                "Tool execution has already finished; do not retry automatically.",
-                               structured_output=None, model_content=None, file_change=None)
+                               structured_output=None, model_content=None, file_change=None,
+                               presentation={**(result.presentation or {}), "result_processing": "error"})
         return output

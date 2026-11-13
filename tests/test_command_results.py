@@ -68,7 +68,7 @@ def test_command_result_has_one_persisted_copy_and_restores_the_live_view(tmp_pa
                    if segment.text.strip() and segment.style and segment.style.color]
         assert len(colored) == 1 and colored[0].text.strip() == "•"
         assert colored[0].style.color.name == color
-        assert after.failed == (ending == "spawn_failed")
+        assert after.failed == (ending == "spawn_failed" or code not in (None, 0))
     finally:
         agent.close()
 

@@ -48,6 +48,7 @@ from praxis_agent.terminal.cells import (
 from praxis_agent.terminal.command_output import CommandOutputs
 from praxis_agent.terminal.context import capacity_footer
 from praxis_agent.tools.filesystem import FileChange
+from praxis_agent.tool_presentation import execution_status
 
 
 @dataclass(frozen=True)
@@ -62,10 +63,11 @@ class ToolBlock:
     detail: str = ""
     file_change: FileChange | None = None
     structured_output: dict[str, object] | None = None
+    presentation: dict | None = None
 
     @property
     def failed(self) -> bool:
-        return self.state in {"failed", "spawn_failed", "timed_out"}
+        return self.state in {"failed", "spawn_failed", "timed_out", "blocked", "processing_error", "denied"}
 
     @property
     def exploration(self) -> bool:
@@ -280,9 +282,13 @@ class AgentView:
             call = self._prepared_calls.get(call_id)
             arguments = call.arguments if call else {}
             title, detail = tool_description(name, arguments)
+            presentation = call.presentation if call else None
+            if presentation and presentation.get("source") != "builtin":
+                title = presentation.get("display_name") or title
             self._running_tools[call_id] = len(self.committed_blocks)
             self.committed_blocks.append(ToolBlock(
                 title, json.dumps(arguments, ensure_ascii=False, indent=2), "", "running", name, detail,
+                presentation=presentation,
             ))
         return self._running_tools[call_id]
 
@@ -310,8 +316,10 @@ class AgentView:
         command_status = command_result.get("status") if command_result is not None else None
         if isinstance(command_status, str) and command_status in {"running", "exited", "failed", "spawn_failed", "timed_out", "cancelled"}:
             state = "completed" if command_status == "exited" else command_status
+        state = execution_status(event.result.presentation) or state
         self.committed_blocks[index] = replace(
             block, output=event.result.output, state=state, structured_output=command_result,
+            presentation={**(block.presentation or {}), **(event.result.presentation or {})},
             file_change=event.result.file_change,
         )
         if not self._running_tools:

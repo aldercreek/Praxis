@@ -273,3 +273,28 @@ def test_restored_tool_keeps_denied_or_cancelled_result_status(output, expected)
     transcript.consume("ToolFinished", "turn", "main", {"call_id": "c", "result": {"success": False, "output": output}})
     assert transcript.messages[0]["status"] == expected
     assert transcript.messages[0]["tool_finished"] is True
+
+
+def test_extension_catalog_uses_loaded_registrations_and_keeps_disabled_entries(service):
+    from dataclasses import replace
+    from praxis_agent.config import ToolExtensionConfig
+    from praxis_agent.tool_extensions import ToolExtensions
+    from praxis_agent.hooks import HookManager
+    from praxis_agent.terminal.slash_commands import extensions_result
+    h = service()
+    path = h.path / "extensions.py"
+    path.write_text("from praxis_agent.sdk import tool, hook\n"
+                    "@tool(description='Lookup records')\ndef lookup(key: str): return key\n"
+                    "@hook('before_tool_call', tools=['custom__*'])\ndef policy(event): pass\n", encoding="utf-8")
+    configs = (ToolExtensionConfig("custom", path), ToolExtensionConfig("disabled", h.path / "absent.py", False))
+    h.manager.config = replace(h.manager.config, tool_extensions=configs, hook_extensions=configs)
+    h.manager.tool_extensions = ToolExtensions(configs)
+    h.manager.hooks = HookManager(configs)
+    path.unlink()  # Listing must not re-import the file or infer its registrations.
+    data = h.client().request("GET", "/api/extensions")
+    assert data["tools"][0]["name"] == "custom__lookup"
+    assert data["tools"][0]["source"] == "python:custom"
+    assert data["hooks"] == [dict(name="custom.policy", event="before_tool_call", tools=["custom__*"], order=1)]
+    assert sum(not item["enabled"] for item in data["extensions"]) == 2
+    assert "Lookup records" in extensions_result(data, "tools").plain
+    assert "before_tool_call" in extensions_result(data, "hooks").plain

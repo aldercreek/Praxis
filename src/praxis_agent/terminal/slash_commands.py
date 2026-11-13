@@ -10,6 +10,8 @@ COMMANDS = (
     ("/commands", "Command sessions"),
     ("/stop-command", "Stop a running command"),
     ("/mcp", "MCP tools and connections"),
+    ("/tools", "Python tool extensions"),
+    ("/hooks", "Tool hooks"),
     ("/observability", "Tracing status"),
     ("/delete", "Delete this chat"),
 )
@@ -114,4 +116,22 @@ def help_result():
         for key, description in entries:
             text.append(f"  {key:<18}", style="not bold")
             text.append(description + "\n", style="not bold #a0a0a0")
+    return text
+
+
+def extensions_result(catalog, kind):
+    text = Text("Python tools" if kind == "tools" else "Tool hooks", style="bold")
+    configs = [item for item in catalog["extensions"] if item["kind"] == kind]
+    if not configs:
+        text.append("\n\nNo extensions configured.", style="not bold dim")
+    for config in configs:
+        text.append(f"\n\n{config['id']} · {'Loaded' if config['enabled'] else 'Disabled'}", style="bold")
+        text.append("\n" + config["path"], style="not bold dim")
+        for item in catalog[kind]:
+            belongs = item.get("source") == "python:" + config["id"] if kind == "tools" else item["name"].startswith(config["id"] + ".")
+            if belongs:
+                text.append("\n  " + item["name"], style="not bold")
+                detail = item["description"] if kind == "tools" else f"#{item['order']} · {item['event']} · {', '.join(item['tools'])}"
+                text.append("\n  " + detail, style="not bold dim")
+    text.append("\n\nEdit praxis.yaml to configure extensions. Restart the Praxis service after changes; reconnecting does not reload them.", style="not bold dim")
     return text

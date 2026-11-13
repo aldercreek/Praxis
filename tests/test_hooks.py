@@ -72,6 +72,7 @@ def test_argument_chain_snapshots_and_final_approval(tmp_path):
     assert approvals == [{"value": 3}] and invoked == [3]
     prepared = next(e for e in events if isinstance(e, ToolCallPrepared))
     assert prepared.arguments == {"value": 3} and prepared.requires_approval
+    assert prepared.presentation["arguments_modified"]
     event = module.seen[0]
     assert (event.session_id, event.agent_id, event.turn_id, event.call_id) == ("session", "worker", "turn", "call")
     assert event.workspace == tmp_path and event.parameters["required"] == ["value"]
@@ -123,6 +124,8 @@ def test_result_chain_replaces_all_channels_and_keeps_execution_status(tmp_path,
     engine, events = executor(tmp_path, hooks, handler=handler)
     result = call(engine, {"value": 1})
     assert result.success is not fail
+    assert result.presentation["execution_status"] == ("failure" if fail else "success")
+    assert result.presentation["result_processing"] == "modified"
     assert result.output == "final" and result.structured_output == {"safe": True}
     assert result.model_content == [{"type": "text", "text": "final"}]
     assert module.seen[0].duration_ms >= 0
@@ -146,6 +149,8 @@ def test_result_hook_failure_hides_raw_content_and_live_command_output(tmp_path)
     assert result.success and "processing the result" in result.output
     assert "secret" not in result.output and result.structured_output is None and result.model_content is None
     assert "secret" not in repr(events)
+    assert result.presentation["execution_status"] == "success"
+    assert result.presentation["result_processing"] == "error"
 
 
 def test_nested_parallel_and_python_tools_share_hooks(tmp_path):
@@ -245,3 +250,27 @@ def test_terminal_renders_transformed_command_payload():
     console.print(ToolHeading((block,)))
     console.print(tool_preview((block,)))
     assert "safe" in capture.getvalue()
+
+
+@pytest.mark.parametrize("status,processing,blocked,expected", [
+    ("success", "modified", None, "completed"),
+    ("failure", "modified", None, "failed"),
+    ("success", "error", None, "processing_error"),
+    ("not_executed", "unchanged", "hook", "blocked"),
+    ("not_executed", "unchanged", "approval", "denied"),
+])
+def test_hook_display_metadata_survives_wire_and_replay(status, processing, blocked, expected):
+    from praxis_agent.service.events import display_event
+    from praxis_agent.service.transcript import Transcript
+    from praxis_agent.terminal.wire_events import decode_event
+    from praxis_agent.terminal.views import AgentView
+    metadata = dict(execution_status=status, result_processing=processing, blocked_by=blocked)
+    result = ToolResult(status == "success", "safe", {"status": "running", "exit_code": 1}, presentation=metadata)
+    event = ToolFinished("turn", "call", "run_command", result)
+    kind, turn, agent, data = display_event(event)
+    transcript = Transcript()
+    transcript.consume(kind, turn, agent, data)
+    view = AgentView("main", "Praxis")
+    view.consume(decode_event(dict(event=kind, turn_id=turn, agent_id=agent, data=data)))
+    assert transcript.messages[0]["status"] == view.committed_blocks[0].state == expected
+    assert transcript.messages[0]["presentation"] == metadata

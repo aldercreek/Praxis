@@ -57,6 +57,9 @@ def create_app(manager, *, token, instance_id, heartbeat=15.0, poll_interval=0.1
     async def mcp_servers(request):
         return JSONResponse(manager.mcp_status())
 
+    async def extensions(request):
+        return JSONResponse(manager.extension_status())
+
     async def observability(request):
         if request.method == "POST":
             manager.observability.start()
@@ -247,6 +250,7 @@ def create_app(manager, *, token, instance_id, heartbeat=15.0, poll_interval=0.1
     routes = [
         Route("/api/health", health),
         Route("/api/mcp/servers", mcp_servers),
+        Route("/api/extensions", extensions),
         Route("/api/observability", observability, methods=["GET", "POST"]),
         Route("/api/settings", configure, methods=["PUT"]),
         Route("/api/sessions", sessions, methods=["GET", "POST"]),

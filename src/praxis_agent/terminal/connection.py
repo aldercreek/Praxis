@@ -128,6 +128,9 @@ class TerminalSession:
             "commands"
         ]
 
+    def extension_status(self):
+        return self.client.request("GET", "/api/extensions")
+
     def mcp_servers(self):
         return self.client.request("GET", "/api/mcp/servers")["servers"]
 

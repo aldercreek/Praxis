@@ -306,7 +306,8 @@ class MCPConnections:
                 return "already_active"
             registry.register(Tool(name=record["alias"], description=record["description"],
                 parameters=json.loads(record["schema_json"]), handler=invoke, strict=False,
-                requires_approval=bool(record["approval"]), parallel_safe=False, programmatic=True))
+                requires_approval=bool(record["approval"]), parallel_safe=False, programmatic=True,
+                source=f"mcp:{record['server']}", display_name=f"{record['server']} · {record['original']}"))
             active_aliases.add(record["alias"])
             return "activated"
 

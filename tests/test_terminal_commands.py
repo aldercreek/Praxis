@@ -1,6 +1,7 @@
 import asyncio
 
 from praxis_agent.terminal.composer import Composer
+from praxis_agent.terminal.slash_commands import COMMANDS
 from support.terminal import FakeConnection
 
 
@@ -16,7 +17,7 @@ def test_command_navigation_completion_and_input_history(terminal_app):
             await pilot.press("up")
             await pilot.pause()
             assert editor.text == "/"
-            assert app._command_index == 7
+            assert app._command_index == len(COMMANDS) - 1
             content = app.query_one("#shortcut-content").renderable
             assert "› /delete         Delete this chat" in content.plain
             assert any(content.plain[s.start:s.end] == "         Delete this chat"
@@ -24,7 +25,7 @@ def test_command_navigation_completion_and_input_history(terminal_app):
             assert not any("reverse" in str(s.style) for s in content.spans)
             menu = app.query_one("#shortcuts")
             assert menu.scroll_y > 0
-            assert menu.scroll_y <= 7 < menu.scroll_y + menu.scrollable_content_region.height
+            assert menu.scroll_y <= len(COMMANDS) - 1 < menu.scroll_y + menu.scrollable_content_region.height
             await pilot.press("down", "down", "tab")
             await pilot.pause()
             assert editor.text == "/help"
@@ -32,6 +33,12 @@ def test_command_navigation_completion_and_input_history(terminal_app):
             await pilot.pause()
             assert editor.text == ""
             assert "Keyboard shortcuts" in str(app.store.get("main").committed_blocks[-1])
+            app.connection.extension_status = lambda: {"extensions": [], "tools": [], "hooks": []}
+            for command in ("/tools", "/hooks"):
+                editor.load_draft(command)
+                await pilot.press("enter")
+                await pilot.pause()
+                assert "No extensions configured." in str(app.store.get("main").committed_blocks[-1])
             editor.load_draft("/obs")
             await pilot.press("enter")
             await pilot.pause()

@@ -97,7 +97,8 @@ def _adapt(function, extension_id):
 
     return Tool(name, metadata.description, schema, invoke,
                 requires_approval=metadata.requires_approval, parallel_safe=metadata.parallel_safe,
-                strict=False, programmatic=metadata.programmatic)
+                strict=False, programmatic=metadata.programmatic,
+                source=f"python:{extension_id}", display_name=f"{extension_id} · {name.split('__', 1)[1].replace('_', ' ')}")
 
 
 class ToolExtensions:

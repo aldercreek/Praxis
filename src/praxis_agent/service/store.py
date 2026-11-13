@@ -8,7 +8,7 @@ from praxis_agent.sessions import SQLiteSessionStore
 
 from .errors import ServiceError
 from .schema import SCHEMA
-from .transcript import Transcript
+from .transcript import Transcript, tool_result_status
 
 
 def encode(value):
@@ -147,7 +147,7 @@ class ServiceStore:
             "ApprovalResolved": "pending" if data.get("approved") else "denied",
         }.get(event)
         if event == "ToolFinished":
-            status = "completed" if data["result"].get("success") else "failed"
+            status = tool_result_status(data["result"], tool_name=data.get("tool_name", ""))
         connection.execute(
             "INSERT INTO tool_calls(session_id, agent_id, call_id, turn_id, tool_name, arguments, status, result) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(session_id, agent_id, call_id) DO UPDATE SET "

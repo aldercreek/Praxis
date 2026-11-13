@@ -66,6 +66,7 @@ def display_event(event: AgentEvent) -> tuple[str, str, str, dict]:
             "tool_name": event.tool_name,
             "result": {
                 "success": event.result.success,
+                "presentation": json_value(event.result.presentation),
                 "output": event.result.output,
                 "structured_output": json_value(event.result.structured_output)
                 if event.tool_name in {"run_command", "wait_command"}

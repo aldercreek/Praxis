@@ -220,6 +220,8 @@ class Tool:
     parallel_safe: bool = False
     strict: bool = True
     programmatic: bool = False
+    source: str = "builtin"
+    display_name: str = ""
 
     def to_definition(self) -> dict[str, object]:
         """返回可以直接传给模型 API 的工具定义。"""
@@ -244,6 +246,7 @@ class ToolResult:
     # Model-facing content blocks; output remains the readable UI/error summary.
     model_content: list[dict[str, object]] | None = None
     on_saved: Callable[[], None] | None = field(default=None, repr=False, compare=False)
+    presentation: dict | None = None
 
 
 class ToolRegistry:

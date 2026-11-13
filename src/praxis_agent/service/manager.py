@@ -41,6 +41,17 @@ class SessionManager:
     def mcp_status(self):
         return self.mcp.snapshot() if self.mcp is not None else {"servers": []}
 
+    def extension_status(self):
+        tools = [dict(name=tool.name, display_name=tool.display_name, description=tool.description,
+                      source=tool.source, requires_approval=tool.requires_approval)
+                 for tool in self.tool_extensions.tools]
+        hooks = [dict(name=label, event=metadata.event, tools=list(metadata.tools), order=index + 1)
+                 for index, (label, metadata, _) in enumerate(self.hooks.handlers)]
+        return {"tools": tools, "hooks": hooks, "extensions": [
+            dict(id=config.id, path=str(config.path), enabled=config.enabled, kind=kind)
+            for kind, configs in (("tools", self.config.tool_extensions), ("hooks", self.config.hook_extensions))
+            for config in configs]}
+
     def configuration(self):
         return {
             "model": self.config.default_model,

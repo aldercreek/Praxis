@@ -96,7 +96,7 @@ class ToolCallExecutor:
         for index, call in enumerate(calls):
             prepared = self._prepare(turn_id, call)
             if isinstance(prepared, ToolResult):
-                results[index] = self._finish(turn_id, call, prepared)
+                results[index] = self._finish(turn_id, call, self._unexecuted(prepared))
             else:
                 ready.append((index, prepared))
         if ready:
@@ -144,7 +144,7 @@ class ToolCallExecutor:
         """执行模型请求的工具调用，并返回统一的工具结果。"""
         prepared = self._prepare(turn_id, function_call)
         if isinstance(prepared, ToolResult):
-            return self._finish(turn_id, function_call, prepared)
+            return self._finish(turn_id, function_call, self._unexecuted(prepared))
         self._start(turn_id, function_call)
         try:
             result = self._result(prepared)
@@ -190,14 +190,18 @@ class ToolCallExecutor:
         try:
             event, denied = self.hooks.before(event)
         except HookError as error:
-            return ToolResult(False, str(error))
-        if denied:
-            return ToolResult(False, denied)
+            return ToolResult(False, str(error), presentation={"execution_status": "not_executed", "blocked_by": "hook"})
         arguments = deepcopy(event.arguments)
         # An explicit hook approval requirement survives the normal bypass setting.
         requires_approval = event.approval_requested or (tool.requires_approval and not self.bypass_approvals)
+        presentation = dict(source=tool.source, display_name=tool.display_name or tool.name,
+                            description=tool.description, arguments_modified=event.arguments != event.original_arguments,
+                            approval_hooks=list(event.approval_hooks))
         self.publish_event(ToolCallPrepared(turn_id, function_call.call_id, function_call.name,
-                                            deepcopy(arguments), requires_approval))
+                                            deepcopy(arguments), bool(requires_approval and not denied), presentation))
+        if denied:
+            return ToolResult(False, denied, presentation={**presentation,
+                              "execution_status": "not_executed", "blocked_by": "hook"})
 
         def invoke_tool(name: str, values: dict) -> ToolResult:
             executor = replace(self, tool_registry=self.live_registry or self.tool_registry,
@@ -277,9 +281,32 @@ class ToolCallExecutor:
                 path = arguments.get("relative_path")
                 if isinstance(path, str):
                     self.context.run_state.record_changed_file(path)
+            status = "success" if result.success else "failure"
+            metadata = {**presentation, "execution_status": status, "result_processing": "unchanged"}
+            if function_call.name in {"run_command", "wait_command"}:
+                command_status = (result.structured_output or {}).get("status")
+                if command_status in {"running", "exited", "failed", "spawn_failed", "timed_out", "cancelled"}:
+                    metadata["command_status"] = command_status
+                metadata["command_exit_code"] = (result.structured_output or {}).get("exit_code")
+                metadata["command_session_id"] = (result.structured_output or {}).get("session_id")
+            if function_call.name == "run_code":
+                try:
+                    code_result = result.structured_output or json.loads(result.output)
+                except (ValueError, TypeError):
+                    code_result = {}
+                if isinstance(code_result, dict) and code_result.get("error_kind") == "cancelled":
+                    metadata["cancelled"] = True
+            if result.output.startswith("ExecutionStopped:"):
+                metadata["cancelled"] = True
+            result = replace(result, presentation=metadata)
             return self.hooks.after(event, result, (monotonic() - started) * 1000)
 
         return invoke
+
+    @staticmethod
+    def _unexecuted(result):
+        return result if result.presentation else replace(result, presentation={
+            "execution_status": "not_executed", "blocked_by": "invalid_arguments"})
 
     def _start(self, turn_id: str, function_call: FunctionCall) -> None:
         self.publish_event(
@@ -323,7 +350,7 @@ class ToolCallExecutor:
             message = (
                 "tool execution was declined by the user; do not retry"
             )
-        return ToolResult(False, message)
+        return ToolResult(False, message, presentation={"execution_status": "not_executed", "blocked_by": "approval"})
 
     def _finish(
         self,
