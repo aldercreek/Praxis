@@ -1,0 +1,55 @@
+examples/tool_extensions/release_tools.py
+  s_2c88c4f843faa2::t_13691e01e980c4 1-30
+docs/tool-extensions.md
+  s_2c88c4f843faa2::t_13691e01e980c4 1-75,79-104,107-139,155-156,159,173-202,205,208-211
+  s_2c88c4f843faa2::t_55c8b29c58005a 76-78
+src/praxis_agent/builtin_skills/python/SKILL.md
+  s_2c88c4f843faa2::t_78b99550f365a9 32-39
+examples/tool_extensions/verify.py
+  s_2c88c4f843faa2::t_13691e01e980c4 1-37
+src/praxis_agent/service/manager.py
+  s_2c88c4f843faa2::t_9beae16d5f4d6c 12,24,27-28,127-128,143
+src/praxis_agent/tool_extensions.py
+  s_2c88c4f843faa2::t_78b99550f365a9 94-95,137
+  s_2c88c4f843faa2::t_0d952e5fe3f850 1-16,22-60,62-73,87,89-90,96-98,100-102,104-136,138-164
+  s_2c88c4f843faa2::t_6817594fd8116e 88
+src/praxis_agent/config.py
+  s_2c88c4f843faa2::t_13691e01e980c4 5,204-205
+  s_2c88c4f843faa2::t_9beae16d5f4d6c 56-60,101-107,119,202-203,206-212,217
+docs/configuration.md
+  s_2c88c4f843faa2::t_13691e01e980c4 54-68
+docs/reference.md
+  s_2c88c4f843faa2::t_55c8b29c58005a 91-95
+  s_2c88c4f843faa2::t_78b99550f365a9 142
+tests/test_tool_extensions.py
+  s_2c88c4f843faa2::t_55c8b29c58005a 169-171,281-327
+  s_2c88c4f843faa2::t_792d409f8496ca 1-78,80-101,103-168,172-180,183-184,187-188,190,192-195,197-248,250-257,261-280,381-447
+  s_2c88c4f843faa2::t_78b99550f365a9 328-340,354-380
+  s_2c88c4f843faa2::t_6817594fd8116e 341-353
+src/praxis_agent/prompts.py
+  s_2c88c4f843faa2::t_78b99550f365a9 53
+src/praxis_agent/factory.py
+  s_2c88c4f843faa2::t_9beae16d5f4d6c 33,57,70,110-112,124,205
+src/praxis_agent/tools/code.py
+  s_2c88c4f843faa2::t_78b99550f365a9 259
+examples/tool_extensions/praxis.yaml
+  s_2c88c4f843faa2::t_13691e01e980c4 1-14
+src/praxis_agent/sdk.py
+  s_2c88c4f843faa2::t_0d952e5fe3f850 1-34
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.52-trip",
+  "base_commit_sha": "a634dbe7b35ae138bcfb813ced84a4b57e5ba8c4",
+  "prompts": {},
+  "sessions": {
+    "s_2c88c4f843faa2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1cfe3-6509-7450-85a1-69fac47a6027",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "aldercreek <57739268+aldercreek@users.noreply.github.com>"
+    }
+  }
+}
