@@ -1,5 +1,6 @@
 """Shared, screen-row-bounded previews for live and completed operations."""
 
+import json
 from dataclasses import dataclass
 
 from rich.text import Text
@@ -34,5 +35,8 @@ def output_lines(output: str | dict[str, object]) -> list[Text]:
     if isinstance(output, dict):
         heading = (f"Running in background · {output['session_id']}\n"
                    if output.get("status") == "running" and output.get("session_id") else "")
-        output = heading + "\n".join(output[field] for field in ("error", "stdout", "stderr") if output[field])
+        streams = [output.get(field) for field in ("error", "stdout", "stderr")]
+        output = (heading + "\n".join(value for value in streams if isinstance(value, str) and value)
+                  if any(isinstance(value, str) for value in streams)
+                  else json.dumps(output, ensure_ascii=False, indent=2))
     return [Text.from_ansi(line) for line in output.splitlines()]

@@ -73,3 +73,16 @@ A worker selects its explicit `spawn_agent.model`, then `subagents.model`, then 
 The service loads a validated snapshot and injects it into agents. Multiple sessions can use different model entries simultaneously. A file edit does not mutate an existing snapshot. Reload using `--config`, desktop Save settings, or `PUT /api/settings` with `config_path`; reload requires all sessions to be idle and disposes their clients. It does not modify process model environment variables. The settings API accepts only `config_path` and `bypass_approvals`; it no longer accepts inline model credentials or addresses.
 
 Existing history is not converted between protocols. Keep the protocol of a configuration key stable when restoring sessions. Use a new configuration key and new session to change protocols. Both clients and service must use protocol version 2; older running services must be stopped before starting this version.
+
+## Tool hooks
+
+Use `hook_extensions` to load local Python hooks for parameter normalization,
+approval policies and output filtering. Each entry has `id`, `path`, and optional
+`enabled` (default `true`). Paths are relative to the configuration file. Restart
+the service after changes. See [Tool hooks](tool-hooks.md) for the SDK and examples.
+
+```yaml
+hook_extensions:
+  - id: policy
+    path: ./extensions/policy.py
+```

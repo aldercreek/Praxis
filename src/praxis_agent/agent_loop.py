@@ -39,6 +39,9 @@ def run_model_loop(
 
     tool_executor = ToolCallExecutor(
         tool_registry=agent.tool_registry,
+        hooks=agent.hooks,
+        session_id=agent.hook_session_id or agent.session_id,
+        agent_id=agent.name,
         context=ToolContext(
             agent.workspace,
             run_state,

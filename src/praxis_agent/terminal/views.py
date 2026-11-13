@@ -302,11 +302,14 @@ class AgentView:
             except ValueError:
                 delivery = None  # A truncated result must still remain readable.
             if isinstance(delivery, dict):
-                failed = any(not item["accepted"] for item in delivery.get("results", []))
+                deliveries = delivery.get("results")
+                if isinstance(deliveries, list):
+                    failed = any(isinstance(item, dict) and item.get("accepted") is False for item in deliveries)
         state = "failed" if failed else "completed"
         command_result = event.result.structured_output if name in {"run_command", "wait_command"} else None
-        if command_result is not None:
-            state = "completed" if command_result["status"] == "exited" else command_result["status"]
+        command_status = command_result.get("status") if command_result is not None else None
+        if isinstance(command_status, str) and command_status in {"running", "exited", "failed", "spawn_failed", "timed_out", "cancelled"}:
+            state = "completed" if command_status == "exited" else command_status
         self.committed_blocks[index] = replace(
             block, output=event.result.output, state=state, structured_output=command_result,
             file_change=event.result.file_change,

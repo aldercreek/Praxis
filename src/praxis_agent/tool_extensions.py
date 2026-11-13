@@ -1,17 +1,12 @@
 """Explicit single-file extensions, loaded once and shared by service agents."""
 from __future__ import annotations
 
-import hashlib
-import importlib.util
 import inspect
 import json
-import os
 import re
-import sys
 import typing
 from copy import deepcopy
 from dataclasses import replace
-from threading import RLock
 from types import SimpleNamespace
 
 from pydantic import ConfigDict, TypeAdapter
@@ -19,10 +14,10 @@ from pydantic.json_schema import GenerateJsonSchema
 from pydantic_core import to_jsonable_python
 from typing_extensions import NotRequired, TypedDict
 
+from praxis_agent.extension_loading import extension_modules, marked_functions
 from praxis_agent.sdk import ToolMetadata, _METADATA_ATTRIBUTE
 from praxis_agent.tools.registry import Tool, ToolRegistry, ToolResult
 
-_IMPORT_LOCK = RLock()
 _NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]*\Z")
 
 
@@ -113,47 +108,15 @@ class ToolExtensions:
     """
 
     def __init__(self, configurations=()):
-        pending, added, names = [], [], set()
-        with _IMPORT_LOCK:
-            try:
-                for config in configurations:
-                    if not config.enabled:
-                        continue
-                    path = config.path
-                    label = f"extension {config.id} ({path})"
-                    if path.suffix.lower() != ".py" or not path.is_file():
-                        raise ValueError(f"{label}: expected an existing local .py file")
-                    module_name = "_praxis_extension_" + hashlib.sha256(os.path.normcase(str(path)).encode()).hexdigest()
-                    module = sys.modules.get(module_name)
-                    if module is None:
-                        spec = importlib.util.spec_from_file_location(module_name, path)
-                        if spec is None or spec.loader is None:
-                            raise ValueError(f"{label}: cannot create module loader")
-                        module = importlib.util.module_from_spec(spec)
-                        sys.modules[module_name] = module
-                        added.append((module_name, module))
-                        try:
-                            spec.loader.exec_module(module)
-                        except (Exception, SystemExit) as error:
-                            hint = (f" Install missing dependencies in the Praxis service Python environment ({sys.executable})."
-                                    if isinstance(error, ImportError) else "")
-                            raise ValueError(f"{label}: module load failed ({type(error).__name__}): {error}.{hint}") from error
-                    seen_functions = set()
-                    for function in vars(module).values():
-                        if (not inspect.isfunction(function) or function.__module__ != module_name
-                                or not hasattr(function, _METADATA_ATTRIBUTE) or id(function) in seen_functions):
-                            continue
-                        seen_functions.add(id(function))
-                        candidate = _adapt(function, config.id)
-                        if candidate.name in names:
-                            raise ValueError(f"{label}: duplicate tool name {candidate.name}")
-                        names.add(candidate.name)
-                        pending.append(candidate)
-            except BaseException:
-                for name, module in added:
-                    if sys.modules.get(name) is module:
-                        del sys.modules[name]
-                raise
+        pending, names = [], set()
+        with extension_modules(configurations) as modules:
+            for config, module in modules:
+                for function in marked_functions(module, _METADATA_ATTRIBUTE):
+                    candidate = _adapt(function, config.id)
+                    if candidate.name in names:
+                        raise ValueError(f"extension {config.id}: duplicate tool name {candidate.name}")
+                    names.add(candidate.name)
+                    pending.append(candidate)
         self.tools = tuple(pending)
 
     def register(self, registry: ToolRegistry):

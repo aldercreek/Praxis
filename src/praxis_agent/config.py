@@ -58,6 +58,11 @@ _SCHEMA = _object({
         "path": _TEXT,
         "enabled": {"type": "boolean"},
     }, ("id", "path"))},
+    "hook_extensions": {"type": "array", "items": _object({
+        "id": {"type": "string", "pattern": r"^[A-Za-z][A-Za-z0-9_-]{0,31}$"},
+        "path": _TEXT,
+        "enabled": {"type": "boolean"},
+    }, ("id", "path"))},
     "observability": _object({
         "enabled": {"type": "boolean"},
         "provider": {"type": "string", "pattern": r"^[A-Za-z0-9][A-Za-z0-9_.-]*$"},
@@ -117,6 +122,7 @@ class PraxisConfig:
     max_concurrent: int = 4
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
     tool_extensions: tuple[ToolExtensionConfig, ...] = ()
+    hook_extensions: tuple[ToolExtensionConfig, ...] = ()
 
     def resolve(self, name: str | None = None, *, compression=False) -> ModelConfig:
         name = (self.compression_model if compression else None) or name or self.default_model
@@ -199,19 +205,23 @@ def load_config(path: Path | str | None = None) -> PraxisConfig:
         if name is not None and not models[name].tool_calling:
             raise ValueError(f"{name}: agents require tool_calling")
     observability = data.get("observability", {})
-    extensions, extension_ids = [], set()
-    for item in data.get("tool_extensions", []):
-        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,31}", item["id"]):
-            raise ValueError("Invalid configuration at tool_extensions: invalid extension id")
-        if item["id"] in extension_ids:
-            raise ValueError(f"Duplicate tool extension id: {item['id']}")
-        extension_ids.add(item["id"])
-        extension_path = Path(item["path"]).expanduser()
-        if not extension_path.is_absolute():
-            extension_path = path.parent / extension_path
-        extensions.append(ToolExtensionConfig(item["id"], extension_path.resolve(), item.get("enabled", True)))
+    def extensions(key):
+        entries, identifiers = [], set()
+        for item in data.get(key, []):
+            if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,31}", item["id"]):
+                raise ValueError(f"Invalid configuration at {key}: invalid extension id")
+            if item["id"] in identifiers:
+                kind = "tool" if key == "tool_extensions" else "hook"
+                raise ValueError(f"Duplicate {kind} extension id: {item['id']}")
+            identifiers.add(item["id"])
+            extension_path = Path(item["path"]).expanduser()
+            if not extension_path.is_absolute():
+                extension_path = path.parent / extension_path
+            entries.append(ToolExtensionConfig(item["id"], extension_path.resolve(), item.get("enabled", True)))
+        return tuple(entries)
     return PraxisConfig(path, default, MappingProxyType(models), MappingProxyType(credentials),
                         compression.get("model"), MappingProxyType(compression.get("parameters", {})),
                         subagents.get("model"), subagents.get("max_concurrent", 4),
                         ObservabilityConfig(observability.get("provider"), observability.get("options", {}),
-                                            observability.get("enabled", True)), tuple(extensions))
+                                            observability.get("enabled", True)), extensions("tool_extensions"),
+                        extensions("hook_extensions"))

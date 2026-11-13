@@ -1,0 +1,15 @@
+models:
+  example:
+    protocol: responses
+    base_url: https://example.invalid/v1
+    model: offline-example
+    context_window: 128000
+    max_output_tokens: 8192
+observability:
+  enabled: false
+tool_extensions:
+  - id: release
+    path: ./release.py
+hook_extensions:
+  - id: release_policy
+    path: ./release.py

@@ -2,7 +2,9 @@ import json
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextvars import copy_context
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
+from copy import deepcopy
+from time import monotonic
 from uuid import uuid4
 
 from praxis_agent.config import DEFAULT_MAX_PARALLEL_TOOLS
@@ -15,6 +17,8 @@ from praxis_agent.events import (
     ToolOutputDelta,
     ToolStarted,
 )
+from praxis_agent.hooks import HookError, HookManager
+from praxis_agent.hook_types import HookEvent
 from praxis_agent.execution import current_run, run_operation
 from praxis_agent.model import FunctionCall
 from praxis_agent.tools import ToolContext, ToolRegistry, ToolResult
@@ -56,6 +60,10 @@ class ToolCallExecutor:
     max_parallel_tools: int = DEFAULT_MAX_PARALLEL_TOOLS
     check_execution: Callable[[], None] | None = None
     live_registry: ToolRegistry | None = None
+    hooks: HookManager = field(default_factory=HookManager)
+    session_id: str | None = None
+    agent_id: str = "Praxis"
+    parent_call_id: str | None = None
 
     def execute_many(
         self, turn_id: str, calls: Sequence[FunctionCall],
@@ -166,22 +174,34 @@ class ToolCallExecutor:
         except _InvalidToolArgumentsError as error:
             return self.tool_registry.argument_error(function_call.name, str(error))
 
-        requires_approval = (
-            not self.bypass_approvals
-            and self.tool_registry.requires_approval(function_call.name)
+        if self.context.programmatic_call and not self.tool_registry.allows_programmatic(function_call.name):
+            return ToolResult(False, f"Tool unavailable for programmatic calls: {function_call.name}")
+        tool = next((tool for tool in self.tool_registry.tools if tool.name == function_call.name), None)
+        if tool is None:
+            return self.tool_registry.argument_error(function_call.name, "unknown tool")
+        event = HookEvent(
+            event="before_tool_call", tool_name=tool.name, description=tool.description,
+            parameters=deepcopy(tool.parameters), requires_approval=tool.requires_approval,
+            session_id=self.session_id, agent_id=self.agent_id, turn_id=turn_id,
+            call_id=function_call.call_id, parent_call_id=self.parent_call_id,
+            workspace=self.context.workspace, programmatic_call=self.context.programmatic_call,
+            original_arguments=deepcopy(arguments), arguments=deepcopy(arguments),
         )
-        self.publish_event(
-            ToolCallPrepared(
-                turn_id,
-                function_call.call_id,
-                function_call.name,
-                dict(arguments),
-                requires_approval,
-            )
-        )
+        try:
+            event, denied = self.hooks.before(event)
+        except HookError as error:
+            return ToolResult(False, str(error))
+        if denied:
+            return ToolResult(False, denied)
+        arguments = deepcopy(event.arguments)
+        # An explicit hook approval requirement survives the normal bypass setting.
+        requires_approval = event.approval_requested or (tool.requires_approval and not self.bypass_approvals)
+        self.publish_event(ToolCallPrepared(turn_id, function_call.call_id, function_call.name,
+                                            deepcopy(arguments), requires_approval))
 
         def invoke_tool(name: str, values: dict) -> ToolResult:
-            executor = replace(self, tool_registry=self.live_registry or self.tool_registry)
+            executor = replace(self, tool_registry=self.live_registry or self.tool_registry,
+                               parent_call_id=function_call.call_id)
             return executor.execute(turn_id, FunctionCall(
                 f"{function_call.call_id}:{uuid4().hex}", name, json.dumps(values)))
 
@@ -189,7 +209,7 @@ class ToolCallExecutor:
             registry = self.live_registry or self.tool_registry
             if not registry.allows_programmatic(name):
                 return ToolResult(False, f"Tool unavailable for programmatic calls: {name}")
-            executor = replace(self, tool_registry=registry,
+            executor = replace(self, tool_registry=registry, parent_call_id=function_call.call_id,
                                context=replace(self.context, programmatic_call=True))
             return executor.execute(turn_id, FunctionCall(
                 f"{function_call.call_id}:{uuid4().hex}", name, json.dumps(values)))
@@ -205,7 +225,7 @@ class ToolCallExecutor:
                     self.check_execution()
 
             executor = replace(
-                self, tool_registry=registry, live_registry=None,
+                self, tool_registry=registry, live_registry=None, parent_call_id=function_call.call_id,
                 context=replace(self.context, programmatic_call=True, parallel_tool_call=True),
                 max_parallel_tools=max_workers, check_execution=check,
             )
@@ -233,26 +253,31 @@ class ToolCallExecutor:
                           invoke_programmatic_tool=invoke_programmatic_tool,
                           invoke_parallel_tools=invoke_parallel_tools,
                           check_execution=self.check_execution,
-                          on_command_output=lambda stream, text: self.publish_event(ToolOutputDelta(
+                          on_command_output=(None if self.hooks.handles_results(function_call.name) else
+                                             lambda stream, text: self.publish_event(ToolOutputDelta(
                               turn_id, function_call.call_id, stream, text,
                               command=arguments.get("command") or arguments.get("session_id") or " ".join(str(part) for part in arguments.get("argv", [])),
-                          )))
-        if context.programmatic_call and not self.tool_registry.allows_programmatic(function_call.name):
-            return ToolResult(False, f"Tool unavailable for programmatic calls: {function_call.name}")
+                          ))))
         prepared = self.tool_registry.prepare(function_call.name, arguments, context=context)
         if isinstance(prepared, ToolResult):
             return prepared
         if requires_approval and not self._request_approval(
             turn_id,
             function_call,
-            arguments,
+            deepcopy(arguments),
         ):
             return self._approval_failure()
         def invoke() -> str:
             # A parallel handler may have waited for a slot since preparation.
             if self.check_execution is not None:
                 self.check_execution()
-            return run_operation(function_call.name, lambda handle: prepared())
+            started = monotonic()
+            result = self._result(lambda: run_operation(function_call.name, lambda handle: prepared()))
+            if result.success and function_call.name in {"write_file", "edit_file"}:
+                path = arguments.get("relative_path")
+                if isinstance(path, str):
+                    self.context.run_state.record_changed_file(path)
+            return self.hooks.after(event, result, (monotonic() - started) * 1000)
 
         return invoke
 
@@ -307,10 +332,6 @@ class ToolCallExecutor:
         result: ToolResult,
     ) -> ToolResult:
         """发布工具调用的最终事件，并原样返回结果。"""
-        if result.success and function_call.name in {"write_file", "edit_file"}:
-            path = json.loads(function_call.arguments).get("relative_path")
-            if isinstance(path, str):
-                self.context.run_state.record_changed_file(path)
         self.publish_event(
             ToolFinished(
                 turn_id,

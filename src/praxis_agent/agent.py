@@ -10,6 +10,7 @@ from queue import Empty, SimpleQueue
 from threading import Lock
 from typing import TYPE_CHECKING
 
+from praxis_agent.hooks import HookManager
 from praxis_agent.config import DEFAULT_MAX_PARALLEL_TOOLS, ModelConfig
 from praxis_agent.context import (
     ContextManager,
@@ -61,6 +62,8 @@ class Agent:
     tool_registry: ToolRegistry
     workspace: Path
     name: str = "Praxis"
+    hooks: HookManager = field(default_factory=HookManager)
+    hook_session_id: str | None = None
     event_sink: EventSink | None = None
     model_config: ModelConfig | None = None
     approve_tool_call: ToolApprovalHandler | None = None

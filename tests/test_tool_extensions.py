@@ -404,13 +404,16 @@ def test_service_shares_loaded_tools_across_sessions_and_workers(tmp_path, model
     marker = tmp_path / "imports.txt"
     source = extension(tmp_path, f'''
         from pathlib import Path
-        from praxis_agent.sdk import tool
+        from praxis_agent.sdk import tool, hook
+        @hook("before_tool_call")
+        def observe(event): pass
         with Path({str(marker)!r}).open("a") as file: file.write("imported\\n")
         @tool(description="local")
         def query(value: str = "ok"): return value
     ''')
     config = yaml.safe_load(model_configuration_file.read_text())
     config["tool_extensions"] = [{"id": source.id, "path": str(source.path)}]
+    config["hook_extensions"] = [{"id": source.id, "path": str(source.path)}]
     model_configuration_file.write_text(yaml.safe_dump(config))
     seen = []
     class Client:
@@ -430,6 +433,8 @@ def test_service_shares_loaded_tools_across_sessions_and_workers(tmp_path, model
         assert marker.read_text() == "imported\n"  # eager service startup
         for _ in range(2):
             agents.append(manager.factory(tmp_path, session_database_path=tmp_path / "agents.sqlite"))
+        assert agents[0].hooks is agents[1].hooks is manager.hooks
+        assert len(manager.hooks.handlers) == 1
         assert "sample__query" in agents[0].tool_registry.names
         assert agents[0].tool_registry is not agents[1].tool_registry
         agents[0].tool_registry.unregister("sample__query")
@@ -438,6 +443,8 @@ def test_service_shares_loaded_tools_across_sessions_and_workers(tmp_path, model
         spawned = runtime.spawn("done", working_directory=str(tmp_path))
         with runtime.condition:
             assert runtime.condition.wait_for(lambda: runtime.handles[spawned["agent_id"]].status == AgentStatus.IDLE, timeout=10)
+        assert runtime.handles[spawned["agent_id"]].agent.hooks is manager.hooks
+        assert runtime.handles[spawned["agent_id"]].agent.hook_session_id == agents[1].session_id
         assert any(any(item["name"] == "sample__query" for item in tools) for tools in seen)
         manager.configure({"config_path": str(model_configuration_file)})
         assert marker.read_text() == "imported\n"

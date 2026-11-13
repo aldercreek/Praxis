@@ -30,6 +30,7 @@ from praxis_agent.multi_agent.tools import (
 from praxis_agent.prompts import build_instructions
 from praxis_agent.runtime import collect_runtime_context
 from praxis_agent.skills import create_skill_tool, discover_skills
+from praxis_agent.hooks import HookManager
 from praxis_agent.tool_extensions import ToolExtensions
 from praxis_agent.tool_execution import (
     ToolApprovalHandler,
@@ -55,6 +56,7 @@ def create_default_agent(
     configuration: PraxisConfig | None = None,
     observability: Observability | None = None,
     tool_extensions: ToolExtensions | None = None,
+    hooks: HookManager | None = None,
     model: str | None = None,
 ) -> Agent:
     """使用文件配置快照和内置工具创建默认 Agent。"""
@@ -68,6 +70,7 @@ def create_default_agent(
 
     configuration = configuration or load_config()
     extensions = tool_extensions if tool_extensions is not None else ToolExtensions(configuration.tool_extensions)
+    hooks = hooks if hooks is not None else HookManager(configuration.hook_extensions)
     model_name = model or configuration.default_model
     collaboration_config = MultiAgentConfig(configuration.max_concurrent) if enable_multi_agent else None
     runtime_context = collect_runtime_context(workspace)
@@ -119,6 +122,7 @@ def create_default_agent(
         execution_control=control,
     )
     agent = Agent(
+        hooks=hooks,
         model_client=model_client,
         model_config=config,
         tool_registry=registry,
@@ -222,6 +226,8 @@ def create_default_agent(
             execution_control=control,
         )
         return Agent(
+            hooks=hooks,
+            hook_session_id=agent.session_id,
             model_client=client,
             model_config=worker_config,
             tool_registry=registry,

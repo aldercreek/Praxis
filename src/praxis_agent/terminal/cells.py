@@ -253,8 +253,8 @@ def tool_description(name: str, arguments: Mapping[str, object]) -> tuple[str, s
 def _tool_marker_style(calls: tuple[ToolBlock, ...]) -> str:
     failed = any(call.failed or (
         call.structured_output is not None
-        and call.structured_output["status"] == "exited"
-        and call.structured_output["exit_code"] != 0
+        and call.structured_output.get("status") == "exited"
+        and call.structured_output.get("exit_code") not in (None, 0)
     ) for call in calls)
     unfinished = any(call.state in {"running", "cancelled"} for call in calls)
     return "not dim " + ("red" if failed else "#a0a0a0" if unfinished else "green")
@@ -370,7 +370,10 @@ def _operation_summary(call: ToolBlock) -> list[Text] | None:
             lines.append(Text(f"{count} unread collaboration message{'' if count == 1 else 's'}; Ctrl+T for details"))
         return lines
     if call.name == "send_messages":
-        return [Text(str(item.get("error")), style="red") for item in result.get("results", []) if item.get("error")]
+        deliveries = result.get("results")
+        if not isinstance(deliveries, list) or any(not isinstance(item, dict) for item in deliveries):
+            return None
+        return [Text(str(item.get("error")), style="red") for item in deliveries if item.get("error")]
     return []
 
 
